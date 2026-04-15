@@ -125,6 +125,25 @@ That means the same image tag works on standard x86_64 machines and ARM64 device
 3. Enter a license key or skip for demo mode
 4. Customize your office, add agents, and watch them come to life
 
+## Remote Access and Security
+
+**Recommended remote access: use [Tailscale](https://tailscale.com/).**
+
+Virtual Office is a control surface for your local OpenClaw instance. If you want to reach it away from home, the safest default is to keep it on your private machine or LAN and access it over a private tailnet such as Tailscale.
+
+### Recommended setup
+- Keep Virtual Office bound to your local machine, LAN, or private tailnet
+- Use Tailscale to reach the host remotely instead of opening router ports
+- Keep your OpenClaw gateway and Virtual Office behind trusted access controls
+- Use strong device/account security on the machines that can reach your tailnet
+
+### Warning
+- **Do not expose Virtual Office directly to the public internet unless you fully understand and accept the security risk**
+- Avoid simple port forwarding for ports `8090`, `8091`, or your OpenClaw gateway
+- If someone can reach your Virtual Office deployment, they may be able to interact with a live control surface for your OpenClaw agents
+
+This project is designed first for self-hosted local/private-network use. You are responsible for securing any remote deployment.
+
 ## Modes
 
 ### Free Demo
