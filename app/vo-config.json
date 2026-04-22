@@ -35,6 +35,7 @@
     "viewerUrl": null
   },
   "sms": {
+    "ownerAgentId": null,
     "agentId": null,
     "twilioAccountSid": null,
     "twilioAuthToken": null,

@@ -25,6 +25,7 @@ import signal
 import subprocess
 import time
 import gateway_presence
+from zoneinfo import ZoneInfo
 
 
 # ─── CONFIGURATION ───────────────────────────────────────────────
@@ -133,7 +134,8 @@ def _load_vo_config():
             "location": _env_or("VO_WEATHER_LOCATION", weather_cfg.get("location")),
         },
         "sms": {
-            "agentId": _env_or("VO_SMS_AGENT_ID", sms_cfg.get("agentId")),
+            "ownerAgentId": _env_or("VO_SMS_OWNER_AGENT_ID", _env_or("VO_SMS_AGENT_ID", sms_cfg.get("ownerAgentId") or sms_cfg.get("agentId"))),
+            "agentId": _env_or("VO_SMS_OWNER_AGENT_ID", _env_or("VO_SMS_AGENT_ID", sms_cfg.get("ownerAgentId") or sms_cfg.get("agentId"))),
             "twilioAccountSid": _env_or("VO_TWILIO_ACCOUNT_SID", sms_cfg.get("twilioAccountSid")),
             "twilioAuthToken": _env_or("VO_TWILIO_AUTH_TOKEN", sms_cfg.get("twilioAuthToken")),
             "fromNumber": _env_or("VO_TWILIO_FROM_NUMBER", sms_cfg.get("fromNumber")),
@@ -141,6 +143,11 @@ def _load_vo_config():
     }
 
 VO_CONFIG = _load_vo_config()
+
+try:
+    SMS_DEFAULT_TZ = ZoneInfo(os.environ.get("VO_SMS_TIMEZONE") or os.environ.get("TZ") or "America/New_York")
+except Exception:
+    SMS_DEFAULT_TZ = timezone.utc
 
 PORT = VO_CONFIG["office"]["port"]
 WS_PORT = VO_CONFIG["office"]["wsPort"]
@@ -4223,6 +4230,9 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
         super().__init__(*args, directory=APP_DIR, **kwargs)
 
     def do_GET(self):
+        parsed_url = urllib.parse.urlparse(self.path)
+        request_path = parsed_url.path
+        query_params = urllib.parse.parse_qs(parsed_url.query)
         # Setup wizard page
         if self.path == "/setup":
             setup_path = os.path.join(os.path.dirname(__file__), "setup.html")
@@ -4585,7 +4595,7 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             bio = self._read_agent_bio(agent_key)
             self.wfile.write(json.dumps(bio).encode())
-        elif self.path == "/sms-status":
+        elif request_path == "/sms-status":
             # SMS feature health/config check
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -4593,31 +4603,52 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             sms_cfg = VO_CONFIG.get("sms", {})
             enabled = VO_CONFIG.get("features", {}).get("smsPanel", False) and check_feature("smsPanel")
+            owner_agent = self._get_sms_owner_agent_info()
             self.wfile.write(json.dumps({
                 "enabled": enabled,
-                "agentId": sms_cfg.get("agentId"),
+                "agentId": owner_agent.get("id"),
+                "ownerAgentId": owner_agent.get("id"),
+                "ownerAgent": owner_agent,
                 "hasCredentials": bool(sms_cfg.get("twilioAccountSid") and sms_cfg.get("twilioAuthToken") and sms_cfg.get("fromNumber")),
             }).encode())
-        elif self.path == "/sms-log":
+        elif request_path == "/sms-log":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             sms_log = self._get_sms_log()
             self.wfile.write(json.dumps(sms_log).encode())
-        elif self.path == "/sms-mode":
+        elif request_path == "/sms-threads":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
+            limit = query_params.get("limit", ["200"])[0]
             try:
-                mode_path = os.path.join(STATUS_DIR, "sms-mode.json")
-                with open(mode_path) as f:
-                    mode = json.load(f)
+                limit = max(1, min(1000, int(limit)))
             except Exception:
-                mode = {"active": "agent"}
+                limit = 200
+            self.wfile.write(json.dumps(self._get_sms_threads(limit=limit)).encode())
+        elif request_path == "/sms-thread":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            phone = (query_params.get("phone", [""])[0] or "").strip()
+            limit = query_params.get("limit", ["250"])[0]
+            try:
+                limit = max(1, min(1000, int(limit)))
+            except Exception:
+                limit = 250
+            self.wfile.write(json.dumps(self._get_sms_thread(phone, limit=limit)).encode())
+        elif request_path == "/sms-mode":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            mode = self._read_global_sms_mode()
             self.wfile.write(json.dumps(mode).encode())
-        elif self.path == "/sms-contacts":
+        elif request_path == "/sms-contacts":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
@@ -5895,6 +5926,8 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        parsed_url = urllib.parse.urlparse(self.path)
+        request_path = parsed_url.path
         # --- SETUP WIZARD ---
         if self.path == "/setup/save":
             length = int(self.headers.get('Content-Length', 0))
@@ -6188,24 +6221,38 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(b'{"ok":true}')
-        elif self.path == "/sms-mode":
+        elif request_path == "/sms-thread-mode":
+            length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            phone = self._normalize_sms_phone(body.get("phone", ""))
+            mode = body.get("active", "agent")
+            if mode not in ("user", "agent"):
+                mode = "agent"
+            if not phone:
+                result = {"ok": False, "error": "Missing phone"}
+            else:
+                result = self._set_sms_thread_mode(phone, mode)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode())
+        elif request_path == "/sms-mode":
             length = int(self.headers.get('Content-Length', 0))
             body = json.loads(self.rfile.read(length)) if length else {}
             mode = body.get("active", "agent")
             if mode not in ("user", "agent"):
                 mode = "agent"
-            mode_path = os.path.join(STATUS_DIR, "sms-mode.json")
-            with open(mode_path, "w") as f:
-                json.dump({"active": mode}, f)
+            self._write_global_sms_mode(mode)
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(json.dumps({"ok": True, "active": mode}).encode())
-        elif self.path == "/sms-send":
+        elif request_path == "/sms-send":
             length = int(self.headers.get('Content-Length', 0))
             body = json.loads(self.rfile.read(length)) if length else {}
-            result = self._send_sms_intervention(body.get("to", ""), body.get("body", ""), body.get("name", ""))
+            result = self._send_sms_intervention(body.get("to", ""), body.get("body", ""), body.get("name", ""), body.get("sender", "user"))
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
@@ -6481,69 +6528,395 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             except Exception as e:
                 return {"ok": False, "gateway": "error", "error": str(e)[:200]}
 
-    def _sms_data_dir(self):
+    def _sms_owner_agent_id(self):
+        sms_cfg = VO_CONFIG.get("sms", {}) or {}
+        owner_id = (sms_cfg.get("ownerAgentId") or sms_cfg.get("agentId") or "").strip()
+        return owner_id or None
+
+    def _get_sms_owner_agent_info(self):
+        owner_id = self._sms_owner_agent_id()
+        info = {"id": owner_id, "name": owner_id or "Unassigned", "emoji": "🤖"}
+        if not owner_id:
+            return info
+        try:
+            refresh_agent_maps()
+            for agent in get_roster():
+                if agent.get("id") == owner_id or agent.get("statusKey") == owner_id:
+                    return {
+                        "id": agent.get("id") or owner_id,
+                        "statusKey": agent.get("statusKey") or owner_id,
+                        "name": agent.get("name") or owner_id,
+                        "emoji": agent.get("emoji") or "🤖",
+                        "role": agent.get("role") or "",
+                    }
+        except Exception:
+            pass
+        return info
+
+    def _normalize_sms_phone(self, phone):
+        if not phone:
+            return ""
+        phone = str(phone).strip()
+        phone = re.sub(r"[\s\-()]+", "", phone)
+        if phone.startswith("00"):
+            phone = "+" + phone[2:]
+        if phone.startswith("+"):
+            return phone
+        if phone.isdigit():
+            if len(phone) == 10:
+                return "+1" + phone
+            if len(phone) == 11 and phone.startswith("1"):
+                return "+" + phone
+        return phone
+
+    def _sms_primary_data_dir(self):
+        owner_id = self._sms_owner_agent_id()
+        if owner_id:
+            candidate = os.path.join(WORKSPACE_BASE, get_agent_workspace_dir(WORKSPACE_BASE, owner_id))
+            if os.path.isdir(candidate):
+                return candidate
         return STATUS_DIR
 
-    def _get_sms_log(self, limit=100):
-        log_path = os.path.join(self._sms_data_dir(), "sms-log.jsonl")
+    def _sms_data_dirs(self):
+        dirs = []
+        for candidate in [self._sms_primary_data_dir(), STATUS_DIR]:
+            if candidate and candidate not in dirs and os.path.isdir(candidate):
+                dirs.append(candidate)
+        if not dirs:
+            dirs.append(STATUS_DIR)
+        return dirs
+
+    def _sms_log_paths(self):
+        paths = []
+        for base_dir in self._sms_data_dirs():
+            for rel_path in ["sms-log.jsonl", os.path.join("sms-archive", "sms-log-all.jsonl")]:
+                full_path = os.path.join(base_dir, rel_path)
+                if os.path.isfile(full_path) and full_path not in paths:
+                    paths.append(full_path)
+        return paths
+
+    def _sms_contacts_paths(self):
+        paths = []
+        for base_dir in self._sms_data_dirs():
+            for name in ["contacts.json", "sms-contacts.json"]:
+                full_path = os.path.join(base_dir, name)
+                if os.path.isfile(full_path) and full_path not in paths:
+                    paths.append(full_path)
+        return paths
+
+    def _sms_primary_log_path(self):
+        primary_dir = self._sms_primary_data_dir()
+        os.makedirs(primary_dir, exist_ok=True)
+        return os.path.join(primary_dir, "sms-log.jsonl")
+
+    def _sms_primary_contacts_path(self):
+        primary_dir = self._sms_primary_data_dir()
+        os.makedirs(primary_dir, exist_ok=True)
+        preferred = "contacts.json" if primary_dir != STATUS_DIR else "sms-contacts.json"
+        return os.path.join(primary_dir, preferred)
+
+    def _sms_thread_modes_path(self):
+        return os.path.join(STATUS_DIR, "sms-thread-modes.json")
+
+    def _read_global_sms_mode(self):
         try:
-            with open(log_path) as f:
-                lines = f.readlines()
-            entries = []
-            for line in lines[-limit:]:
-                try:
-                    entries.append(json.loads(line.strip()))
-                except Exception:
-                    pass
-            return {"ok": True, "messages": entries}
-        except FileNotFoundError:
-            return {"ok": True, "messages": []}
+            with open(os.path.join(STATUS_DIR, "sms-mode.json")) as f:
+                mode = json.load(f)
+            active = mode.get("active", "agent")
+            if active not in ("agent", "user"):
+                active = "agent"
+            return {"active": active}
+        except Exception:
+            return {"active": "agent"}
+
+    def _write_global_sms_mode(self, mode):
+        os.makedirs(STATUS_DIR, exist_ok=True)
+        with open(os.path.join(STATUS_DIR, "sms-mode.json"), "w") as f:
+            json.dump({"active": mode}, f)
+
+    def _read_sms_thread_modes(self):
+        try:
+            with open(self._sms_thread_modes_path()) as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return {}
+            cleaned = {}
+            for phone, mode in data.items():
+                normalized_phone = self._normalize_sms_phone(phone)
+                if normalized_phone and mode in ("agent", "user"):
+                    cleaned[normalized_phone] = mode
+            return cleaned
+        except Exception:
+            return {}
+
+    def _set_sms_thread_mode(self, phone, mode):
+        phone = self._normalize_sms_phone(phone)
+        if not phone:
+            return {"ok": False, "error": "Missing phone"}
+        modes = self._read_sms_thread_modes()
+        modes[phone] = mode if mode in ("agent", "user") else "agent"
+        os.makedirs(STATUS_DIR, exist_ok=True)
+        with open(self._sms_thread_modes_path(), "w") as f:
+            json.dump(modes, f, indent=2, sort_keys=True)
+        return {"ok": True, "phone": phone, "active": modes[phone]}
+
+    def _sms_mode_for_phone(self, phone):
+        phone = self._normalize_sms_phone(phone)
+        modes = self._read_sms_thread_modes()
+        if phone and phone in modes:
+            return modes[phone]
+        return self._read_global_sms_mode().get("active", "agent")
+
+    def _normalize_sms_timestamp(self, entry):
+        timestamp = entry.get("timestamp")
+        if not timestamp:
+            return timestamp
+        try:
+            dt = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+        except Exception:
+            return timestamp
+        try:
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=SMS_DEFAULT_TZ).isoformat()
+            return dt.astimezone(SMS_DEFAULT_TZ).isoformat()
+        except Exception:
+            return timestamp
+
+    def _sms_sort_value(self, timestamp):
+        if not timestamp:
+            return 0.0
+        try:
+            dt = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+            if dt.tzinfo is not None:
+                return dt.timestamp()
+            return dt.timestamp()
+        except Exception:
+            return 0.0
+
+    def _load_sms_contacts_map(self):
+        contacts = {}
+        for path in self._sms_contacts_paths():
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+                if not isinstance(data, dict):
+                    continue
+                for phone, info in data.items():
+                    normalized_phone = self._normalize_sms_phone(phone)
+                    if not normalized_phone:
+                        continue
+                    info = info if isinstance(info, dict) else {}
+                    existing = contacts.get(normalized_phone, {})
+                    merged = dict(existing)
+                    merged.update(info)
+                    merged["name"] = merged.get("name") or existing.get("name") or "Unknown"
+                    contacts[normalized_phone] = merged
+            except Exception:
+                pass
+        return contacts
+
+    def _read_sms_entries(self, limit=None, phone=None):
+        contacts = self._load_sms_contacts_map()
+        normalized_phone = self._normalize_sms_phone(phone) if phone else ""
+        entries = []
+        seen = set()
+        for path in self._sms_log_paths():
+            try:
+                with open(path) as f:
+                    for raw_line in f:
+                        raw_line = raw_line.strip()
+                        if not raw_line:
+                            continue
+                        try:
+                            entry = json.loads(raw_line)
+                        except Exception:
+                            continue
+                        entry_phone = self._normalize_sms_phone(entry.get("phone", ""))
+                        if normalized_phone and entry_phone != normalized_phone:
+                            continue
+                        entry["phone"] = entry_phone or entry.get("phone", "")
+                        if entry_phone:
+                            contact_name = contacts.get(entry_phone, {}).get("name")
+                            if contact_name and (not entry.get("name") or entry.get("name") == "Unknown"):
+                                entry["name"] = contact_name
+                        entry["timestamp"] = self._normalize_sms_timestamp(entry)
+                        key = (
+                            entry.get("sid") or "",
+                            entry.get("type") or "",
+                            entry.get("phone") or "",
+                            entry.get("timestamp") or "",
+                            entry.get("body") or "",
+                        )
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        entries.append(entry)
+            except FileNotFoundError:
+                continue
+            except Exception:
+                continue
+        entries.sort(key=lambda item: self._sms_sort_value(item.get("timestamp")))
+        if limit and len(entries) > limit:
+            entries = entries[-limit:]
+        return entries
+
+    def _build_sms_threads(self, limit=200):
+        contacts = self._load_sms_contacts_map()
+        threads = {}
+        for message in self._read_sms_entries(limit=None):
+            if message.get("type") == "blocked":
+                continue
+            phone = self._normalize_sms_phone(message.get("phone", ""))
+            if not phone or phone == "Unknown":
+                continue
+            thread = threads.setdefault(phone, {
+                "phone": phone,
+                "name": contacts.get(phone, {}).get("name") or message.get("name") or "Unknown",
+                "lastMessage": "",
+                "lastTimestamp": "",
+                "lastType": "",
+                "messageCount": 0,
+            })
+            thread["messageCount"] += 1
+            thread["lastMessage"] = message.get("body", "")
+            thread["lastTimestamp"] = message.get("timestamp", "")
+            thread["lastType"] = message.get("type", "")
+            if (not thread.get("name") or thread.get("name") == "Unknown") and message.get("name"):
+                thread["name"] = message.get("name")
+
+        for phone, info in contacts.items():
+            threads.setdefault(phone, {
+                "phone": phone,
+                "name": (info or {}).get("name") or "Unknown",
+                "lastMessage": "",
+                "lastTimestamp": "",
+                "lastType": "",
+                "messageCount": 0,
+            })
+
+        results = []
+        for phone, thread in threads.items():
+            thread["activeMode"] = self._sms_mode_for_phone(phone)
+            thread["displayName"] = thread.get("name") or phone
+            results.append(thread)
+
+        results.sort(key=lambda item: (
+            0 if item.get("lastTimestamp") else 1,
+            -self._sms_sort_value(item.get("lastTimestamp")),
+            (item.get("displayName") or item.get("phone") or "").lower(),
+        ))
+        if limit and len(results) > limit:
+            results = results[:limit]
+        return results
+
+    def _get_sms_log(self, limit=100):
+        try:
+            return {"ok": True, "messages": self._read_sms_entries(limit=limit)}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
     def _get_sms_contacts(self):
-        contacts_path = os.path.join(self._sms_data_dir(), "sms-contacts.json")
         try:
-            with open(contacts_path) as f:
-                return {"ok": True, "contacts": json.load(f)}
-        except FileNotFoundError:
-            return {"ok": True, "contacts": {}}
+            return {"ok": True, "contacts": self._load_sms_contacts_map()}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def _send_sms_intervention(self, to, body, name=""):
+    def _get_sms_threads(self, limit=200):
+        try:
+            return {
+                "ok": True,
+                "threads": self._build_sms_threads(limit=limit),
+                "ownerAgent": self._get_sms_owner_agent_info(),
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e), "threads": []}
+
+    def _get_sms_thread(self, phone, limit=250):
+        phone = self._normalize_sms_phone(phone)
+        if not phone:
+            return {"ok": False, "error": "Missing phone", "messages": []}
+        contacts = self._load_sms_contacts_map()
+        messages = self._read_sms_entries(limit=limit, phone=phone)
+        thread = {
+            "phone": phone,
+            "name": contacts.get(phone, {}).get("name") or (messages[-1].get("name") if messages else "Unknown") or "Unknown",
+            "activeMode": self._sms_mode_for_phone(phone),
+            "messageCount": len(messages),
+            "ownerAgent": self._get_sms_owner_agent_info(),
+        }
+        if messages:
+            thread["lastMessage"] = messages[-1].get("body", "")
+            thread["lastTimestamp"] = messages[-1].get("timestamp", "")
+            thread["lastType"] = messages[-1].get("type", "")
+        return {"ok": True, "thread": thread, "messages": messages}
+
+    def _send_sms_intervention(self, to, body, name="", sender="user"):
         """Send SMS via Twilio (config-driven credentials)."""
+        to = self._normalize_sms_phone(to)
         if not to or not body:
             return {"ok": False, "error": "Missing 'to' or 'body'"}
         sms_cfg = VO_CONFIG.get("sms", {})
-        ACCOUNT_SID = sms_cfg.get("twilioAccountSid")
-        AUTH_TOKEN = sms_cfg.get("twilioAuthToken")
-        FROM_NUMBER = sms_cfg.get("fromNumber")
-        if not ACCOUNT_SID or not AUTH_TOKEN or not FROM_NUMBER:
+        account_sid = sms_cfg.get("twilioAccountSid")
+        auth_token = sms_cfg.get("twilioAuthToken")
+        from_number = sms_cfg.get("fromNumber")
+        if not account_sid or not auth_token or not from_number:
             return {"ok": False, "error": "SMS not configured. Set Twilio credentials in Settings or /setup."}
-        sms_log_path = os.path.join(self._sms_data_dir(), "sms-log.jsonl")
-        contacts_path = os.path.join(self._sms_data_dir(), "sms-contacts.json")
+
+        sender = "agent" if sender == "agent" else "user"
+        entry_type = "outbound" if sender == "agent" else "intervention"
+        sms_log_path = self._sms_primary_log_path()
+        contacts_path = self._sms_primary_contacts_path()
+
         try:
-            url = f"https://api.twilio.com/2010-04-01/Accounts/{ACCOUNT_SID}/Messages.json"
-            data = urllib.parse.urlencode({"To": to, "From": FROM_NUMBER, "Body": body}).encode()
-            credentials = base64.b64encode(f"{ACCOUNT_SID}:{AUTH_TOKEN}".encode()).decode()
+            url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
+            data = urllib.parse.urlencode({"To": to, "From": from_number, "Body": body}).encode()
+            credentials = base64.b64encode(f"{account_sid}:{auth_token}".encode()).decode()
             req = urllib.request.Request(url, data=data, method="POST")
             req.add_header("Authorization", f"Basic {credentials}")
             req.add_header("Content-Type", "application/x-www-form-urlencoded")
             with urllib.request.urlopen(req) as resp:
                 result = json.loads(resp.read().decode())
-            entry = {"type": "intervention", "phone": to, "name": name or "Unknown", "body": body, "sid": result.get("sid"), "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")}
-            with open(sms_log_path, 'a') as f:
-                f.write(json.dumps(entry) + '\n')
+
+            entry = {
+                "type": entry_type,
+                "phone": to,
+                "name": name or self._load_sms_contacts_map().get(to, {}).get("name") or "Unknown",
+                "body": body,
+                "sid": result.get("sid"),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+
+            with open(sms_log_path, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+
             try:
-                contacts = json.load(open(contacts_path))
+                with open(contacts_path) as f:
+                    contacts = json.load(f)
+                if not isinstance(contacts, dict):
+                    contacts = {}
             except Exception:
                 contacts = {}
+
             if to not in contacts:
-                contacts[to] = {"name": name or "Unknown", "added": time.strftime("%Y-%m-%d"), "note": "Added via Virtual Office"}
-                with open(contacts_path, 'w') as f:
-                    json.dump(contacts, f, indent=2)
-            return {"ok": True, "sid": result.get("sid"), "status": result.get("status")}
+                contacts[to] = {
+                    "name": name or "Unknown",
+                    "added": datetime.now().strftime("%Y-%m-%d"),
+                    "note": "Added via Virtual Office",
+                }
+            elif name and contacts[to].get("name") in (None, "", "Unknown"):
+                contacts[to]["name"] = name
+
+            with open(contacts_path, "w") as f:
+                json.dump(contacts, f, indent=2)
+
+            return {
+                "ok": True,
+                "sid": result.get("sid"),
+                "status": result.get("status"),
+                "phone": to,
+                "sender": sender,
+                "type": entry_type,
+            }
         except urllib.error.HTTPError as e:
             err = e.read().decode()
             try:

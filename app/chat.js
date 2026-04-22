@@ -485,10 +485,15 @@
           this.finalizeStreamingMessage(this.streamingMsg.content || '');
           this.streamingMsg = null;
         }
-        await rpc('chat.send', { sessionKey: this.sessionKey, message: '/stop', idempotencyKey: `office-stop-${Date.now()}-${Math.random().toString(36).slice(2)}` });
-        this.appendSystem('🛑 Stop requested');
+        const params = { sessionKey: this.sessionKey };
+        if (this.currentRunId) params.runId = this.currentRunId;
+        const res = await rpc('chat.abort', params);
+        if (res?.ok === false) throw new Error(res.error?.message || 'abort failed');
+        this.clearActivityFeed();
+        this.currentRunId = null;
+        this.appendSystem('🛑 Stop sent');
       } catch (e) {
-        this.appendSystem('Failed to send stop: ' + e.message);
+        this.appendSystem('Failed to stop: ' + e.message);
       }
     }
 

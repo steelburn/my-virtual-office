@@ -9,7 +9,7 @@
     <link rel="apple-touch-icon" href="icon-192.png">
     <link rel="manifest" href="manifest.json">
     <meta name="theme-color" content="#1a1a2e">
-    <link rel="stylesheet" href="style.css?v=0">
+    <link rel="stylesheet" href="style.css?v=5">
     <link rel="stylesheet" href="projects.css?v=0">
     <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
 </head>
@@ -539,29 +539,60 @@
 
     <!-- SMS Panel -->
     <div id="sms-panel" class="sms-panel">
+        <div class="sms-resize-handle top-left"></div>
+        <div class="sms-resize-handle top"></div>
+        <div class="sms-resize-handle top-right"></div>
+        <div class="sms-resize-handle right"></div>
+        <div class="sms-resize-handle bottom-right"></div>
+        <div class="sms-resize-handle bottom"></div>
+        <div class="sms-resize-handle bottom-left"></div>
+        <div class="sms-resize-handle left"></div>
         <div class="sms-header">
-            <span>📞 SMS</span>
+            <span>📞 SMS Inbox</span>
             <span id="sms-count" class="sms-count">0</span>
-            <div class="sms-mode-toggle">
-                <span id="sms-mode-label" class="sms-mode-label">Agent</span>
-                <label class="sms-switch">
-                    <input type="checkbox" id="sms-mode-check">
-                    <span class="sms-slider"></span>
-                </label>
+            <span style="flex:1"></span>
+            <div class="sms-header-btns">
+                <button id="sms-move" class="sms-move-btn" title="Move/snap SMS window">⇱</button>
+                <button id="sms-close" class="sms-close">&times;</button>
             </div>
-            <button id="sms-close" class="sms-close">&times;</button>
         </div>
-        <div id="sms-messages" class="sms-messages"></div>
-        <div class="sms-input-row">
-            <select id="sms-recipient" class="sms-recipient">
-                <option value="">Select contact...</option>
-            </select>
-            <input type="text" id="sms-phone-manual" class="sms-phone-manual" placeholder="+1XXXXXXXXXX" style="display:none">
-            <button id="sms-toggle-manual" class="sms-toggle-manual" title="Type number manually">✏️</button>
+        <div class="sms-owner-strip">
+            <span id="sms-owner-badge" class="sms-owner-badge">Owner agent not assigned</span>
         </div>
-        <div class="sms-input-row">
-            <textarea id="sms-input" class="sms-input" placeholder="Type a message as agent..." rows="2"></textarea>
-            <button id="sms-send" class="sms-send-btn">▶</button>
+        <div class="sms-layout">
+            <div class="sms-sidebar">
+                <div class="sms-thread-picker">
+                    <select id="sms-recipient" class="sms-recipient">
+                        <option value="">Select contact...</option>
+                    </select>
+                    <input type="text" id="sms-phone-manual" class="sms-phone-manual" placeholder="+1XXXXXXXXXX" style="display:none">
+                    <button id="sms-toggle-manual" class="sms-toggle-manual" title="Type number manually">✏️</button>
+                    <button id="sms-open-thread" class="sms-open-thread" title="Open thread">Open</button>
+                </div>
+                <div id="sms-threads" class="sms-threads"></div>
+            </div>
+            <div class="sms-conversation">
+                <div class="sms-thread-header">
+                    <button id="sms-back-to-inbox" class="sms-back-to-inbox" type="button">← Inbox</button>
+                    <div class="sms-thread-header-main">
+                        <div id="sms-thread-title" class="sms-thread-title">Select a contact</div>
+                        <div id="sms-thread-subtitle" class="sms-thread-subtitle">Choose a thread to view the conversation.</div>
+                    </div>
+                    <div class="sms-mode-toggle">
+                        <span id="sms-mode-label" class="sms-mode-label">Agent</span>
+                        <label class="sms-switch">
+                            <input type="checkbox" id="sms-mode-check">
+                            <span class="sms-slider"></span>
+                        </label>
+                    </div>
+                </div>
+                <div id="sms-empty-state" class="sms-empty-state">Select a contact thread on the left, or open a number to start a new one.</div>
+                <div id="sms-messages" class="sms-messages"></div>
+                <div class="sms-input-row sms-compose-row">
+                    <textarea id="sms-input" class="sms-input" placeholder="Switch this thread to User to reply manually..." rows="2"></textarea>
+                    <button id="sms-send" class="sms-send-btn">▶</button>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -951,8 +982,8 @@
     </script>
     <!-- marked.js v15.0.12 - bundled locally for airgapped/offline use -->
     <script src="marked.min.js"></script>
-    <script src="chat.js?v=0"></script>
-    <script src="sms-panel.js?v=0"></script>
+    <script src="chat.js?v=1"></script>
+    <script src="sms-panel.js?v=7"></script>
     <script src="pc-monitor.js?v=0"></script>
     <script src="api-usage.js?v=0"></script>
     <script>
