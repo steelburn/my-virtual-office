@@ -592,14 +592,17 @@ def start(gateway_url, gateway_token, port=8090):
         print("⚠️  Gateway presence: already running")
         return
 
+    _thread = None
+    _loop = None
     origin = f"http://127.0.0.1:{port}"
 
     def run():
         global _loop
-        _loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(_loop)
+        loop = asyncio.new_event_loop()
+        _loop = loop
+        asyncio.set_event_loop(loop)
         try:
-            _loop.run_until_complete(_gateway_loop(gateway_url, gateway_token, origin))
+            loop.run_until_complete(_gateway_loop(gateway_url, gateway_token, origin))
         except RuntimeError as e:
             if "Event loop stopped" not in str(e):
                 print(f"⚠️  Gateway presence: runtime error: {e}")
@@ -608,14 +611,17 @@ def start(gateway_url, gateway_token, port=8090):
         finally:
             # Clean up pending tasks
             try:
-                pending = asyncio.all_tasks(_loop)
-                for task in pending:
-                    task.cancel()
-                if pending:
-                    _loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                _loop.close()
+                if not loop.is_closed():
+                    pending = asyncio.all_tasks(loop)
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                    loop.close()
             except Exception:
                 pass
+            if _loop is loop:
+                _loop = None
 
     _thread = threading.Thread(target=run, daemon=True, name="gateway-presence")
     _thread.start()
@@ -624,10 +630,25 @@ def start(gateway_url, gateway_token, port=8090):
 
 def stop():
     """Stop the gateway presence listener."""
-    global _loop, _gw_connected
+    global _thread, _loop, _gw_connected
     _gw_connected = False
-    if _loop:
-        _loop.call_soon_threadsafe(_loop.stop)
+
+    loop = _loop
+    thread = _thread
+
+    if loop and not loop.is_closed():
+        try:
+            loop.call_soon_threadsafe(loop.stop)
+        except RuntimeError:
+            pass
+
+    if thread and thread.is_alive() and thread is not threading.current_thread():
+        thread.join(timeout=2)
+
+    if not thread or not thread.is_alive():
+        _thread = None
+    if not loop or loop.is_closed() or not thread or not thread.is_alive():
+        _loop = None
 
 
 # ─── Snapshot to Disk (for crash recovery) ────────────────────────

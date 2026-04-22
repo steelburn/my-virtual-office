@@ -5963,6 +5963,7 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
                 global VO_CONFIG, WORKSPACE_BASE, _discovered_roster, _discovered_at
                 old_path = WORKSPACE_BASE
                 old_gw = GATEWAY_URL
+                old_token = _get_gateway_token()
                 VO_CONFIG = _load_vo_config()
                 WORKSPACE_BASE = VO_CONFIG["openclaw"]["homePath"]
                 # Always reload gateway globals (URL, host header, config path)
@@ -5971,11 +5972,13 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
                     _discovered_roster = discover_agents(WORKSPACE_BASE)
                     _discovered_at = time.time()
                     refresh_agent_maps()
-                # Restart gateway presence listener if URL or token changed
+                # Restart gateway presence listener only when gateway settings actually changed
                 new_token = _get_gateway_token()
-                if GATEWAY_URL != old_gw or new_token:
+                gateway_changed = GATEWAY_URL != old_gw
+                token_changed = new_token != old_token
+                if gateway_changed or token_changed:
+                    gateway_presence.stop()
                     if new_token:
-                        gateway_presence.stop()
                         gateway_presence.start(GATEWAY_URL, new_token, port=PORT)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
