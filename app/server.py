@@ -6511,7 +6511,14 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
                         raw3 = await _asyncio.wait_for(ws.recv(), timeout=5)
                         res3 = json.loads(raw3)
                         sessions = res3.get("payload", {}).get("sessions", []) if res3.get("ok") else []
-                        agent_count = sum(1 for s in sessions if isinstance(s, dict) and s.get("key", "").startswith("agent:"))
+                        agent_ids = {
+                            s.get("key", "").split(":", 2)[1]
+                            for s in sessions
+                            if isinstance(s, dict)
+                            and s.get("key", "").startswith("agent:")
+                            and len(s.get("key", "").split(":", 2)) >= 2
+                        }
+                        agent_count = len(agent_ids)
 
                         return {"ok": True, "gateway": "reachable", "token": True, "agents": agent_count}
 
