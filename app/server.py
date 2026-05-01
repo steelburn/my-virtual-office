@@ -3717,21 +3717,27 @@ def get_agent_messages(agent_key, max_messages=500):
         return []
     messages = []
     try:
-        # Performance: only read the tail of the file (last 32KB) instead of the
-        # entire JSONL.  Session files can grow to many megabytes; reading them
-        # in full every 3 seconds blocks the server thread and causes UI stutter.
+        # Performance: read the tail instead of the whole JSONL. Some model/tool
+        # messages (notably image reads) can be a single very large JSONL line;
+        # grow the tail window until we have enough complete recent lines.
         TAIL_BYTES = 32 * 1024
+        MAX_TAIL_BYTES = 2 * 1024 * 1024
         with open(jsonl_file, "rb") as fb:
             fb.seek(0, 2)  # end
             fsize = fb.tell()
-            start = max(0, fsize - TAIL_BYTES)
-            fb.seek(start)
-            tail_data = fb.read().decode("utf-8", errors="replace")
-        # If we seeked into the middle of a line, drop the first partial line
-        if start > 0:
-            nl = tail_data.find("\n")
-            if nl >= 0:
-                tail_data = tail_data[nl + 1:]
+            tail_size = min(TAIL_BYTES, fsize)
+            while True:
+                start = max(0, fsize - tail_size)
+                fb.seek(start)
+                tail_data = fb.read().decode("utf-8", errors="replace")
+                if start > 0:
+                    nl = tail_data.find("\n")
+                    if nl >= 0:
+                        tail_data = tail_data[nl + 1:]
+                complete_lines = [x for x in tail_data.split("\n") if x.strip()]
+                if start == 0 or len(complete_lines) >= 20 or tail_size >= min(MAX_TAIL_BYTES, fsize):
+                    break
+                tail_size = min(tail_size * 4, MAX_TAIL_BYTES, fsize)
         for line in tail_data.split("\n"):
                 line = line.strip()
                 if not line:
@@ -3749,6 +3755,18 @@ def get_agent_messages(agent_key, max_messages=500):
                     continue
                 content = msg.get("content", "")
                 text = ""
+                media = []
+
+                def _add_media_url(_url, _mime="", _name=""):
+                    if not _url:
+                        return
+                    _url = str(_url).strip()
+                    if not _url:
+                        return
+                    _name = _name or os.path.basename(urllib.parse.urlparse(_url).path) or "attachment"
+                    _mime = _mime or mimetypes.guess_type(_name)[0] or mimetypes.guess_type(_url)[0] or ""
+                    media.append({"url": _url, "mimeType": _mime, "name": _name})
+
                 if isinstance(content, str):
                     text = content
                 elif isinstance(content, list):
@@ -3756,10 +3774,18 @@ def get_agent_messages(agent_key, max_messages=500):
                     tool_calls = []
                     for item in content:
                         if isinstance(item, dict):
-                            if item.get("type") == "text":
+                            item_type = item.get("type")
+                            if item_type == "text":
                                 t = item.get("text", "").strip()
                                 if t:
                                     parts.append(t)
+                            elif item_type in ("image", "image_url", "input_image", "file", "media", "attachment", "video", "audio"):
+                                src = item.get("url") or item.get("path") or item.get("filePath") or item.get("mediaUrl")
+                                if not src and isinstance(item.get("image_url"), dict):
+                                    src = item.get("image_url", {}).get("url")
+                                if not src and isinstance(item.get("source"), dict):
+                                    src = item.get("source", {}).get("url") or item.get("source", {}).get("path")
+                                _add_media_url(src, item.get("mimeType") or item.get("media_type") or item.get("contentType") or "", item.get("name") or item.get("filename") or "")
                             elif item.get("type") == "toolCall":
                                 name = item.get("name", "")
                                 args = item.get("arguments", {})
@@ -3789,7 +3815,13 @@ def get_agent_messages(agent_key, max_messages=500):
                     if tool_calls:
                         tc_text = "\n".join(tool_calls)
                         text = f"{text}\n{tc_text}" if text else tc_text
-                if not text:
+                for _line in (text or "").splitlines():
+                    _m = re.match(r"^\(attached file:\s*(.+?)\)$", _line.strip(), re.I) or re.match(r"^attached file:\s*(.+)$", _line.strip(), re.I)
+                    if _m:
+                        _path = _m.group(1).strip()
+                        _mime = mimetypes.guess_type(_path)[0] or ""
+                        _add_media_url(_path, _mime, os.path.basename(_path))
+                if not text and not media:
                     continue
                 from_agent = ""
                 prov = msg.get("provenance", {})
@@ -3808,7 +3840,7 @@ def get_agent_messages(agent_key, max_messages=500):
                         epoch_ms = int(dt.timestamp() * 1000)
                     except Exception:
                         pass
-                messages.append({"role": role, "text": text[:500], "ts": ts, "epochMs": epoch_ms, "from": from_agent})
+                messages.append({"role": role, "text": text[:500], "ts": ts, "epochMs": epoch_ms, "from": from_agent, "media": media[:4]})
     except Exception as e:
         return []
     return messages[-max_messages:]

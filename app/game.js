@@ -7183,6 +7183,42 @@ canvas.addEventListener('touchend', function() {
 var agentChatData = {};
 var agentChatProjectWork = {}; // agentKey -> { projectId, taskTitle, phase } if working on project task
 var agentChatWrapped = {}; // agentKey -> [{text, isUser, separator}] pre-wrapped lines
+var agentChatImageCache = {}; // url -> HTMLImageElement
+
+function getAgentChatMediaUrl(url) {
+    if (!url) return '';
+    url = String(url).trim();
+    if (!url) return '';
+    var isLocalPath = url.charAt(0) === '/' && url.indexOf('//') !== 0 && url.indexOf('/chat-media') !== 0 && url.indexOf('/sms-media') !== 0;
+    return isLocalPath ? '/chat-media?path=' + encodeURIComponent(url) : url;
+}
+
+function getAgentChatFirstImage(msg) {
+    var media = (msg && msg.media) || [];
+    for (var i = 0; i < media.length; i++) {
+        var item = media[i] || {};
+        var raw = item.url || item.path || item.filePath || item.mediaUrl || '';
+        var name = item.name || (raw.split('/').pop() || 'image');
+        var type = (item.mimeType || item.contentType || '').toLowerCase();
+        if (!type && /\.(png|jpe?g|gif|webp|bmp|svg)(\?|$)/i.test(name || raw)) type = 'image/*';
+        if (raw && (type.indexOf('image/') === 0 || type === 'image/*')) {
+            return { url: getAgentChatMediaUrl(raw), name: name };
+        }
+    }
+    return null;
+}
+
+function getAgentChatCachedImage(url) {
+    if (!url) return null;
+    var cached = agentChatImageCache[url];
+    if (cached) return cached;
+    var img = new Image();
+    img.onload = function() { agentChatImageCache[url]._loaded = true; };
+    img.onerror = function() { agentChatImageCache[url]._error = true; };
+    img.src = url;
+    agentChatImageCache[url] = img;
+    return img;
+}
 var lastChatPoll = 0;
 var chatLastMsg = {}; // agentKey -> last seen message text
 var chatTypewriterState = {};
@@ -7209,7 +7245,7 @@ function pollAgentChat() {
         for (var key in data) {
             var msgs = data[key];
             var lastMsg = msgs[msgs.length - 1];
-            var lastText = lastMsg ? lastMsg.text : '';
+            var lastText = lastMsg ? ((lastMsg.text || '') + (getAgentChatFirstImage(lastMsg) ? ' [image]' : '')) : '';
             if (lastText !== chatLastMsg[key]) {
                 chatTypewriterState[key] = { charIdx: 0, targetText: lastText, done: false, msgIdx: msgs.length - 1 };
                 // On first load, keep minimized. After that, auto-expand on new messages.
@@ -7245,6 +7281,8 @@ function pollAgentChat() {
                     for (var li = 0; li < lines.length; li++) {
                         wrapped.push({ text: lines[li], isUser: isUser });
                     }
+                    var imgMedia = getAgentChatFirstImage(msg);
+                    if (imgMedia) wrapped.push({ image: imgMedia, isUser: isUser });
                     wrapped.push({ text: '', separator: true });
                 }
                 // Last message stored as marker for per-frame typewriter wrapping
@@ -7373,6 +7411,8 @@ function drawChatBubbles() {
                 for (var li = 0; li < wrapped.length; li++) {
                     renderedLines.push({ text: wrapped[li], isUser: entry.isUser });
                 }
+                var imgMedia = getAgentChatFirstImage(entry.msg);
+                if (imgMedia) renderedLines.push({ image: imgMedia, isUser: entry.isUser });
             } else {
                 renderedLines.push(entry);
             }
@@ -7385,7 +7425,8 @@ function drawChatBubbles() {
         var visLines = renderedLines.slice(startIdx, endIdx);
         var canScrollUp = startIdx > 0;
         var canScrollDown = scrollOff > 0;
-        var bubbleH = Math.min(180, 26 + visLines.length * 12);
+        var mediaLineCount = visLines.filter(function(l) { return l.image; }).length;
+        var bubbleH = Math.min(220, 26 + (visLines.length - mediaLineCount) * 12 + mediaLineCount * 58);
         chatBubbles.push({ agent: agent, agentKey: agent.statusKey, lines: visLines, canScrollUp: canScrollUp, canScrollDown: canScrollDown, x: headX + 25, y: headY - bubbleH - 10, w: 155, h: bubbleH, anchorX: headX, anchorY: headY, });
     }
 
@@ -7513,6 +7554,24 @@ function drawChatBubbles() {
                 ctx.lineTo(b.x + b.w - 6, lineY - 2);
                 ctx.stroke();
                 lineY += 4;
+                continue;
+            }
+            if (ln.image) {
+                var imgUrl = ln.image.url;
+                var img = getAgentChatCachedImage(imgUrl);
+                var ix = b.x + 6, iy = lineY - 8, iw = b.w - 12, ih = 52;
+                ctx.fillStyle = 'rgba(0,0,0,0.08)';
+                drawRoundRect(ix, iy, iw, ih, 5); ctx.fill();
+                if (img && img._loaded) {
+                    var scale = Math.min(iw / img.naturalWidth, ih / img.naturalHeight);
+                    var dw = img.naturalWidth * scale, dh = img.naturalHeight * scale;
+                    ctx.drawImage(img, ix + (iw - dw) / 2, iy + (ih - dh) / 2, dw, dh);
+                } else {
+                    ctx.fillStyle = img && img._error ? '#aa4444' : '#666';
+                    ctx.font = '9px Arial, sans-serif';
+                    ctx.fillText(img && img._error ? '🖼️ image unavailable' : '🖼️ loading image...', ix + 6, iy + 28);
+                }
+                lineY += 58;
                 continue;
             }
             ctx.fillStyle = ln.isUser ? '#4466aa' : '#222';
