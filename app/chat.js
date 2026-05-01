@@ -1099,8 +1099,10 @@
     let url = item.url || item.path || item.filePath || item.href || item.mediaUrl || item.proxyUrl || '';
     if (!url) return null;
     url = String(url).trim();
-    const name = item.name || item.filename || decodeURIComponent((url.split('/').pop() || 'media').split('?')[0]);
-    const mimeType = item.mimeType || item.contentType || item.type || guessMimeFromName(name, url);
+    const dataUrlMatch = url.match(/^data:([^;,]+)[;,]/i);
+    const dataMime = dataUrlMatch ? dataUrlMatch[1].toLowerCase() : '';
+    const name = item.name || item.filename || (dataMime ? (dataMime.split('/')[0] || 'media') : decodeURIComponent((url.split('/').pop() || 'media').split('?')[0]));
+    const mimeType = item.mimeType || item.contentType || (dataMime && dataMime !== 'text/plain' ? dataMime : '') || item.type || guessMimeFromName(name, url);
     const isLocalPath = url.startsWith('/') && !url.startsWith('//') && !url.startsWith('/__openclaw__') && !url.startsWith('/sms-media') && !url.startsWith('/chat-media');
     const src = isLocalPath ? '/chat-media?path=' + encodeURIComponent(url) : url;
     return { url: src, originalUrl: url, name, mimeType };
