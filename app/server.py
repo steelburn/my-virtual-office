@@ -844,6 +844,8 @@ def _office_agent_ref(agent_id_or_key):
 
 def _append_comm_event(event):
     event = dict(event)
+    if "text" in event:
+        event["text"] = _extract_openclaw_text(event.get("text"))
     event.setdefault("ts", int(time.time() * 1000))
     event.setdefault("id", str(uuid.uuid4()))
     event.setdefault("schema", "vo.agent-platform-communication.v1")
@@ -892,7 +894,7 @@ def _comm_event_to_chat_message(event, agent_key):
     to_ref = event.get("to") or {}
     from_id = from_ref.get("id", "")
     to_id = to_ref.get("id", "")
-    text = event.get("text", "")
+    text = _extract_openclaw_text(event.get("text", ""))
     if not text:
         return None
     from_label = (from_ref.get("name") or from_id or "Agent").strip()
@@ -944,7 +946,11 @@ def _merge_comm_events_into_agent_chat(result, per_agent_limit=500):
         seen = set()
         cleaned = []
         for msg in msgs:
-            unique = msg.get("commEventId") or (msg.get("role"), msg.get("text"), msg.get("epochMs") or msg.get("ts") or msg.get("time"))
+            msg_text = _extract_openclaw_text(msg.get("text"))
+            if msg.get("text") != msg_text:
+                msg = dict(msg)
+                msg["text"] = msg_text
+            unique = msg.get("commEventId") or (msg.get("role"), msg_text, msg.get("epochMs") or msg.get("ts") or msg.get("time"))
             if str(unique) in seen:
                 continue
             seen.add(str(unique))
@@ -957,18 +963,19 @@ def _merge_comm_events_into_agent_chat(result, per_agent_limit=500):
         for msg in cleaned:
             if msg.get("source") == "agent-platform-communications":
                 ts = int(msg.get("epochMs") or msg.get("ts") or 0)
-                comm_signatures.add((msg.get("role"), msg.get("text"), ts // 5000))
+                comm_signatures.add((msg.get("role"), _extract_openclaw_text(msg.get("text")), ts // 5000))
         if comm_signatures:
             filtered = []
             for msg in cleaned:
                 if msg.get("source") == "agent-platform-communications":
                     filtered.append(msg)
                     continue
-                raw_text = str(msg.get("text") or "")
+                raw_text = _extract_openclaw_text(msg.get("text"))
                 if raw_text.lstrip().startswith("[A2A ") or "via My Virtual Office AgentPlatform-to-AgentPlatform Communications" in raw_text:
                     continue
                 ts = int(msg.get("epochMs") or msg.get("ts") or 0)
-                sigs = [(msg.get("role"), msg.get("text"), ts // 5000), (msg.get("role"), msg.get("text"), (ts // 5000) - 1), (msg.get("role"), msg.get("text"), (ts // 5000) + 1)]
+                msg_text = _extract_openclaw_text(msg.get("text"))
+                sigs = [(msg.get("role"), msg_text, ts // 5000), (msg.get("role"), msg_text, (ts // 5000) - 1), (msg.get("role"), msg_text, (ts // 5000) + 1)]
                 if any(sig in comm_signatures for sig in sigs):
                     continue
                 filtered.append(msg)
