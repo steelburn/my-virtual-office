@@ -720,18 +720,58 @@ def _load_hermes_history(profile="default"):
         return []
 
 
+def _load_hermes_state(profile="default"):
+    path = _hermes_history_path(profile)
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {"profile": profile, "messages": []}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"profile": profile, "messages": []}
+
+
 def _save_hermes_history(profile, messages):
     path = _hermes_history_path(profile)
     try:
+        existing = _load_hermes_state(profile)
+        existing["profile"] = profile
+        existing["messages"] = messages[-500:]
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
-            json.dump({"profile": profile, "messages": messages[-500:]}, f, indent=2)
+            json.dump(existing, f, indent=2)
         try:
             os.chmod(path, 0o666)
         except OSError:
             pass
     except OSError as e:
         print(f"[HERMES] Failed to save history: {e}")
+
+
+def _get_hermes_session_id(profile="default"):
+    state = _load_hermes_state(profile)
+    session_id = state.get("sessionId") or state.get("session_id")
+    return str(session_id).strip() if session_id else ""
+
+
+def _set_hermes_session_id(profile="default", session_id=""):
+    path = _hermes_history_path(profile)
+    state = _load_hermes_state(profile)
+    state["profile"] = profile
+    if session_id:
+        state["sessionId"] = session_id
+    else:
+        state.pop("sessionId", None)
+        state.pop("session_id", None)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(state, f, indent=2)
+        try:
+            os.chmod(path, 0o666)
+        except OSError:
+            pass
+    except OSError as e:
+        print(f"[HERMES] Failed to save session id: {e}")
 
 
 def _handle_hermes_chat(body):
@@ -767,7 +807,10 @@ def _handle_hermes_chat(body):
             enabled=hermes_cfg.get("enabled", True),
             timeout_sec=timeout,
         )
-        result = provider.send_message(profile, message, timeout_sec=timeout)
+        session_id = _get_hermes_session_id(profile)
+        result = provider.send_chat_message(profile, message, session_id=session_id, timeout_sec=timeout)
+        if result.get("sessionId"):
+            _set_hermes_session_id(profile, result.get("sessionId"))
         reply = result.get("reply", "")
         stderr = result.get("stderr", "")
         exit_code = result.get("exitCode")
@@ -778,6 +821,7 @@ def _handle_hermes_chat(body):
             "ts": int(time.time() * 1000),
             "agentId": agent.get("id"),
             "exitCode": exit_code,
+            "sessionId": result.get("sessionId") or session_id,
         })
         _save_hermes_history(profile, history)
         state = "idle" if result.get("ok") else "offline"
@@ -787,6 +831,7 @@ def _handle_hermes_chat(body):
             "reply": reply,
             "stderr": stderr[:2000],
             "exitCode": exit_code,
+            "sessionId": result.get("sessionId") or session_id,
             "error": result.get("error"),
             "agent": {"id": agent.get("id"), "name": agent.get("name"), "providerKind": "hermes", "profile": profile},
         }
@@ -7410,12 +7455,25 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             body = json.loads(self.rfile.read(length)) if length else {}
             agent = _get_hermes_agent(body.get("agentId") or body.get("key") or "hermes-default") or {}
             profile = agent.get("profile") or agent.get("providerAgentId") or "default"
+            session_id = _get_hermes_session_id(profile)
+            delete_result = {"ok": True, "deleted": False}
+            if session_id:
+                hermes_cfg = VO_CONFIG.get("hermes", {})
+                hermes_bin = os.path.expanduser(agent.get("binary") or hermes_cfg.get("binary") or "~/.local/bin/hermes")
+                provider = HermesProvider(
+                    home_path=hermes_cfg.get("homePath"),
+                    binary=hermes_bin,
+                    enabled=hermes_cfg.get("enabled", True),
+                    timeout_sec=int(hermes_cfg.get("timeoutSec") or 600),
+                )
+                delete_result = provider.delete_session(profile, session_id)
             _save_hermes_history(profile, [])
+            _set_hermes_session_id(profile, "")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
-            self.wfile.write(json.dumps({"ok": True}).encode())
+            self.wfile.write(json.dumps({"ok": True, "deletedHermesSession": bool(delete_result.get("deleted")), "sessionId": session_id}).encode())
             return
         elif self.path == "/api/hermes/test":
             length = int(self.headers.get('Content-Length', 0))

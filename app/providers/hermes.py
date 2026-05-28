@@ -145,6 +145,87 @@ class HermesProvider:
         except Exception as exc:
             return {"ok": False, "error": str(exc), "exitCode": None, "reply": ""}
 
+    def send_chat_message(self, profile: str, message: str, session_id: str | None = None, timeout_sec: int | None = None) -> dict[str, Any]:
+        """Send a message through Hermes chat, optionally resuming a session.
+
+        Unlike ``send_message``/``hermes -z``, this uses the public
+        ``hermes chat -Q -q`` surface so Virtual Office can keep real Hermes
+        session continuity by storing the returned ``session_id`` and passing it
+        back with ``--resume`` on later turns.
+        """
+        if not self.binary or not os.path.exists(self.binary):
+            return {"ok": False, "error": f"Hermes CLI not found at {self.binary}", "exitCode": None, "reply": "", "sessionId": session_id or ""}
+        if not message.strip():
+            return {"ok": False, "error": "message is required", "exitCode": None, "reply": "", "sessionId": session_id or ""}
+
+        cmd = [self.binary]
+        if profile and profile != "default":
+            cmd.extend(["--profile", profile])
+        cmd.extend(["chat", "-Q"])
+        if session_id:
+            cmd.extend(["--resume", session_id])
+        cmd.extend(["-q", message])
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=int(timeout_sec or self.timeout_sec) + 30,
+                env=self._subprocess_env(),
+            )
+            stdout = (result.stdout or "").strip()
+            stderr = (result.stderr or "").strip()
+            found_session_id = session_id or ""
+            reply_lines: list[str] = []
+            for line in stdout.splitlines():
+                m = re.match(r"^\s*session_id:\s*(\S+)\s*$", line)
+                if m:
+                    found_session_id = m.group(1).strip()
+                else:
+                    reply_lines.append(line)
+            for line in stderr.splitlines():
+                m = re.match(r"^\s*session_id:\s*(\S+)\s*$", line)
+                if m:
+                    found_session_id = m.group(1).strip()
+            reply = "\n".join(reply_lines).strip()
+            if result.returncode != 0 and not reply:
+                reply = f"[Hermes error] {stderr[:1000]}"
+            return {
+                "ok": result.returncode == 0,
+                "reply": reply,
+                "stderr": stderr[:2000],
+                "exitCode": result.returncode,
+                "profile": profile or "default",
+                "sessionId": found_session_id,
+            }
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "Hermes call timed out", "exitCode": None, "reply": "", "sessionId": session_id or ""}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "exitCode": None, "reply": "", "sessionId": session_id or ""}
+
+    def delete_session(self, profile: str, session_id: str) -> dict[str, Any]:
+        """Delete a Hermes session through the public sessions CLI."""
+        if not session_id:
+            return {"ok": True, "deleted": False}
+        if not self.binary or not os.path.exists(self.binary):
+            return {"ok": False, "error": f"Hermes CLI not found at {self.binary}"}
+        cmd = [self.binary]
+        if profile and profile != "default":
+            cmd.extend(["--profile", profile])
+        cmd.extend(["sessions", "delete", session_id, "--yes"])
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=self._subprocess_env())
+            return {
+                "ok": result.returncode == 0,
+                "deleted": result.returncode == 0,
+                "stdout": (result.stdout or "").strip()[:1000],
+                "stderr": (result.stderr or "").strip()[:1000],
+                "exitCode": result.returncode,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def _list_profiles(self) -> list[dict[str, str]]:
         profiles: list[dict[str, str]] = []
         try:
