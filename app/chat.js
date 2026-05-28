@@ -709,10 +709,11 @@
       const data = payload?.data && typeof payload.data === 'object' ? payload.data : {};
       const stream = payload?.stream || data.stream || '';
       const phase = data.phase || payload?.phase || '';
+      const isToolLikeItem = stream === 'item' && data.kind === 'command';
 
       // Current OpenClaw emits tool activity as agent events:
       // { stream:"tool", data:{ phase:"start|update|result", name, toolCallId, args, result } }
-      if (stream === 'tool' || payload?.type === 'tool_start' || payload?.type === 'tool_end' || payload?.type === 'tool_result') {
+      if (stream === 'tool' || isToolLikeItem || payload?.type === 'tool_start' || payload?.type === 'tool_end' || payload?.type === 'tool_result') {
         this.markLiveEvent();
         const tool = normalizeToolEvent(payload, phase === 'result' ? 'done' : 'running');
         const label = formatToolLabel(tool.name, coerceToolArgs(tool.arguments));
@@ -747,6 +748,22 @@
 
     queueToolEvent(payload) {
       const key = this.toolKey(payload);
+      const data = payload?.data && typeof payload.data === 'object' ? payload.data : {};
+      const phase = data.phase || payload?.phase || '';
+      const isTerminal = phase === 'result' || phase === 'end' || payload?.type === 'tool_end' || payload?.type === 'tool_result';
+
+      // Fast tools can emit start + result inside the render debounce window.
+      // If the result replaces the unrendered start, no live card is created and
+      // the user only sees the tool after a history refresh.
+      if (isTerminal && this.pendingToolEvents.has(key) && !this.liveToolCards.has(key)) {
+        const startPayload = this.pendingToolEvents.get(key);
+        this.pendingToolEvents.delete(key);
+        this.appendToolCall(startPayload);
+        this.finishToolCall(payload);
+        if (!this.toolFlushTimer && this.pendingToolEvents.size) this.toolFlushTimer = setTimeout(() => this.flushToolEvents(), TOOL_RENDER_INTERVAL_MS);
+        return;
+      }
+
       this.pendingToolEvents.set(key, payload);
       if (!this.toolFlushTimer) this.toolFlushTimer = setTimeout(() => this.flushToolEvents(), TOOL_RENDER_INTERVAL_MS);
     }
@@ -937,7 +954,7 @@
 
     toolKey(payload) {
       const data = payload?.data && typeof payload.data === 'object' ? payload.data : {};
-      const id = data.toolCallId || payload?.toolCallId || payload?.callId || payload?.id;
+      const id = data.toolCallId || data.itemId || payload?.toolCallId || payload?.callId || payload?.itemId || payload?.id;
       const runId = payload?.runId || data.runId || this.currentRunId || 'run';
       const name = data.name || payload?.name || payload?.tool || payload?.toolName || 'tool';
       return id || `${runId}:${name}:${this.liveToolCards.size}`;
@@ -1310,8 +1327,8 @@
     const msg = {
       type: 'req', id, method: 'connect',
       params: {
-        minProtocol: 3, maxProtocol: 3,
-        client: { id: 'openclaw-control-ui', version: '2026.2.9', platform: 'web', mode: 'webchat' },
+        minProtocol: 4, maxProtocol: 4,
+        client: { id: 'openclaw-control-ui', version: '2026.5.27', platform: 'web', mode: 'webchat' },
         role: 'operator', scopes: ['operator.read', 'operator.write', 'operator.admin'], caps: ['tool-events'], commands: [], permissions: {},
         auth: { token: GATEWAY_TOKEN }, locale: 'en-US', userAgent: 'virtual-office-chat/1.0'
       }
@@ -1493,12 +1510,15 @@
     if (phase === 'result' || phase === 'end') status = isError ? 'error' : 'done';
     const result = data.result ?? data.partialResult ?? payload?.result ?? payload?.output ?? payload?.content ?? payload?.text ?? '';
     const error = data.error || payload?.error || (isError && typeof result === 'string' ? result : '');
+    let args = data.args || data.arguments || payload?.arguments || payload?.args || payload?.input || {};
+    if (!args || typeof args !== 'object' || Array.isArray(args)) args = { value: args };
+    if (data.meta && !args.command && !args.description) args.description = data.meta;
     return {
-      id: data.toolCallId || payload?.toolCallId || payload?.callId || payload?.id || '',
+      id: data.toolCallId || data.itemId || payload?.toolCallId || payload?.callId || payload?.itemId || payload?.id || '',
       runId: payload?.runId || data.runId || '',
       status,
-      name: data.name || payload?.name || payload?.tool || payload?.toolName || 'tool',
-      arguments: data.args || data.arguments || payload?.arguments || payload?.args || payload?.input || {},
+      name: data.name || data.title || payload?.name || payload?.tool || payload?.toolName || 'tool',
+      arguments: args,
       result,
       error
     };
@@ -1805,6 +1825,8 @@
     const truncate = (s, n) => s && s.length > n ? s.slice(0, n) + '...' : (s || '');
     switch (name) {
       case 'exec': return '⚙️ exec: ' + truncate(args.command || '', 60);
+      case 'bash': return '⚙️ bash: ' + truncate(args.command || args.description || '', 60);
+      case 'Command': return '⚙️ command: ' + truncate(args.command || args.description || '', 60);
       case 'read': return '📄 read: ' + truncate(args.path || args.file_path || '', 50);
       case 'write': return '💾 write: ' + truncate(args.path || args.file_path || '', 50);
       case 'edit': return '✏️ edit: ' + truncate(args.path || args.file_path || '', 50);

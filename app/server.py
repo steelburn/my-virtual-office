@@ -3048,7 +3048,7 @@ def _wf_abort_task_session(session_key):
                         "id": "wf-abort-1",
                         "method": "connect",
                         "params": {
-                            "minProtocol": 3, "maxProtocol": 3,
+                            "minProtocol": 4, "maxProtocol": 4,
                             "client": {"id": "vo-workflow", "version": "1.0", "platform": "server", "mode": "webchat"},
                             "role": "operator",
                             "scopes": ["operator.read", "operator.write"],
@@ -3138,7 +3138,7 @@ def _wf_delete_session_via_gateway(session_key):
                         "id": "wf-cleanup-1",
                         "method": "connect",
                         "params": {
-                            "minProtocol": 3, "maxProtocol": 3,
+                            "minProtocol": 4, "maxProtocol": 4,
                             "client": {"id": "vo-workflow", "version": "1.0", "platform": "server", "mode": "webchat"},
                             "role": "operator",
                             "scopes": ["operator.read", "operator.write"],
@@ -3338,9 +3338,9 @@ def _wf_call_agent_ws(agent_id, message, timeout, session_key=None):
                 "id": connect_id,
                 "method": "connect",
                 "params": {
-                    "minProtocol": 3,
-                    "maxProtocol": 3,
-                    "client": {"id": "openclaw-control-ui", "version": "2026.2.9", "platform": "web", "mode": "webchat"},
+                    "minProtocol": 4,
+                    "maxProtocol": 4,
+                    "client": {"id": "openclaw-control-ui", "version": "2026.5.27", "platform": "web", "mode": "webchat"},
                     "role": "operator",
                     "scopes": ["operator.read", "operator.write", "operator.admin"],
                     "caps": ["tool-events"],
@@ -7976,8 +7976,8 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
                             "id": "gw-test-1",
                             "method": "connect",
                             "params": {
-                                "minProtocol": 3, "maxProtocol": 3,
-                                "client": {"id": "openclaw-control-ui", "version": "2026.2.9", "platform": "server", "mode": "webchat"},
+                                "minProtocol": 4, "maxProtocol": 4,
+                                "client": {"id": "openclaw-control-ui", "version": "2026.5.27", "platform": "server", "mode": "webchat"},
                                 "role": "operator",
                                 "scopes": ["operator.read"],
                                 "caps": [], "commands": [], "permissions": {},

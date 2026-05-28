@@ -633,11 +633,11 @@ async def _gateway_loop(gateway_url, gateway_token, origin):
                     "id": f"gp-connect-{int(time.time())}",
                     "method": "connect",
                     "params": {
-                        "minProtocol": 3,
-                        "maxProtocol": 3,
+                        "minProtocol": 4,
+                        "maxProtocol": 4,
                         "client": {
                             "id": "openclaw-control-ui",
-                            "version": "2026.2.9",
+                            "version": "2026.5.27",
                             "platform": "server",
                             "mode": "webchat"
                         },
