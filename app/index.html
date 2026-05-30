@@ -9,7 +9,7 @@
     <link rel="apple-touch-icon" href="icon-192.png">
     <link rel="manifest" href="manifest.json">
     <meta name="theme-color" content="#1a1a2e">
-    <link rel="stylesheet" href="style.css?v=7">
+    <link rel="stylesheet" href="style.css?v=20260530-agent-workspace-readiness">
     <link rel="stylesheet" href="projects.css?v=0">
     <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
 </head>
@@ -708,6 +708,38 @@
         </div>
     </div>
 
+    <!-- Agent Workspace Window -->
+    <div id="agent-workspace-menu" class="agent-workspace-menu hidden">
+        <button id="agent-workspace-open-btn" type="button">Open agent workspace</button>
+    </div>
+    <div id="agent-workspace-panel" class="agent-workspace-panel hidden">
+        <div class="agent-workspace-resize-handle" data-resize="se"></div>
+        <div class="agent-workspace-header" id="agent-workspace-drag-handle">
+            <div class="agent-workspace-title">
+                <span id="agent-workspace-emoji">🤖</span>
+                <div>
+                    <div id="agent-workspace-name">Agent Workspace</div>
+                    <div id="agent-workspace-subtitle">Workspace</div>
+                </div>
+            </div>
+            <div class="agent-workspace-controls">
+                <button id="agent-workspace-refresh" type="button" title="Refresh">↻</button>
+                <button id="agent-workspace-maximize" type="button" title="Maximize">□</button>
+                <button id="agent-workspace-close" type="button" title="Close">&times;</button>
+            </div>
+        </div>
+        <div class="agent-workspace-tabs">
+            <button class="active" data-aw-tab="overview" type="button">Overview</button>
+            <button data-aw-tab="bulletin" type="button">Bulletin</button>
+            <button data-aw-tab="tasks" type="button">Tasks</button>
+            <button data-aw-tab="files" type="button">Files</button>
+            <button data-aw-tab="skills" type="button">Skills</button>
+            <button data-aw-tab="notes" type="button">Notes</button>
+            <button data-aw-tab="settings" type="button">Settings</button>
+        </div>
+        <div id="agent-workspace-body" class="agent-workspace-body"></div>
+    </div>
+
     <script>
     function toggleSection(h4) {
         const body = h4.nextElementSibling;
@@ -755,7 +787,7 @@
         setTimeout(resizeCanvas, 320);
     }
     </script>
-    <script src="game.js?v=20260528-agent-platform-create"></script>
+    <script src="game.js?v=20260530-agent-workspace-readiness"></script>
     <script src="browser-panel.js?v=0"></script>
     <script src="projects.js?v=0"></script>
     <script>

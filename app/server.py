@@ -259,6 +259,7 @@ STATUS_DIR = VO_CONFIG["presence"]["statusDir"]
 os.makedirs(STATUS_DIR, exist_ok=True)
 STATUS_FILE = os.path.join(STATUS_DIR, "virtual-office-status.json")
 PROJECTS_FILE = os.path.join(STATUS_DIR, "projects.json")
+AGENT_WORKSPACES_FILE = os.path.join(STATUS_DIR, "agent-workspaces.json")
 AUTH_PROFILES_PATH = os.path.join(WORKSPACE_BASE, "agents/main/agent/auth-profiles.json")
 
 # ─── DYNAMIC AGENT DISCOVERY ─────────────────────────────────
@@ -273,7 +274,585 @@ PROJECT_STORE = MarkdownProjectStore(STATUS_DIR)
 AGENT_PLATFORM_COMM_SKILL_NAME = "AgentPlatform-to-AgentPlatform_Communications"
 
 
+def _safe_agent_workspace_key(agent_key):
+    return re.sub(r"[^a-zA-Z0-9_.:-]+", "-", str(agent_key or "").strip())[:120]
+
+
+def _load_agent_workspaces():
+    try:
+        with open(AGENT_WORKSPACES_FILE, "r") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_agent_workspaces(data):
+    os.makedirs(os.path.dirname(AGENT_WORKSPACES_FILE), exist_ok=True)
+    with open(AGENT_WORKSPACES_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+    try:
+        os.chmod(AGENT_WORKSPACES_FILE, 0o666)
+    except OSError:
+        pass
+
+
+def _find_agent_record(agent_key):
+    needle = str(agent_key or "")
+    for agent in get_roster():
+        values = (
+            agent.get("id"),
+            agent.get("statusKey"),
+            agent.get("providerAgentId"),
+            agent.get("profile"),
+        )
+        if needle in values:
+            return agent
+    return None
+
+
+_WORKSPACE_TEXT_EXTS = {
+    ".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".ini", ".env",
+    ".py", ".js", ".css", ".html", ".sh", ".csv", ".log",
+}
+_WORKSPACE_FILE_LIMIT = 256 * 1024
+
+
+def _agent_workspace_abs_path(agent_key, agent):
+    if agent.get("providerKind") == "hermes":
+        return None
+    ws_dir = AGENT_WORKSPACES.get(agent_key) or AGENT_WORKSPACES.get(agent.get("statusKey"))
+    if not ws_dir:
+        return None
+    return os.path.abspath(os.path.join(WORKSPACE_BASE, ws_dir))
+
+
+def _safe_workspace_relpath(raw_path):
+    rel = str(raw_path or "").replace("\\", "/").strip()
+    rel = rel.lstrip("/")
+    if not rel or rel in (".", "..") or "\x00" in rel:
+        return ""
+    parts = [p for p in rel.split("/") if p not in ("", ".")]
+    if any(p == ".." for p in parts):
+        return ""
+    return "/".join(parts)
+
+
+def _resolve_workspace_file(agent_key, agent, raw_path, allow_new=False):
+    root = _agent_workspace_abs_path(agent_key, agent)
+    if not root:
+        return None, "", "Workspace files are not available for this platform"
+    rel = _safe_workspace_relpath(raw_path)
+    if not rel:
+        return None, "", "File path required"
+    ext = os.path.splitext(rel)[1].lower()
+    if ext not in _WORKSPACE_TEXT_EXTS:
+        return None, "", "Only text workspace files can be edited"
+    full = os.path.abspath(os.path.join(root, rel))
+    if full != root and not full.startswith(root + os.sep):
+        return None, "", "File must stay inside the agent workspace"
+    if not allow_new and not os.path.isfile(full):
+        return None, "", "File not found"
+    return full, rel, ""
+
+
+def _read_workspace_text_file(agent_key, agent, relpath):
+    full, rel, err = _resolve_workspace_file(agent_key, agent, relpath)
+    if err:
+        return {"error": err, "_status": 400}
+    size = os.path.getsize(full)
+    if size > _WORKSPACE_FILE_LIMIT:
+        return {"error": "File is too large for dashboard editing", "_status": 413}
+    with open(full, "r", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+    return {
+        "ok": True,
+        "file": {
+            "name": os.path.basename(rel),
+            "path": rel,
+            "kind": "workspace",
+            "size": size,
+            "modified": datetime.fromtimestamp(os.path.getmtime(full), timezone.utc).isoformat(),
+            "content": content,
+        },
+    }
+
+
+def _save_workspace_text_file(agent_key, agent, relpath, content, create=False):
+    full, rel, err = _resolve_workspace_file(agent_key, agent, relpath, allow_new=create)
+    if err:
+        return {"error": err, "_status": 400}
+    text = str(content or "")
+    if len(text.encode("utf-8")) > _WORKSPACE_FILE_LIMIT:
+        return {"error": "File content is too large", "_status": 413}
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    with open(full, "w", encoding="utf-8") as f:
+        f.write(text)
+    return {"ok": True, "saved": rel}
+
+
+def _delete_workspace_text_file(agent_key, agent, relpath):
+    full, rel, err = _resolve_workspace_file(agent_key, agent, relpath)
+    if err:
+        return {"error": err, "_status": 400}
+    os.remove(full)
+    return {"ok": True, "deleted": rel}
+
+
+def _workspace_file_summaries(agent_key, agent):
+    provider_kind = agent.get("providerKind", "openclaw")
+    if provider_kind == "hermes":
+        profile = agent.get("profile") or agent.get("providerAgentId") or "default"
+        hist_path = _hermes_history_path(profile)
+        files = []
+        if os.path.exists(hist_path):
+            files.append({
+                "name": f"Hermes chat history ({profile})",
+                "kind": "history",
+                "size": os.path.getsize(hist_path),
+                "modified": datetime.fromtimestamp(os.path.getmtime(hist_path), timezone.utc).isoformat(),
+            })
+        return files
+
+    ws_path = _agent_workspace_abs_path(agent_key, agent)
+    if not ws_path:
+        return []
+    files = []
+    skip_dirs = {".git", "__pycache__", "node_modules", ".venv", "venv"}
+    preferred = {"AGENTS.md": -90, "IDENTITY.md": -89, "SOUL.md": -88, "USER.md": -87, "HEARTBEAT.md": -86, "MEMORY.md": -85, "TOOLS.md": -84}
+    for root, dirs, names in os.walk(ws_path):
+        dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".cache")]
+        depth = os.path.relpath(root, ws_path).count(os.sep)
+        if depth > 3:
+            dirs[:] = []
+        for fname in names:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in _WORKSPACE_TEXT_EXTS:
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                size = os.path.getsize(fpath)
+                rel = os.path.relpath(fpath, ws_path).replace(os.sep, "/")
+                if size > _WORKSPACE_FILE_LIMIT:
+                    kind = "large-text"
+                elif rel.startswith("memory/"):
+                    kind = "daily-note"
+                elif rel.startswith("notes/"):
+                    kind = "note-file"
+                else:
+                    kind = "workspace"
+                files.append({
+                    "name": fname,
+                    "path": rel,
+                    "kind": kind,
+                    "size": size,
+                    "modified": datetime.fromtimestamp(os.path.getmtime(fpath), timezone.utc).isoformat(),
+                    "_rank": preferred.get(rel, 0),
+                })
+            except OSError:
+                pass
+    files.sort(key=lambda f: (f.pop("_rank", 0), f.get("path", "")))
+    return files[:120]
+
+
+def _agent_skill_summaries(agent_key, agent):
+    if agent.get("providerKind") == "hermes":
+        return []
+    result = _handle_skill_list(agent_key)
+    return [
+        {
+            "name": s.get("name", ""),
+            "type": s.get("type", ""),
+            "description": s.get("description", ""),
+            "content": s.get("content", ""),
+        }
+        for s in result.get("skills", [])[:40]
+    ]
+
+
+def _agent_project_tasks(agent):
+    aliases = {
+        str(agent.get("id") or ""),
+        str(agent.get("statusKey") or ""),
+        str(agent.get("providerAgentId") or ""),
+    }
+    aliases.discard("")
+    data = _load_projects()
+    items = []
+    for project in data.get("projects", []):
+        columns = {c.get("id"): c.get("title", "") for c in project.get("columns", [])}
+        for task in project.get("tasks", []):
+            if str(task.get("assignee") or "") not in aliases:
+                continue
+            items.append({
+                "projectId": project.get("id", ""),
+                "projectTitle": project.get("title", ""),
+                "taskId": task.get("id", ""),
+                "title": task.get("title", ""),
+                "priority": task.get("priority", "medium"),
+                "column": columns.get(task.get("columnId"), ""),
+                "completed": bool(task.get("completedAt")),
+                "updatedAt": task.get("updatedAt") or project.get("updatedAt", ""),
+            })
+    items.sort(key=lambda x: x.get("updatedAt") or "", reverse=True)
+    return items[:25]
+
+
+def _agent_recent_activity(agent_key, agent):
+    if agent.get("providerKind") == "hermes":
+        profile = agent.get("profile") or agent.get("providerAgentId") or "default"
+        messages = _load_hermes_history(profile)[-80:]
+    else:
+        messages = get_agent_messages(agent_key, max_messages=80)
+    return messages[-80:] if isinstance(messages, list) else []
+
+
+def _agent_score_info(agent_key):
+    try:
+        data = _load_scores()
+        return data.get("agents", {}).get(agent_key, {"score": 0, "completed": 0, "streak": 0, "history": []})
+    except Exception:
+        return {"score": 0, "completed": 0, "streak": 0, "history": []}
+
+
+def _office_config_agent_override(agent_key):
+    path = os.path.join(STATUS_DIR, "office-config.json")
+    try:
+        with open(path, "r") as f:
+            cfg = json.load(f)
+    except Exception:
+        return {}
+    for item in cfg.get("agents", []) or []:
+        if agent_key in (item.get("id"), item.get("statusKey")):
+            return item
+    return {}
+
+
+def _update_office_config_agent(agent_key, patch):
+    path = os.path.join(STATUS_DIR, "office-config.json")
+    try:
+        with open(path, "r") as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+    agents = cfg.setdefault("agents", [])
+    item = None
+    for candidate in agents:
+        if agent_key in (candidate.get("id"), candidate.get("statusKey")):
+            item = candidate
+            break
+    if item is None:
+        item = {"id": agent_key, "statusKey": agent_key}
+        agents.append(item)
+    for key, value in patch.items():
+        if value is not None:
+            item[key] = value
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=2)
+    try:
+        os.chmod(path, 0o666)
+    except OSError:
+        pass
+    return item
+
+
+def _get_agent_workspace_payload(agent_key):
+    refresh_agent_maps()
+    agent = _find_agent_record(agent_key)
+    if not agent:
+        return {"error": f"Unknown agent: {agent_key}", "_status": 404}
+
+    key = agent.get("statusKey") or agent.get("id") or agent_key
+    store_key = _safe_agent_workspace_key(key)
+    store = _load_agent_workspaces()
+    workspace = store.setdefault(store_key, {})
+    workspace.setdefault("bulletin", [])
+    workspace.setdefault("tasks", [])
+    workspace.setdefault("notes", [])
+    workspace.setdefault("settings", {})
+    workspace.setdefault("updatedAt", "")
+
+    presence = _get_normalized_presence_state().get(key, {"state": "idle", "task": "", "updated": 0})
+    override = _office_config_agent_override(key)
+    payload_agent = {
+        "id": agent.get("id", key),
+        "statusKey": key,
+        "providerKind": agent.get("providerKind", "openclaw"),
+        "providerType": agent.get("providerType", "runtime"),
+        "providerAgentId": agent.get("providerAgentId", agent.get("id", key)),
+        "profile": agent.get("profile", ""),
+        "name": override.get("name") or agent.get("name", key),
+        "displayName": override.get("displayName") or override.get("name") or agent.get("name", key),
+        "emoji": override.get("emoji") or agent.get("emoji", "🤖"),
+        "role": override.get("role") or agent.get("role", ""),
+        "branch": override.get("branch") or agent.get("branch", ""),
+        "color": override.get("color", ""),
+        "model": agent.get("model", ""),
+        "provider": agent.get("provider", ""),
+        "lastActiveAt": agent.get("lastActiveAt", 0),
+    }
+    heartbeat = ""
+    if agent.get("providerKind") != "hermes":
+        hb = _resolve_workspace_file(key, agent, "HEARTBEAT.md", allow_new=True)[0]
+        if hb and os.path.isfile(hb):
+            try:
+                with open(hb, "r", encoding="utf-8", errors="replace") as f:
+                    heartbeat = f.read()
+            except OSError:
+                heartbeat = ""
+    return {
+        "ok": True,
+        "agent": payload_agent,
+        "presence": presence,
+        "workspace": workspace,
+        "files": _workspace_file_summaries(key, agent),
+        "skills": _agent_skill_summaries(key, agent),
+        "skillLibrary": _handle_skills_library_list().get("skills", []),
+        "projectTasks": _agent_project_tasks(agent),
+        "activity": _agent_recent_activity(key, agent),
+        "score": _agent_score_info(key),
+        "settings": {
+            "heartbeatContent": heartbeat,
+            "heartbeatApplicable": agent.get("providerKind") != "hermes",
+            "cronApplicable": agent.get("providerKind") != "hermes",
+            "filesApplicable": agent.get("providerKind") != "hermes",
+            "agentSkillsApplicable": agent.get("providerKind") != "hermes",
+            "skillLibraryApplicable": True,
+            "modelEditable": agent.get("providerKind") != "hermes",
+        },
+    }
+
+
+def _handle_agent_workspace_update(agent_key, body):
+    payload = _get_agent_workspace_payload(agent_key)
+    if not payload.get("ok"):
+        return payload
+    key = payload["agent"]["statusKey"]
+    store_key = _safe_agent_workspace_key(key)
+    store = _load_agent_workspaces()
+    workspace = store.setdefault(store_key, {"bulletin": [], "tasks": [], "notes": [], "settings": {}})
+    workspace.setdefault("bulletin", [])
+    workspace.setdefault("tasks", [])
+    workspace.setdefault("notes", [])
+    workspace.setdefault("settings", {})
+    action = (body.get("action") or "").strip()
+    now = datetime.now(timezone.utc).isoformat()
+    actor = (body.get("actor") or "user").strip()[:80] or "user"
+    agent = payload["agent"]
+
+    if action == "addBulletin":
+        text = (body.get("text") or "").strip()
+        if not text:
+            return {"error": "Bulletin text required", "_status": 400}
+        workspace.setdefault("bulletin", []).insert(0, {
+            "id": str(uuid.uuid4()),
+            "text": text[:5000],
+            "createdAt": now,
+            "createdBy": actor,
+            "pinned": bool(body.get("pinned", False)),
+        })
+        workspace["bulletin"] = workspace["bulletin"][:100]
+    elif action == "deleteBulletin":
+        item_id = str(body.get("id") or "")
+        workspace["bulletin"] = [x for x in workspace.get("bulletin", []) if x.get("id") != item_id]
+    elif action == "updateBulletin":
+        item_id = str(body.get("id") or "")
+        text = (body.get("text") or "").strip()
+        for note in workspace.get("bulletin", []):
+            if note.get("id") == item_id:
+                note["text"] = text[:5000]
+                note["updatedAt"] = now
+                note["pinned"] = bool(body.get("pinned", note.get("pinned", False)))
+                break
+    elif action == "addTask":
+        text = (body.get("text") or "").strip()
+        if not text:
+            return {"error": "Task text required", "_status": 400}
+        workspace.setdefault("tasks", []).append({
+            "id": str(uuid.uuid4()),
+            "text": text[:1000],
+            "detail": (body.get("detail") or "").strip()[:5000],
+            "done": False,
+            "status": "queued",
+            "priority": (body.get("priority") or "normal").strip()[:40],
+            "createdAt": now,
+            "createdBy": actor,
+            "due": (body.get("due") or "").strip()[:80],
+        })
+        workspace["tasks"] = workspace["tasks"][:100]
+        if not workspace.get("activeTaskId") and workspace.get("settings", {}).get("taskMode") == "single":
+            workspace["activeTaskId"] = workspace["tasks"][-1]["id"]
+            workspace["tasks"][-1]["status"] = "active"
+    elif action == "updateTask":
+        item_id = str(body.get("id") or "")
+        for task in workspace.get("tasks", []):
+            if task.get("id") == item_id:
+                task["text"] = (body.get("text") or task.get("text") or "").strip()[:1000]
+                task["detail"] = (body.get("detail") or task.get("detail") or "").strip()[:5000]
+                task["due"] = (body.get("due") or "").strip()[:80]
+                task["priority"] = (body.get("priority") or task.get("priority") or "normal").strip()[:40]
+                task["updatedAt"] = now
+                break
+    elif action == "toggleTask":
+        item_id = str(body.get("id") or "")
+        for task in workspace.get("tasks", []):
+            if task.get("id") == item_id:
+                task["done"] = not bool(task.get("done"))
+                task["status"] = "done" if task["done"] else "queued"
+                task["updatedAt"] = now
+                break
+    elif action == "startTask":
+        item_id = str(body.get("id") or "")
+        workspace["activeTaskId"] = item_id
+        for task in workspace.get("tasks", []):
+            if task.get("done"):
+                task["status"] = "done"
+            elif task.get("id") == item_id:
+                task["status"] = "active"
+                task["startedAt"] = now
+            elif task.get("status") == "active":
+                task["status"] = "queued"
+    elif action == "completeTask":
+        item_id = str(body.get("id") or workspace.get("activeTaskId") or "")
+        for task in workspace.get("tasks", []):
+            if task.get("id") == item_id:
+                task["done"] = True
+                task["status"] = "done"
+                task["completedAt"] = now
+                task["updatedAt"] = now
+                break
+        if workspace.get("activeTaskId") == item_id:
+            workspace["activeTaskId"] = ""
+        if workspace.get("settings", {}).get("taskMode") == "auto":
+            for task in workspace.get("tasks", []):
+                if not task.get("done"):
+                    workspace["activeTaskId"] = task.get("id")
+                    task["status"] = "active"
+                    task["startedAt"] = now
+                    break
+    elif action == "deleteTask":
+        item_id = str(body.get("id") or "")
+        workspace["tasks"] = [x for x in workspace.get("tasks", []) if x.get("id") != item_id]
+        if workspace.get("activeTaskId") == item_id:
+            workspace["activeTaskId"] = ""
+    elif action == "setTaskMode":
+        mode = (body.get("mode") or "manual").strip()
+        if mode not in ("manual", "single", "auto"):
+            return {"error": "Invalid task mode", "_status": 400}
+        workspace.setdefault("settings", {})["taskMode"] = mode
+    elif action == "addNote":
+        title = (body.get("title") or "Untitled note").strip()[:160]
+        workspace.setdefault("notes", []).insert(0, {
+            "id": str(uuid.uuid4()),
+            "title": title or "Untitled note",
+            "content": str(body.get("content") or "")[:50000],
+            "folder": (body.get("folder") or "General").strip()[:120] or "General",
+            "kind": (body.get("kind") or "note").strip()[:40],
+            "tags": [str(x).strip()[:40] for x in body.get("tags", []) if str(x).strip()][:12],
+            "createdAt": now,
+            "updatedAt": now,
+            "createdBy": actor,
+        })
+        workspace["notes"] = workspace["notes"][:300]
+    elif action == "updateNote":
+        item_id = str(body.get("id") or "")
+        for note in workspace.get("notes", []):
+            if note.get("id") == item_id:
+                note["title"] = (body.get("title") or note.get("title") or "Untitled note").strip()[:160]
+                note["content"] = str(body.get("content") or "")[:50000]
+                note["folder"] = (body.get("folder") or "General").strip()[:120] or "General"
+                note["kind"] = (body.get("kind") or note.get("kind") or "note").strip()[:40]
+                note["tags"] = [str(x).strip()[:40] for x in body.get("tags", []) if str(x).strip()][:12]
+                note["updatedAt"] = now
+                break
+    elif action == "deleteNote":
+        item_id = str(body.get("id") or "")
+        workspace["notes"] = [x for x in workspace.get("notes", []) if x.get("id") != item_id]
+    elif action == "readFile":
+        return _read_workspace_text_file(key, _find_agent_record(key), body.get("path") or "")
+    elif action == "saveFile":
+        result = _save_workspace_text_file(key, _find_agent_record(key), body.get("path") or "", body.get("content") or "", create=False)
+        if not result.get("ok"):
+            return result
+    elif action == "createFile":
+        result = _save_workspace_text_file(key, _find_agent_record(key), body.get("path") or "", body.get("content") or "", create=True)
+        if not result.get("ok"):
+            return result
+    elif action == "deleteFile":
+        result = _delete_workspace_text_file(key, _find_agent_record(key), body.get("path") or "")
+        if not result.get("ok"):
+            return result
+    elif action == "saveAgentSkill":
+        if payload["agent"].get("providerKind") == "hermes":
+            return {"error": "Hermes skills are not edited through OpenClaw workspace skills", "_status": 400}
+        name = (body.get("name") or "").strip()
+        content = str(body.get("content") or "")
+        if not content:
+            content = f"---\nname: {name or 'new-skill'}\ndescription: \"Agent workflow skill.\"\n---\n\n# {name or 'New Skill'}\n\nUse this skill when...\n"
+        result = _handle_skill_write(key, name, {"name": name, "content": content})
+        if not result.get("ok"):
+            return result
+    elif action == "deleteAgentSkill":
+        if payload["agent"].get("providerKind") == "hermes":
+            return {"error": "Hermes skills are not edited through OpenClaw workspace skills", "_status": 400}
+        result = _handle_skill_delete(key, (body.get("name") or "").strip())
+        if not result.get("ok"):
+            return result
+    elif action == "saveLibrarySkill":
+        content = str(body.get("content") or "")
+        name = (body.get("name") or "").strip()
+        if not content:
+            content = f"---\nname: {name or 'new-library-skill'}\ndescription: \"Reusable Virtual Office skill.\"\n---\n\n# {name or 'New Library Skill'}\n\nUse this skill when...\n"
+        result = _handle_skills_library_create({"name": name, "content": content})
+        if not result.get("ok"):
+            return result
+    elif action == "applyLibrarySkill":
+        if payload["agent"].get("providerKind") == "hermes":
+            return {"error": "Hermes skills are not edited through OpenClaw workspace skills", "_status": 400}
+        result = _handle_skills_library_apply({
+            "skill": (body.get("name") or "").strip(),
+            "agentId": key,
+            "overwrite": bool(body.get("overwrite", True)),
+        })
+        if not result.get("ok") and not result.get("exists"):
+            return result
+    elif action == "updateSettings":
+        settings = workspace.setdefault("settings", {})
+        for field in ("taskMode", "heartbeatMinutes", "cronEnabled", "displayName", "branch", "leaderboardPoints"):
+            if field in body:
+                settings[field] = body.get(field)
+        if "leaderboardPoints" in body:
+            try:
+                scores = _load_scores()
+                score_entry = scores.setdefault("agents", {}).setdefault(key, {"score": 0, "completed": 0, "streak": 0, "history": []})
+                score_entry["score"] = int(body.get("leaderboardPoints") or 0)
+                _save_scores(scores)
+            except Exception:
+                pass
+        if "heartbeatContent" in body:
+            if payload["agent"].get("providerKind") == "hermes":
+                return {"error": "Heartbeats are OpenClaw-only for now; Hermes agents do not use HEARTBEAT.md", "_status": 400}
+            result = _save_workspace_text_file(key, _find_agent_record(key), "HEARTBEAT.md", body.get("heartbeatContent") or "", create=True)
+            if not result.get("ok"):
+                return result
+        patch = {}
+        for field in ("name", "displayName", "role", "branch", "emoji", "color"):
+            if field in body:
+                patch[field] = str(body.get(field) or "").strip()
+        if patch:
+            _update_office_config_agent(key, patch)
+    else:
+        return {"error": f"Unknown action: {action}", "_status": 400}
+
+    workspace["updatedAt"] = now
+    store[store_key] = workspace
+    _save_agent_workspaces(store)
+    return _get_agent_workspace_payload(key)
+
+
 def _agent_platform_comm_skill_content():
+    office_url = f"http://127.0.0.1:{PORT}"
     return '''---
 name: AgentPlatform-to-AgentPlatform_Communications
 description: "Talk to agents on OpenClaw, Hermes, or other Virtual Office-connected platforms through the office communication layer."
@@ -292,7 +871,7 @@ Do **not** bypass the office with a direct CLI/private channel when the conversa
 Default local endpoint:
 
 ```bash
-POST http://127.0.0.1:8090/api/agent-platform-communications/send
+POST {office_url}/api/agent-platform-communications/send
 ```
 
 If Virtual Office runs elsewhere, use that office base URL.
@@ -317,7 +896,7 @@ Office agent IDs look like:
 ## Curl example
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8090/api/agent-platform-communications/send \
+curl -sS -X POST {office_url}/api/agent-platform-communications/send \
   -H 'Content-Type: application/json' \
   -d '{
     "fromAgentId":"main",
@@ -343,13 +922,14 @@ The response contains the target agent reply and office log IDs:
 ## Safety
 
 - Keep private data minimal.
-- Do not request config, credential, network, or infrastructure changes unless Eli explicitly approved them.
+- Do not request config, credential, network, or infrastructure changes unless the office owner explicitly approved them.
 - Use a clear `conversationId` when continuing the same topic.
 - If the endpoint fails, report the error instead of silently using an offscreen private channel.
-'''
+'''.replace("{office_url}", office_url)
 
 
 def _vo_presence_skill_content():
+    office_url = f"http://127.0.0.1:{PORT}"
     return '''---
 name: VirtualOffice-Presence-and-Status
 description: "Update and inspect Virtual Office presence states such as working, idle, break, and meeting."
@@ -362,7 +942,7 @@ Use this to make the office show what you are doing.
 ## Set working
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8090/api/presence/YOUR_AGENT_ID \
+curl -sS -X POST {office_url}/api/presence/YOUR_AGENT_ID \
   -H 'Content-Type: application/json' \
   -d '{"state":"working","task":"short task description"}'
 ```
@@ -370,7 +950,7 @@ curl -sS -X POST http://127.0.0.1:8090/api/presence/YOUR_AGENT_ID \
 ## Set idle
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8090/api/presence/YOUR_AGENT_ID \
+curl -sS -X POST {office_url}/api/presence/YOUR_AGENT_ID \
   -H 'Content-Type: application/json' \
   -d '{"state":"idle"}'
 ```
@@ -378,8 +958,8 @@ curl -sS -X POST http://127.0.0.1:8090/api/presence/YOUR_AGENT_ID \
 ## Read presence
 
 ```bash
-curl -sS http://127.0.0.1:8090/api/presence
-curl -sS http://127.0.0.1:8090/status
+curl -sS {office_url}/api/presence
+curl -sS {office_url}/status
 ```
 
 ## Rules
@@ -388,10 +968,11 @@ curl -sS http://127.0.0.1:8090/status
 - Keep task text short.
 - Set `idle` when done.
 - Do not fake another agent's status unless you are the office broker handling that agent's task.
-'''
+'''.replace("{office_url}", office_url)
 
 
 def _vo_browser_skill_content():
+    office_url = f"http://127.0.0.1:{PORT}"
     return '''---
 name: VirtualOffice-Browser-Control
 description: "Use the Virtual Office browser panel/status surface safely instead of direct Kasm/CDP credentials."
@@ -404,25 +985,26 @@ Use this when you need the shared Virtual Office browser/Kasm panel.
 ## Current safe read endpoints
 
 ```bash
-curl -sS http://127.0.0.1:8090/browser-status
-curl -sS http://127.0.0.1:8090/browser-tabs
-curl -sS http://127.0.0.1:8090/browser-controller
+curl -sS {office_url}/browser-status
+curl -sS {office_url}/browser-tabs
+curl -sS {office_url}/browser-controller
 ```
 
 ## Rules
 
 - Treat the Virtual Office browser as a shared visible resource.
 - Do not use raw Kasm/CDP credentials directly unless the office/browser adapter explicitly gives you a safe action endpoint.
-- Announce/request browser use through presence or AgentPlatform communications so Eli can see who is using it.
+- Announce/request browser use through presence or AgentPlatform communications so the office owner can see who is using it.
 - If another agent/user controls the browser, wait or ask instead of fighting for control.
 
 ## Current limitation
 
 This skill documents the shared browser surface. A provider-neutral browser action endpoint is planned next; until then, agents outside OpenClaw should not bypass the office to control Kasm directly.
-'''
+'''.replace("{office_url}", office_url)
 
 
 def _vo_meetings_skill_content():
+    office_url = f"http://127.0.0.1:{PORT}"
     return '''---
 name: VirtualOffice-Meetings
 description: "Create, inspect, and end visible Virtual Office meetings with summaries and action items."
@@ -435,14 +1017,14 @@ Use meetings when multiple agents coordinate.
 ## Read meetings
 
 ```bash
-curl -sS http://127.0.0.1:8090/api/meetings/active
-curl -sS http://127.0.0.1:8090/api/meetings/history
+curl -sS {office_url}/api/meetings/active
+curl -sS {office_url}/api/meetings/history
 ```
 
 ## Create meeting
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8090/api/meetings/create \
+curl -sS -X POST {office_url}/api/meetings/create \
   -H 'Content-Type: application/json' \
   -d '{"topic":"Topic","purpose":"Why we are meeting","kind":"discussion","organizer":"YOUR_AGENT_ID","participants":["YOUR_AGENT_ID","OTHER_AGENT_ID"]}'
 ```
@@ -450,7 +1032,7 @@ curl -sS -X POST http://127.0.0.1:8090/api/meetings/create \
 ## End meeting
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8090/api/meetings/end \
+curl -sS -X POST {office_url}/api/meetings/end \
   -H 'Content-Type: application/json' \
   -d '{"id":"MEETING_ID","endedBy":"YOUR_AGENT_ID","summary":"What happened","resolution":"Decision/outcome","actionItems":["Next step"]}'
 ```
@@ -459,10 +1041,11 @@ curl -sS -X POST http://127.0.0.1:8090/api/meetings/end \
 
 - Always end meetings with a useful summary.
 - Do not silently create meetings for casual one-off messages; use AgentPlatform communications for that.
-'''
+'''.replace("{office_url}", office_url)
 
 
 def _vo_projects_skill_content():
+    office_url = f"http://127.0.0.1:{PORT}"
     return '''---
 name: VirtualOffice-Projects-and-Tasks
 description: "Inspect and work with Virtual Office projects, tasks, workflow status, and agent scores."
@@ -475,21 +1058,21 @@ Use this to inspect visible project/task state.
 ## Read projects
 
 ```bash
-curl -sS http://127.0.0.1:8090/api/projects
-curl -sS http://127.0.0.1:8090/api/projects/PROJECT_ID
-curl -sS http://127.0.0.1:8090/api/projects/PROJECT_ID/workflow/status
+curl -sS {office_url}/api/projects
+curl -sS {office_url}/api/projects/PROJECT_ID
+curl -sS {office_url}/api/projects/PROJECT_ID/workflow/status
 ```
 
 ## Read scores
 
 ```bash
-curl -sS http://127.0.0.1:8090/api/projects/scores
+curl -sS {office_url}/api/projects/scores
 ```
 
 ## Create a task
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8090/api/projects/PROJECT_ID/tasks \
+curl -sS -X POST {office_url}/api/projects/PROJECT_ID/tasks \
   -H 'Content-Type: application/json' \
   -d '{"title":"Task title","description":"Task details","assignee":"AGENT_ID"}'
 ```
@@ -499,7 +1082,7 @@ curl -sS -X POST http://127.0.0.1:8090/api/projects/PROJECT_ID/tasks \
 - Prefer project/task endpoints for durable work instead of private chat when the work belongs on a board.
 - Keep task titles short and descriptions concrete.
 - Do not delete or reorder project data unless explicitly asked.
-'''
+'''.replace("{office_url}", office_url)
 
 
 def _builtin_office_skill_contents():
@@ -827,7 +1410,7 @@ def _handle_hermes_chat(body):
             f"[A2A from=user name={json.dumps(sender_name)} to={agent.get('id') or agent_key} isUser=true sourceApp={json.dumps(source_app)} sourceSurface={json.dumps(source_surface)}]\n"
             f"Message from {sender_name} via {pretty_surface}.\n\n"
             f"{message}\n\n"
-            "Reply directly to the user. Do not call them Elix unless they identify as Elix."
+            "Reply directly to the user. Do not assume the user's name unless they identify themselves."
         )
 
     now_ms = int(time.time() * 1000)
@@ -1237,7 +1820,7 @@ def _parse_a2a_envelope(text):
     This is display metadata only. Agent trust/authority still comes from
     OpenClaw provenance or the sender wrapper, never from arbitrary text alone.
     Supported form:
-      [A2A from=elix name="Elix ⚡" to=pq-m-moe isUser=false]
+      [A2A from=main name="Office Agent" to=agent-id isUser=false]
     """
     if not text:
         return None, text
@@ -4421,8 +5004,8 @@ def _wf_persist_state(project_id):
             json.dump(state_data, f, indent=2)
     except Exception:
         pass
-    # Also write shared project-work signal file so OTHER VO instances
-    # (e.g. the personal office on 8085) can show project work indicators.
+    # Also write shared project-work signal file so other VO instances
+    # can show project work indicators.
     # This file lives in ~/.openclaw/shared/ which is mounted by all VOs.
     _wf_update_shared_project_work()
 
@@ -6064,6 +6647,15 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             # Enforce agent limit in demo mode without hiding whole providers.
             roster = _apply_agent_limit_balanced(roster)
             self.wfile.write(json.dumps({"agents": roster}).encode())
+        elif request_path.startswith("/api/agent-workspace/"):
+            agent_key = urllib.parse.unquote(request_path.split("/api/agent-workspace/", 1)[1].strip("/"))
+            result = _get_agent_workspace_payload(agent_key)
+            self.send_response(result.get("_status", 200))
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            result.pop("_status", None)
+            self.wfile.write(json.dumps(result).encode())
         elif self.path == "/api/agent-platforms":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -6398,8 +6990,8 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             upload_suffix = os.path.join(*norm_parts[idx:])
             for root in self._chat_media_allowed_roots():
                 candidates.append(os.path.join(root, upload_suffix))
-            # Also scan one level below OpenClaw roots (vo-data/uploads,
-            # vo-data-product/uploads, workspace/uploads, etc.). This keeps the
+            # Also scan one level below OpenClaw roots (data/uploads,
+            # workspace/uploads, etc.). This keeps the
             # product generic while still supporting multiple VO instances.
             for base in [WORKSPACE_BASE, os.path.expanduser("~/.openclaw")]:
                 try:
@@ -7569,6 +8161,18 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             length = int(self.headers.get('Content-Length', 0))
             body = json.loads(self.rfile.read(length)) if length else {}
             result = _handle_agent_create(body)
+            self.send_response(result.get("_status", 200))
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            result.pop("_status", None)
+            self.wfile.write(json.dumps(result).encode())
+            return
+        elif request_path.startswith("/api/agent-workspace/"):
+            agent_key = urllib.parse.unquote(request_path.split("/api/agent-workspace/", 1)[1].strip("/"))
+            length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            result = _handle_agent_workspace_update(agent_key, body)
             self.send_response(result.get("_status", 200))
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
