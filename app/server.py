@@ -855,6 +855,16 @@ def _handle_agent_workspace_update(agent_key, body):
         })
         if not result.get("ok") and not result.get("exists"):
             return result
+    elif action == "saveAgentSkillToLibrary":
+        if payload["agent"].get("providerKind") == "hermes":
+            return {"error": "Hermes skills are not edited through OpenClaw workspace skills", "_status": 400}
+        result = _handle_skills_library_save_from_agent({
+            "skill": (body.get("name") or "").strip(),
+            "agentId": key,
+            "overwrite": bool(body.get("overwrite", False)),
+        })
+        if not result.get("ok"):
+            return result
     elif action == "updateSettings":
         settings = workspace.setdefault("settings", {})
         for field in ("taskMode", "heartbeatMinutes", "cronEnabled", "displayName", "branch", "leaderboardPoints"):
@@ -2644,6 +2654,11 @@ def _parse_skill_frontmatter(content):
     return name, description
 
 
+def _skill_library_slug(name):
+    """Return the normalized folder name used by the central skill library."""
+    return re.sub(r'[^a-zA-Z0-9_-]', '-', (name or "").strip()).strip('-').lower()
+
+
 def _handle_skills_library_list():
     """GET /api/skills-library — list all library skills."""
     _ensure_builtin_communication_skill()
@@ -2695,7 +2710,7 @@ def _handle_skills_library_create(body):
     content = body.get("content", "")
     if not name:
         return {"error": "name is required", "_status": 400}
-    slug = re.sub(r'[^a-zA-Z0-9_-]', '-', name).strip('-').lower()
+    slug = _skill_library_slug(name)
     if not slug:
         return {"error": "Invalid skill name", "_status": 400}
     lib_dir = _get_skills_library_dir()
@@ -2708,6 +2723,249 @@ def _handle_skills_library_create(body):
         f.write(content)
     parsed_name, description = _parse_skill_frontmatter(content)
     return {"ok": True, "skill": slug, "name": parsed_name or slug, "description": description, "path": skill_file}
+
+
+def _handle_skills_library_save_from_agent(body):
+    """Copy an agent workspace skill into the central skills library."""
+    agent_id = (body.get("agentId") or "").strip()
+    skill_name = (body.get("skill") or body.get("name") or "").strip()
+    overwrite = bool(body.get("overwrite", False))
+    if not agent_id:
+        return {"error": "agentId is required", "_status": 400}
+    if not skill_name:
+        return {"error": "skill is required", "_status": 400}
+
+    skill = None
+    result = _handle_skill_list(agent_id)
+    if not result.get("skills") and result.get("error"):
+        return result
+    for item in result.get("skills", []):
+        if item.get("name") == skill_name:
+            skill = item
+            break
+    if not skill:
+        return {"error": f"Skill '{skill_name}' not found on agent '{agent_id}'", "_status": 404}
+
+    content = skill.get("content") or ""
+    slug = _skill_library_slug(skill_name)
+    if not slug:
+        return {"error": "Invalid skill name", "_status": 400}
+
+    lib_dir = _get_skills_library_dir()
+    skill_dir = os.path.join(lib_dir, slug)
+    skill_file = os.path.join(skill_dir, "SKILL.md")
+    existed = os.path.isfile(skill_file)
+    if existed:
+        try:
+            with open(skill_file, "r") as f:
+                existing = f.read()
+        except Exception:
+            existing = ""
+        if existing == content:
+            return {
+                "ok": True,
+                "status": "identical",
+                "exists": True,
+                "different": False,
+                "skill": slug,
+                "message": "Skill already exists in the Skill Library.",
+            }
+        if not overwrite:
+            return {
+                "ok": False,
+                "status": "exists_different",
+                "exists": True,
+                "different": True,
+                "skill": slug,
+                "message": "Skill already exists in the Skill Library.",
+            }
+
+    os.makedirs(skill_dir, exist_ok=True)
+    with open(skill_file, "w") as f:
+        f.write(content)
+    parsed_name, description = _parse_skill_frontmatter(content)
+    return {
+        "ok": True,
+        "status": "updated" if existed else "created",
+        "skill": slug,
+        "name": parsed_name or slug,
+        "description": description,
+        "path": skill_file,
+    }
+
+
+def _parse_cli_json(stdout, stderr=""):
+    """Parse JSON from OpenClaw CLI output that may include warning lines first."""
+    text = (stdout or "").strip()
+    if not text:
+        text = (stderr or "").strip()
+    for idx, ch in enumerate(text):
+        if ch not in "[{":
+            continue
+        try:
+            data, _ = json.JSONDecoder().raw_decode(text[idx:])
+            return data
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _openclaw_skill_workshop_cli(agent_id, args, timeout=25):
+    """Run an OpenClaw Skill Workshop CLI command for one agent workspace."""
+    openclaw_bin = shutil.which("openclaw")
+    if not openclaw_bin:
+        return {"ok": False, "error": "openclaw CLI not found", "_status": 500}
+    cmd = [openclaw_bin, "skills"]
+    if agent_id:
+        cmd.extend(["--agent", agent_id])
+    cmd.append("workshop")
+    cmd.extend(args)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "Skill Workshop command timed out", "_status": 504, "agentId": agent_id}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "_status": 500, "agentId": agent_id}
+    data = _parse_cli_json(result.stdout, result.stderr)
+    if result.returncode != 0:
+        return {
+            "ok": False,
+            "error": (result.stderr or result.stdout or "Skill Workshop command failed").strip()[:1000],
+            "code": result.returncode,
+            "_status": 500,
+            "agentId": agent_id,
+            "data": data,
+        }
+    if isinstance(data, dict):
+        data.setdefault("ok", True)
+        data.setdefault("agentId", agent_id)
+        return data
+    return {"ok": True, "agentId": agent_id, "result": data}
+
+
+def _skill_workshop_rpc(method, agent_id, params=None, timeout=25):
+    payload = dict(params or {})
+    if agent_id:
+        payload["agentId"] = agent_id
+    result = _gateway_rpc_call(method, payload, timeout=timeout)
+    if isinstance(result, dict):
+        result.setdefault("agentId", agent_id)
+    return result
+
+
+def _skill_workshop_agent_targets(agent_id=""):
+    refresh_agent_maps()
+    roster = get_roster()
+    targets = []
+    for agent in roster:
+        key = agent.get("statusKey") or agent.get("key") or agent.get("id")
+        if not key:
+            continue
+        if agent_id and key != agent_id and agent.get("id") != agent_id:
+            continue
+        if agent.get("providerKind") == "hermes":
+            continue
+        targets.append({
+            "id": key,
+            "name": agent.get("name") or key,
+            "emoji": agent.get("emoji") or "",
+        })
+    if agent_id and not targets:
+        targets.append({"id": agent_id, "name": agent_id, "emoji": ""})
+    return targets
+
+
+def _normalize_skill_workshop_proposal(proposal, agent):
+    if not isinstance(proposal, dict):
+        return {}
+    item = dict(proposal)
+    proposal_id = item.get("id") or item.get("proposalId") or item.get("proposal_id")
+    item["id"] = proposal_id or ""
+    item["agentId"] = agent.get("id")
+    item["agentName"] = agent.get("name")
+    item["agentEmoji"] = agent.get("emoji", "")
+    return item
+
+
+def _handle_skill_workshop_list(qs):
+    agent_id = ""
+    if isinstance(qs, dict):
+        values = qs.get("agentId") or qs.get("agent") or []
+        if values:
+            agent_id = str(values[0]).strip()
+    targets = _skill_workshop_agent_targets(agent_id)
+    proposals = []
+    errors = []
+
+    def load_target(agent):
+        result = _skill_workshop_rpc("skills.proposals.list", agent["id"], {}, timeout=25)
+        return agent, result
+
+    # Keep the UI responsive when aggregating across many agents.
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        futures = [pool.submit(load_target, agent) for agent in targets]
+        for future in concurrent.futures.as_completed(futures):
+            agent, result = future.result()
+            if not result.get("ok"):
+                errors.append({"agentId": agent["id"], "agentName": agent["name"], "error": result.get("error", "Failed")})
+                continue
+            for proposal in result.get("proposals", []) or []:
+                normalized = _normalize_skill_workshop_proposal(proposal, agent)
+                if normalized:
+                    proposals.append(normalized)
+    proposals.sort(key=lambda p: str(p.get("updatedAt") or p.get("createdAt") or ""), reverse=True)
+    return {"ok": True, "proposals": proposals, "errors": errors, "agents": targets}
+
+
+def _handle_skill_workshop_inspect(qs):
+    proposal_id = ""
+    agent_id = ""
+    if isinstance(qs, dict):
+        proposal_id = str((qs.get("proposalId") or qs.get("id") or [""])[0]).strip()
+        agent_id = str((qs.get("agentId") or qs.get("agent") or [""])[0]).strip()
+    if not proposal_id:
+        return {"error": "proposalId is required", "_status": 400}
+    if not agent_id:
+        return {"error": "agentId is required", "_status": 400}
+    result = _skill_workshop_rpc("skills.proposals.inspect", agent_id, {"proposalId": proposal_id}, timeout=25)
+    result.setdefault("proposalId", proposal_id)
+    result.setdefault("agentId", agent_id)
+    return result
+
+
+def _handle_skill_workshop_action(body):
+    action = (body.get("action") or "").strip()
+    proposal_id = (body.get("proposalId") or body.get("id") or "").strip()
+    agent_id = (body.get("agentId") or "").strip()
+    if action not in ("apply", "reject", "quarantine", "revise"):
+        return {"error": "Invalid Skill Workshop action", "_status": 400}
+    if not proposal_id:
+        return {"error": "proposalId is required", "_status": 400}
+    if not agent_id:
+        return {"error": "agentId is required", "_status": 400}
+
+    method = {
+        "apply": "skills.proposals.apply",
+        "reject": "skills.proposals.reject",
+        "quarantine": "skills.proposals.quarantine",
+        "revise": "skills.proposals.revise",
+    }[action]
+    params = {"proposalId": proposal_id}
+    if action in ("reject", "quarantine", "apply"):
+        reason = (body.get("reason") or "").strip()
+        if reason:
+            params["reason"] = reason
+    if action == "revise":
+        proposal_content = body.get("proposalContent") or body.get("content") or ""
+        if not proposal_content:
+            return {"error": "proposalContent is required for revise", "_status": 400}
+        params["content"] = str(proposal_content)
+        for key in ("description", "goal", "evidence"):
+            value = (body.get(key) or "").strip()
+            if value:
+                params[key] = value
+    return _skill_workshop_rpc(method, agent_id, params, timeout=35)
 
 
 def _handle_skills_library_delete(skill_name):
@@ -7314,6 +7572,24 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(json.dumps(result).encode())
+        elif request_path == "/api/skills-workshop":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            result = _handle_skill_workshop_list(qs)
+            self.send_response(result.get("_status", 200))
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            result.pop("_status", None)
+            self.wfile.write(json.dumps(result).encode())
+        elif request_path == "/api/skills-workshop/inspect":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            result = _handle_skill_workshop_inspect(qs)
+            self.send_response(result.get("_status", 200))
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            result.pop("_status", None)
+            self.wfile.write(json.dumps(result).encode())
         elif self.path.startswith("/api/skills-library/") and self.path != "/api/skills-library/apply" and self.path != "/api/skills-library/upload":
             skill_name = self.path.split("/api/skills-library/")[1].strip("/")
             result = _handle_skills_library_get(skill_name)
@@ -8983,10 +9259,30 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             result.pop("_status", None)
             self.wfile.write(json.dumps(result).encode())
+        elif self.path == "/api/skills-library/save-from-agent":
+            length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            result = _handle_skills_library_save_from_agent(body)
+            self.send_response(result.get("_status", 200))
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            result.pop("_status", None)
+            self.wfile.write(json.dumps(result).encode())
         elif self.path == "/api/skills-library/upload":
             length = int(self.headers.get('Content-Length', 0))
             body = json.loads(self.rfile.read(length)) if length else {}
             result = _handle_skills_library_upload(body)
+            self.send_response(result.get("_status", 200))
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            result.pop("_status", None)
+            self.wfile.write(json.dumps(result).encode())
+        elif self.path == "/api/skills-workshop/action":
+            length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            result = _handle_skill_workshop_action(body)
             self.send_response(result.get("_status", 200))
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")

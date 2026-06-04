@@ -9,7 +9,7 @@
     <link rel="apple-touch-icon" href="icon-192.png">
     <link rel="manifest" href="manifest.json">
     <meta name="theme-color" content="#1a1a2e">
-    <link rel="stylesheet" href="style.css?v=20260530-hermes-native-approval">
+    <link rel="stylesheet" href="style.css?v=20260604-workspace-skill-workshop-queue">
     <link rel="stylesheet" href="projects.css?v=0">
     <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
 </head>
@@ -402,6 +402,15 @@
                 <h3 class="bio-toggle" onclick="toggleBio('skills')">▶ SKILLS</h3>
                 <div id="modal-bio-skills" class="bio-content" style="display:none">
                     <div id="skills-list"></div>
+                    <div class="skill-workshop-panel">
+                        <div class="skill-workshop-heading">
+                            <span>Skill Workshop</span>
+                            <button type="button" onclick="refreshSkillWorkshopQueue()">Refresh</button>
+                        </div>
+                        <div id="skill-workshop-list" class="skill-workshop-list">
+                            <span style="color:#666;font-size:11px;">Loading proposals...</span>
+                        </div>
+                    </div>
                     <div class="bio-btn-row">
                         <button class="bio-edit-btn" onclick="showAddSkillForm()">➕ Add Skill</button>
                         <button class="bio-edit-btn" onclick="showLibraryPicker()">📚 Add from Library</button>
@@ -787,7 +796,7 @@
         setTimeout(resizeCanvas, 320);
     }
     </script>
-    <script src="game.js?v=20260530-hermes-native-approval"></script>
+    <script src="game.js?v=20260604-workspace-skill-workshop-queue"></script>
     <script src="browser-panel.js?v=0"></script>
     <script src="projects.js?v=0"></script>
     <script>
