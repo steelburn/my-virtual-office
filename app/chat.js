@@ -415,14 +415,17 @@
         const res = await rpc('chat.history', { sessionKey: this.sessionKey, limit: 500 });
         if (res.ok && res.payload?.messages) {
           const messages = res.payload.messages;
+          const seenToolKeys = new Set();
           this.messages.innerHTML = '';
           for (const msg of messages) {
             const t = extractText(msg) || (typeof msg.content === 'string' ? msg.content : '');
             const ts = msg.timestamp || msg.ts || msg.message?.timestamp || null;
             const media = extractMedia(msg, t);
             const tools = extractToolItems(msg);
+            for (const tool of tools) seenToolKeys.add(toolHistoryKey(tool));
             if (t || media.length || tools.length) this.appendMessage(msg.role, t, ts, media, resolveMessageSender(msg, this), tools);
           }
+          await this.loadRecoveredActivity(seenToolKeys);
           const lastMeaningful = [...messages].reverse().find(m => {
             const t = extractText(m) || (typeof m.content === 'string' ? m.content : '');
             return t || extractToolItems(m).length;
@@ -442,6 +445,29 @@
         }
       } catch (e) {
         console.warn('Failed to load history:', e);
+      }
+    }
+
+    async loadRecoveredActivity(seenToolKeys = new Set()) {
+      try {
+        const url = '/api/session-activity?sessionKey=' + encodeURIComponent(this.sessionKey) + '&limit=80';
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data.ok || !Array.isArray(data.messages)) return;
+        for (const msg of data.messages) {
+          const tools = normalizeHistoricalTools(msg.tools || []).filter((tool) => {
+            const key = toolHistoryKey(tool);
+            if (seenToolKeys.has(key)) return false;
+            seenToolKeys.add(key);
+            return true;
+          });
+          if (!tools.length && !msg.text) continue;
+          const ts = msg.epochMs || msg.ts || Date.now();
+          this.appendMessage(msg.role || 'assistant', msg.text || '', ts, [], resolveMessageSender(msg, this), tools);
+        }
+      } catch (e) {
+        console.warn('[chat] recovered activity load failed:', e);
       }
     }
 
@@ -1731,6 +1757,27 @@
       }
     }
     return tools;
+  }
+
+  function normalizeHistoricalTools(items) {
+    if (!Array.isArray(items)) return [];
+    return items.filter(Boolean).map((item) => ({
+      id: item.id || item.toolCallId || item.callId || '',
+      runId: item.runId || '',
+      status: item.status || (item.error ? 'error' : item.result ? 'done' : 'running'),
+      name: item.name || item.toolName || item.tool_name || 'tool',
+      arguments: coerceToolArgs(item.arguments || item.args || item.input || {}),
+      result: item.result ?? item.output ?? item.content ?? '',
+      error: item.error || ''
+    }));
+  }
+
+  function toolHistoryKey(tool) {
+    if (!tool) return '';
+    if (tool.id) return 'id:' + tool.id;
+    const args = coerceToolArgs(tool.arguments || {});
+    const preview = args.command || args.path || args.file_path || args.url || args.query || args.message || args.value || '';
+    return [tool.runId || '', tool.name || 'tool', tool.status || '', String(preview).slice(0, 160)].join('|');
   }
 
   function normalizeHermesTools(items) {

@@ -1355,6 +1355,190 @@ def _is_hermes_agent(agent_id_or_key):
     return needle.startswith("hermes:") or needle.startswith("hermes-")
 
 
+def _parse_iso_epoch_ms(value):
+    """Convert ISO timestamps or epoch-ish values to browser-friendly epoch ms."""
+    if not value:
+        return 0
+    if isinstance(value, (int, float)):
+        return int(value if value > 1e12 else value * 1000)
+    try:
+        raw = str(value)
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return int(dt.timestamp() * 1000)
+    except Exception:
+        return 0
+
+
+def _read_tail_text(path, initial_bytes=64 * 1024, max_bytes=2 * 1024 * 1024, min_lines=20):
+    """Read a complete-line tail from large JSONL files."""
+    if not path or not os.path.exists(path):
+        return ""
+    try:
+        with open(path, "rb") as fb:
+            fb.seek(0, 2)
+            fsize = fb.tell()
+            tail_size = min(initial_bytes, fsize)
+            while True:
+                start = max(0, fsize - tail_size)
+                fb.seek(start)
+                tail_data = fb.read().decode("utf-8", errors="replace")
+                if start > 0:
+                    nl = tail_data.find("\n")
+                    if nl >= 0:
+                        tail_data = tail_data[nl + 1:]
+                complete_lines = [x for x in tail_data.split("\n") if x.strip()]
+                if start == 0 or len(complete_lines) >= min_lines or tail_size >= min(max_bytes, fsize):
+                    return tail_data
+                tail_size = min(tail_size * 4, max_bytes, fsize)
+    except Exception:
+        return ""
+
+
+def _openclaw_session_paths(agent_id, session_key=None):
+    """Resolve the active transcript and matching trajectory file for an agent session."""
+    if not agent_id:
+        return None, None, {}
+    sessions_dir = os.path.join(WORKSPACE_BASE, f"agents/{agent_id}/sessions")
+    sessions_json_path = os.path.join(sessions_dir, "sessions.json")
+    session_info = {}
+    try:
+        with open(sessions_json_path, "r") as f:
+            sessions = json.load(f)
+        if session_key and isinstance(sessions.get(session_key), dict):
+            session_info = sessions.get(session_key) or {}
+        if not session_info:
+            best_ts = -1
+            for val in sessions.values():
+                if not isinstance(val, dict):
+                    continue
+                ts = val.get("updatedAt", 0)
+                if ts > best_ts:
+                    best_ts = ts
+                    session_info = val
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        session_info = {}
+
+    session_id = str(session_info.get("sessionId") or "")
+    jsonl_file = os.path.join(sessions_dir, f"{session_id}.jsonl") if session_id else None
+    trajectory_file = os.path.join(sessions_dir, f"{session_id}.trajectory.jsonl") if session_id else None
+    if jsonl_file and not os.path.exists(jsonl_file):
+        jsonl_file = None
+    if trajectory_file and not os.path.exists(trajectory_file):
+        trajectory_file = None
+    return jsonl_file, trajectory_file, session_info
+
+
+def _safe_tool_arguments(value):
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return {"value": value}
+    return {}
+
+
+def _limit_tool_payload(value, limit=2400):
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        try:
+            value = json.dumps(value, ensure_ascii=False)
+        except Exception:
+            value = str(value)
+    value = str(value)
+    if len(value) > limit:
+        return value[:limit] + f"\n\n... [truncated - {len(value)} chars total] ..."
+    return value
+
+
+def _trajectory_activity_messages(trajectory_file, max_tools=60):
+    """Recover recent tool calls/results from OpenClaw trajectory JSONL."""
+    tail_data = _read_tail_text(trajectory_file, initial_bytes=256 * 1024, max_bytes=4 * 1024 * 1024, min_lines=80)
+    if not tail_data:
+        return []
+
+    tools = {}
+    order = []
+    for line in tail_data.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        event_type = event.get("type") or ""
+        if event_type not in ("tool.call", "tool.result"):
+            continue
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        tool_id = str(data.get("toolCallId") or data.get("tool_call_id") or data.get("itemId") or event.get("id") or "")
+        if not tool_id:
+            tool_id = f"{event.get('seq', len(order))}:{event_type}"
+        if tool_id not in tools:
+            tools[tool_id] = {
+                "id": tool_id,
+                "runId": event.get("runId") or data.get("runId") or "",
+                "status": "running",
+                "name": data.get("name") or data.get("toolName") or "tool",
+                "arguments": {},
+                "result": "",
+                "error": "",
+                "ts": event.get("ts") or "",
+                "epochMs": _parse_iso_epoch_ms(event.get("ts")),
+                "source": "trajectory",
+            }
+            order.append(tool_id)
+        tool = tools[tool_id]
+        if event.get("ts"):
+            tool["ts"] = event.get("ts")
+            tool["epochMs"] = _parse_iso_epoch_ms(event.get("ts"))
+        if event_type == "tool.call":
+            tool["status"] = "running"
+            tool["name"] = data.get("name") or data.get("toolName") or tool.get("name") or "tool"
+            tool["arguments"] = _safe_tool_arguments(data.get("arguments") or data.get("args") or {})
+        elif event_type == "tool.result":
+            is_error = bool(data.get("isError") or data.get("error"))
+            tool["status"] = "error" if is_error else "done"
+            tool["name"] = data.get("name") or data.get("toolName") or tool.get("name") or "tool"
+            result = data.get("output")
+            if result is None:
+                result = data.get("result")
+            if result is None:
+                result = data.get("error")
+            if is_error:
+                tool["error"] = _limit_tool_payload(result)
+            else:
+                tool["result"] = _limit_tool_payload(result)
+
+    messages = []
+    for tool_id in order[-max_tools:]:
+        tool = tools.get(tool_id)
+        if not tool:
+            continue
+        ts = tool.get("ts") or ""
+        messages.append({
+            "role": "assistant",
+            "text": "",
+            "ts": ts,
+            "epochMs": tool.get("epochMs") or 0,
+            "tools": [tool],
+            "source": "trajectory",
+        })
+    return messages
+
+
+def _session_trajectory_messages(session_key, max_tools=80):
+    agent_id = _agent_id_from_session_key(session_key)
+    if not agent_id:
+        return []
+    _, trajectory_file, _ = _openclaw_session_paths(agent_id, session_key=session_key)
+    return _trajectory_activity_messages(trajectory_file, max_tools=max_tools)
+
+
 def _get_hermes_agent(agent_id_or_key=None):
     needle = str(agent_id_or_key or "")
     for a in get_roster():
@@ -2079,12 +2263,23 @@ def _merge_comm_events_into_agent_chat(result, per_agent_limit=500):
         cleaned = []
         for msg in msgs:
             msg_text = _extract_openclaw_text(msg.get("text"))
-            if not msg_text and not msg.get("media"):
+            if not msg_text and not msg.get("media") and not msg.get("tools"):
                 continue
             if msg.get("text") != msg_text:
                 msg = dict(msg)
                 msg["text"] = msg_text
-            unique = msg.get("commEventId") or (msg.get("role"), msg_text, msg.get("epochMs") or msg.get("ts") or msg.get("time"))
+            tool_sig = ""
+            if msg.get("tools"):
+                tool_sig = json.dumps([
+                    {
+                        "id": t.get("id"),
+                        "name": t.get("name"),
+                        "status": t.get("status"),
+                    }
+                    for t in (msg.get("tools") or [])
+                    if isinstance(t, dict)
+                ], sort_keys=True)
+            unique = msg.get("commEventId") or (msg.get("role"), msg_text, tool_sig, msg.get("epochMs") or msg.get("ts") or msg.get("time"))
             if str(unique) in seen:
                 continue
             seen.add(str(unique))
@@ -6193,32 +6388,13 @@ def get_agent_messages(agent_key, max_messages=500):
     if not agent_id:
         return []
     sessions_dir = os.path.join(WORKSPACE_BASE, f"agents/{agent_id}/sessions")
-    sessions_json_path = os.path.join(sessions_dir, "sessions.json")
     jsonl_file = None
-    try:
-        with open(sessions_json_path, "r") as f:
-            sessions = json.load(f)
-        # Find the most recently updated session entry first. If its transcript
-        # file is missing (can happen after compaction/restart), do NOT fall
-        # back to an older session-store entry; that makes bubbles show stale
-        # cron/DM sessions. Instead, fall through to the newest real transcript
-        # file by mtime below.
-        best_ts = 0
-        best_sid = ""
-        for key, val in sessions.items():
-            if not isinstance(val, dict):
-                continue
-            ts = val.get("updatedAt", 0)
-            sid = val.get("sessionId", "")
-            if ts > best_ts:
-                best_ts = ts
-                best_sid = sid
-        if best_sid:
-            candidate = os.path.join(sessions_dir, f"{best_sid}.jsonl")
-            if os.path.exists(candidate):
-                jsonl_file = candidate
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
+    trajectory_file = None
+    # Find the most recently updated session entry first. If its transcript
+    # file is missing (can happen after compaction/restart), do NOT fall back
+    # to an older session-store entry; that makes bubbles show stale cron/DM
+    # sessions. Instead, fall through to the newest real transcript by mtime.
+    jsonl_file, trajectory_file, _session_info = _openclaw_session_paths(agent_id)
     if not jsonl_file:
         # Only consider primary transcript files named <uuid>.jsonl. Ignore
         # trajectory/checkpoint/reset JSONL artifacts, which can be newer but
@@ -6230,31 +6406,18 @@ def get_agent_messages(agent_key, max_messages=500):
         ]
         if jsonls:
             jsonl_file = max(jsonls, key=os.path.getmtime)
+            base = jsonl_file[:-len(".jsonl")]
+            candidate_trajectory = base + ".trajectory.jsonl"
+            if os.path.exists(candidate_trajectory):
+                trajectory_file = candidate_trajectory
     if not jsonl_file:
-        return []
+        return _trajectory_activity_messages(trajectory_file, max_tools=min(80, max_messages))
     messages = []
     try:
         # Performance: read the tail instead of the whole JSONL. Some model/tool
         # messages (notably image reads) can be a single very large JSONL line;
         # grow the tail window until we have enough complete recent lines.
-        TAIL_BYTES = 32 * 1024
-        MAX_TAIL_BYTES = 2 * 1024 * 1024
-        with open(jsonl_file, "rb") as fb:
-            fb.seek(0, 2)  # end
-            fsize = fb.tell()
-            tail_size = min(TAIL_BYTES, fsize)
-            while True:
-                start = max(0, fsize - tail_size)
-                fb.seek(start)
-                tail_data = fb.read().decode("utf-8", errors="replace")
-                if start > 0:
-                    nl = tail_data.find("\n")
-                    if nl >= 0:
-                        tail_data = tail_data[nl + 1:]
-                complete_lines = [x for x in tail_data.split("\n") if x.strip()]
-                if start == 0 or len(complete_lines) >= 20 or tail_size >= min(MAX_TAIL_BYTES, fsize):
-                    break
-                tail_size = min(tail_size * 4, MAX_TAIL_BYTES, fsize)
+        tail_data = _read_tail_text(jsonl_file, initial_bytes=32 * 1024, max_bytes=2 * 1024 * 1024, min_lines=20)
         for line in tail_data.split("\n"):
                 line = line.strip()
                 if not line:
@@ -6395,6 +6558,9 @@ def get_agent_messages(agent_key, max_messages=500):
                 })
     except Exception as e:
         return []
+    if trajectory_file:
+        messages.extend(_trajectory_activity_messages(trajectory_file, max_tools=80))
+        messages.sort(key=lambda m: m.get("epochMs") or 0)
     return messages[-max_messages:]
 
 GATEWAY_URL = VO_CONFIG["openclaw"]["gatewayUrl"]
@@ -6959,6 +7125,19 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
                 "token": _get_gateway_token(),
                 "openclawVersion": _get_openclaw_version(),
             }).encode())
+        elif request_path == "/api/session-activity":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            session_key = (query_params.get("sessionKey") or [""])[0]
+            try:
+                limit = int((query_params.get("limit") or ["80"])[0])
+            except Exception:
+                limit = 80
+            limit = max(1, min(120, limit))
+            messages = _session_trajectory_messages(session_key, max_tools=limit)
+            self.wfile.write(json.dumps({"ok": True, "messages": messages}).encode())
         elif self.path == "/agent-chat":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
