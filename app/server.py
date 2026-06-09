@@ -1715,9 +1715,8 @@ def _extract_hermes_turn_activity(exported_session, user_content):
 HERMES_TASK_BREAKDOWN_STEPS = [
     "Receive message from Virtual Office",
     "Load Hermes profile and current session",
-    "Submit native Hermes API run",
-    "Stream native model, tool, and approval events",
-    "Collect public run activity",
+    "Run Hermes request through the selected profile",
+    "Collect Hermes reply and public activity",
     "Render reply, tool calls, and task summary",
 ]
 
@@ -1763,6 +1762,38 @@ def _publish_hermes_api_progress(profile, agent_id, run_id, tools=None, reasonin
 
 def _remove_hermes_progress_messages(messages):
     return [m for m in messages if not (isinstance(m, dict) and m.get("ephemeral") == "hermes-progress")]
+
+
+def _format_hermes_attachment_context(attachments):
+    if not isinstance(attachments, list) or not attachments:
+        return ""
+    lines = [
+        "Attachments provided by Virtual Office:",
+        "Use these attachments when answering. Prefer the URL if the local path is not readable from your runtime.",
+    ]
+    for idx, item in enumerate(attachments, 1):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("filename") or f"attachment-{idx}").strip()
+        path = str(item.get("path") or item.get("filePath") or "").strip()
+        url = str(item.get("url") or item.get("mediaUrl") or "").strip()
+        mime_type = str(item.get("mimeType") or item.get("contentType") or item.get("media_type") or "").strip()
+        size = item.get("size") or item.get("bytes") or ""
+        if path and not url:
+            url = "/chat-media?path=" + urllib.parse.quote(path)
+        if url.startswith("/"):
+            url = f"http://127.0.0.1:{PORT}{url}"
+        details = [f"{idx}. {name}"]
+        if mime_type:
+            details.append(f"type: {mime_type}")
+        if size:
+            details.append(f"size: {size} bytes")
+        if path:
+            details.append(f"path: {path}")
+        if url:
+            details.append(f"url: {url}")
+        lines.append(" | ".join(details))
+    return "\n".join(lines) if len(lines) > 2 else ""
 
 
 def _hermes_tool_activity_messages(tools, agent_id="", run_id="", base_ts=None, coerce_complete=False):
@@ -1961,6 +1992,127 @@ def _hermes_api_client():
     )
 
 
+HERMES_PROFILE_API_LOCK = threading.Lock()
+HERMES_PROFILE_API_PROCESSES = {}
+
+
+def _parse_url_port(url, default=8642):
+    try:
+        parsed = urllib.parse.urlparse(str(url or ""))
+        return int(parsed.port or default)
+    except Exception:
+        return default
+
+
+def _hermes_profile_api_port(profile):
+    hermes_cfg = VO_CONFIG.get("hermes", {})
+    base = hermes_cfg.get("apiProfilePortBase") or os.environ.get("VO_HERMES_API_PROFILE_PORT_BASE")
+    try:
+        base = int(base)
+    except (TypeError, ValueError):
+        base = _parse_url_port(hermes_cfg.get("apiUrl"), 8642) + 1
+    digest = hashlib.sha1(str(profile or "default").encode("utf-8")).hexdigest()
+    return base + (int(digest[:6], 16) % 1000)
+
+
+def _hermes_profile_api_config(profile):
+    hermes_cfg = VO_CONFIG.get("hermes", {})
+    profile_cfgs = hermes_cfg.get("apiProfiles") if isinstance(hermes_cfg.get("apiProfiles"), dict) else {}
+    profile_cfg = profile_cfgs.get(profile) if isinstance(profile_cfgs.get(profile), dict) else {}
+    if profile == "default":
+        return {
+            "url": profile_cfg.get("apiUrl") or hermes_cfg.get("apiUrl"),
+            "key": profile_cfg.get("apiKey") or hermes_cfg.get("apiKey"),
+            "autoStart": False,
+        }
+    port = _hermes_profile_api_port(profile)
+    return {
+        "url": profile_cfg.get("apiUrl") or f"http://127.0.0.1:{port}",
+        "key": profile_cfg.get("apiKey") or hermes_cfg.get("apiKey"),
+        "autoStart": profile_cfg.get("autoStart", hermes_cfg.get("autoStartProfileApis", True)) is not False,
+        "port": port,
+    }
+
+
+def _hermes_api_client_for_profile(profile):
+    profile = profile or "default"
+    cfg = _hermes_profile_api_config(profile)
+    if profile != "default" and cfg.get("autoStart"):
+        _ensure_hermes_profile_api(profile, cfg)
+    return HermesApiClient(
+        base_url=cfg.get("url"),
+        api_key=cfg.get("key"),
+        timeout_sec=min(int(VO_CONFIG.get("hermes", {}).get("timeoutSec") or 600), 60),
+    )
+
+
+def _ensure_hermes_profile_api(profile, api_cfg):
+    """Start a profile-scoped Hermes API server when one is not already up."""
+    if not profile or profile == "default":
+        return
+    api_key = api_cfg.get("key") or ""
+    if not api_key:
+        return
+    client = HermesApiClient(
+        base_url=api_cfg.get("url"),
+        api_key=api_key,
+        timeout_sec=5,
+    )
+    if client.is_available():
+        return
+
+    with HERMES_PROFILE_API_LOCK:
+        proc = HERMES_PROFILE_API_PROCESSES.get(profile)
+        if proc and proc.poll() is None:
+            return
+
+        hermes_cfg = VO_CONFIG.get("hermes", {})
+        hermes_bin = os.path.expanduser(hermes_cfg.get("binary") or "~/.local/bin/hermes")
+        hermes_home = os.path.expanduser(hermes_cfg.get("homePath") or "~/.hermes")
+        if not os.path.exists(hermes_bin):
+            return
+
+        env = os.environ.copy()
+        env.update({
+            "API_SERVER_ENABLED": "true",
+            "API_SERVER_HOST": "127.0.0.1",
+            "API_SERVER_PORT": str(api_cfg.get("port") or _parse_url_port(api_cfg.get("url"), 8642)),
+            "API_SERVER_KEY": api_key,
+            "API_SERVER_MODEL_NAME": f"hermes-{HermesProvider._safe_suffix(profile)}",
+            "VO_HERMES_HOME": hermes_home,
+        })
+        if os.path.basename(hermes_home.rstrip(os.sep)) == ".hermes":
+            env["HOME"] = os.path.dirname(hermes_home.rstrip(os.sep)) or env.get("HOME", "")
+
+        log_path = os.path.join(STATUS_DIR, f"hermes-api-{HermesProvider._safe_suffix(profile)}.log")
+        try:
+            log_f = open(log_path, "ab", buffering=0)
+            proc = subprocess.Popen(
+                [hermes_bin, "--profile", profile, "gateway", "run"],
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                env=env,
+                start_new_session=True,
+            )
+            HERMES_PROFILE_API_PROCESSES[profile] = proc
+        except Exception as exc:
+            print(f"⚠️ Hermes profile API start failed for {profile}: {exc}")
+            return
+
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        try:
+            if client.is_available():
+                return
+        except Exception:
+            pass
+        proc = HERMES_PROFILE_API_PROCESSES.get(profile)
+        if proc and proc.poll() is not None:
+            return
+        time.sleep(0.5)
+
+
 def _hermes_event_tool_card(event, status="running", fallback_id=""):
     tool = str(event.get("tool") or event.get("name") or event.get("tool_name") or "Hermes tool")
     preview = str(event.get("preview") or event.get("label") or "")
@@ -2011,7 +2163,7 @@ def _handle_hermes_api_chat(agent, profile, delivery_message, original_message, 
     """Run a Hermes turn through the native Hermes API Server + SSE events."""
     agent_id = agent.get("id") or agent.get("statusKey") or "hermes-default"
     status_key = agent.get("statusKey") or agent_id
-    client = _hermes_api_client()
+    client = _hermes_api_client_for_profile(profile)
     if not client.is_available():
         return {"ok": False, "fallback": True, "error": "Hermes API Server is not available"}
 
@@ -2085,15 +2237,16 @@ def _handle_hermes_api_chat(agent, profile, delivery_message, original_message, 
                     profile=profile,
                     session_id=session_id,
                 )
-                terminal_event = event
                 publish_progress(force=True)
-                break
+                continue
             elif event_name in {"run.completed", "run.failed", "run.cancelled", "run.canceled"}:
                 terminal_event = event
                 if event.get("output"):
                     reply = str(event.get("output") or reply)
                 if event.get("error"):
                     error_text = str(event.get("error") or "")
+                if event_name == "run.completed":
+                    approval = None
                 publish_progress(force=True)
                 break
     except Exception as exc:
@@ -2151,6 +2304,8 @@ def _handle_hermes_chat(body):
 
     from_type = str(body.get("fromType") or body.get("senderType") or "").strip().lower()
     is_human_source = from_type in {"human", "user", "chat", "ui"}
+    attachments = body.get("attachments") if isinstance(body.get("attachments"), list) else []
+    attachment_context = _format_hermes_attachment_context(attachments)
     source_app = str(body.get("sourceApp") or body.get("app") or "virtual-office").strip() or "virtual-office"
     source_surface = str(body.get("sourceSurface") or body.get("surface") or "chat-window").strip() or "chat-window"
     source_label = str(body.get("sourceLabel") or "").strip()
@@ -2165,6 +2320,8 @@ def _handle_hermes_chat(body):
             f"{message}\n\n"
             "Reply directly to the user. Do not assume the user's name unless they identify themselves."
         )
+    if attachment_context:
+        delivery_message = f"{delivery_message}\n\n{attachment_context}"
 
     now_ms = int(time.time() * 1000)
     history = _load_hermes_history(profile)
@@ -2178,6 +2335,7 @@ def _handle_hermes_chat(body):
         "sourceApp": source_app if is_human_source else "",
         "sourceSurface": source_surface if is_human_source else "",
         "sourceLabel": source_label if is_human_source else "",
+        "attachments": attachments,
     })
     _save_hermes_history(profile, history)
 
@@ -2318,7 +2476,7 @@ def _handle_hermes_approval_respond(body):
         run_id = str(approval.get("runId"))
         api_choice = "deny" if choice == "deny" else "once"
         try:
-            client = _hermes_api_client()
+            client = _hermes_api_client_for_profile(profile)
             approved = client.respond_approval(run_id, api_choice)
             history = _load_hermes_history(profile)
             history.append(_approval_result_message({**approval, "agentId": agent.get("id") or agent_key, "message": message}, choice))
@@ -2327,52 +2485,15 @@ def _handle_hermes_approval_respond(body):
                 gateway_presence.set_provider_event(agent.get("statusKey") or agent.get("id"), "hermes", {"event": "run.cancelled", "run_id": run_id})
                 return {"ok": True, "choice": "deny", "providerPath": "api", "runId": run_id, "message": "Hermes approval denied."}
 
-            deadline = time.time() + int(VO_CONFIG.get("hermes", {}).get("timeoutSec") or 600)
-            status = {}
-            while time.time() < deadline:
-                status = client.get_run(run_id)
-                status_name = str(status.get("status") or "").lower()
-                if status_name in {"completed", "failed", "cancelled", "canceled"}:
-                    break
-                gateway_presence.set_provider_event(agent.get("statusKey") or agent.get("id"), "hermes", {"event": "approval.responded", "run_id": run_id})
-                time.sleep(1)
-            status_name = str(status.get("status") or "").lower()
-            ok = status_name == "completed"
-            reply = str(status.get("output") or "")
-            result_tools = [_hermes_task_breakdown_tool("done" if ok else "error", "Hermes native API approval flow completed." if ok else (status.get("error") or "Hermes native API approval flow failed."))]
-            final_ts = int(time.time() * 1000)
-            result_msg = {
-                "role": "assistant",
-                "text": reply,
-                "ts": final_ts + len(result_tools),
-                "agentId": agent.get("id"),
-                "exitCode": 0 if ok else 1,
-                "sessionId": approval.get("session_id") or "",
-                "runId": run_id,
-                "tools": [],
-                "thinking": "",
-                "reasoningTokens": 0,
-            }
-            history = _load_hermes_history(profile)
-            history.extend(_hermes_tool_activity_messages(
-                result_tools,
-                agent_id=agent.get("id"),
-                run_id=run_id,
-                base_ts=final_ts,
-                coerce_complete=ok,
-            ))
-            history.append(result_msg)
-            _save_hermes_history(profile, history)
-            gateway_presence.set_provider_event(agent.get("statusKey") or agent.get("id"), "hermes", {"event": "run.completed" if ok else "run.failed", "run_id": run_id, "error": status.get("error")})
+            gateway_presence.set_provider_event(agent.get("statusKey") or agent.get("id"), "hermes", {"event": "approval.responded", "run_id": run_id})
             return {
-                "ok": ok,
-                "reply": reply,
+                "ok": True,
+                "choice": "approve_once",
                 "approvalChoice": "approve_once",
                 "providerPath": "api",
                 "runId": run_id,
                 "sessionId": approval.get("session_id") or "",
-                "tools": result_tools,
-                "error": None if ok else (status.get("error") or "Hermes run did not complete after approval."),
+                "message": "Hermes approval approved. The active run will continue streaming.",
             }
         except Exception as exc:
             return {"ok": False, "error": str(exc), "providerPath": "api", "runId": run_id, "_status": 500}
@@ -2409,7 +2530,7 @@ def _handle_hermes_test(body=None):
     hermes_bin = os.path.expanduser(body.get("binary") or hermes_cfg.get("binary") or "~/.local/bin/hermes")
     hermes_home = os.path.expanduser(body.get("homePath") or hermes_cfg.get("homePath") or "~/.hermes")
     result = HermesProvider(home_path=hermes_home, binary=hermes_bin, enabled=True).test()
-    api = _hermes_api_client()
+    api = _hermes_api_client_for_profile("default")
     try:
         caps = api.capabilities()
         features = caps.get("features") if isinstance(caps.get("features"), dict) else {}
@@ -2424,6 +2545,27 @@ def _handle_hermes_test(body=None):
         }
     except Exception as exc:
         result["api"] = {"ok": False, "url": api.base_url, "error": str(exc)[:500]}
+    profile_apis = {}
+    for agent in result.get("agents") or []:
+        profile = agent.get("profile") or agent.get("providerAgentId") or "default"
+        try:
+            profile_api = _hermes_api_client_for_profile(profile)
+            caps = profile_api.capabilities()
+            features = caps.get("features") if isinstance(caps.get("features"), dict) else {}
+            profile_apis[profile] = {
+                "ok": bool(features.get("run_submission") and features.get("run_events_sse")),
+                "url": profile_api.base_url,
+                "model": (caps.get("model") or caps.get("model_name") or ""),
+                "features": {
+                    "runSubmission": bool(features.get("run_submission")),
+                    "runEventsSse": bool(features.get("run_events_sse")),
+                    "runApprovalResponse": bool(features.get("run_approval_response")),
+                },
+            }
+        except Exception as exc:
+            cfg = _hermes_profile_api_config(profile)
+            profile_apis[profile] = {"ok": False, "url": cfg.get("url"), "error": str(exc)[:500]}
+    result["profileApis"] = profile_apis
     return result
 
 def _handle_agent_platforms():
@@ -9758,6 +9900,7 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             try:
                 body = json.loads(self.rfile.read(length)) if length else {}
                 filename = os.path.basename(body.get("filename", "upload"))
+                mime_type = str(body.get("mimeType") or body.get("contentType") or mimetypes.guess_type(filename)[0] or "")
                 content = base64.b64decode(body.get("content", ""))
             except Exception as e:
                 self.send_response(400)
@@ -9778,7 +9921,12 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
-            self.wfile.write(json.dumps({"path": dest, "size": len(content)}).encode())
+            self.wfile.write(json.dumps({
+                "path": dest,
+                "url": "/chat-media?path=" + urllib.parse.quote(dest),
+                "mimeType": mime_type,
+                "size": len(content)
+            }).encode())
             print(f"📎 Upload: {dest} ({len(content):,} bytes)")
 
         elif self.path == "/api/skills-library":

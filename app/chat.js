@@ -400,6 +400,7 @@
                 const meta = msg.role === 'assistant'
                   ? { ...resolveMessageSender(msg, this), thinking: msg.thinking || '', reasoningTokens: msg.reasoningTokens || 0, approval: msg.approval || null }
                   : { label: 'You', kind: 'human' };
+                const media = normalizeChatMedia(msg.attachments || []);
                 const tools = normalizeHermesTools(msg.tools || [], msg.ephemeral !== 'hermes-progress');
                 const splitToolsFromFinalReply = msg.role === 'assistant' && msg.ephemeral !== 'hermes-progress' && msg.text && tools.length;
                 if (splitToolsFromFinalReply) {
@@ -408,7 +409,7 @@
                     this.appendMessage('assistant', '', (msg.ts || Date.now()) + idx, [], toolMeta, [tool]);
                   });
                 }
-                this.appendMessage(msg.role, msg.text || '', msg.ts || Date.now(), [], meta, splitToolsFromFinalReply ? [] : tools);
+                this.appendMessage(msg.role, msg.text || '', msg.ts || Date.now(), media, meta, splitToolsFromFinalReply ? [] : tools);
               }
             }
             this.scrollBottomAfterLayout();
@@ -586,28 +587,41 @@
       this.scrollBottom();
 
       let attachments;
+      let uploadedFiles = [];
       if (hasAttachments) {
         const UPLOAD_URL = window.location.origin + '/upload';
         const imageAtts = [];
-        const docPaths = [];
+        const uploadAttachment = async (a) => {
+          const b64 = a.dataUrl.split(',')[1];
+          const resp = await fetch(UPLOAD_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filename: a.name, content: b64, mimeType: a.mimeType || '' })
+          });
+          if (!resp.ok) throw new Error(resp.statusText || ('HTTP ' + resp.status));
+          const result = await resp.json();
+          return {
+            name: a.name,
+            mimeType: a.mimeType || '',
+            path: result.path || '',
+            url: result.url || (result.path ? '/chat-media?path=' + encodeURIComponent(result.path) : ''),
+            size: result.size || 0
+          };
+        };
 
         for (const a of this.pendingAttachments) {
+          let uploaded = null;
+          try {
+            uploaded = await uploadAttachment(a);
+            if (uploaded?.path || uploaded?.url) uploadedFiles.push(uploaded);
+          } catch (e) {
+            this.appendSystem('Upload failed for ' + a.name + ': ' + e.message);
+            continue;
+          }
           if (a.mimeType.startsWith('image/')) {
             const url = await compressImage(a.dataUrl);
             const parsed = parseDataUrl(url);
             if (parsed) imageAtts.push({ type: 'image', mimeType: parsed.mimeType, content: parsed.content });
-            try {
-              const b64raw = a.dataUrl.split(',')[1];
-              const resp = await fetch(UPLOAD_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ filename: a.name, content: b64raw })
-              });
-              if (resp.ok) {
-                const result = await resp.json();
-                docPaths.push(result.path);
-              }
-            } catch (_) {}
           } else if (a.mimeType.startsWith('audio/') || /\.(mp3|wav|m4a|ogg|flac|webm|opus|aac)$/i.test(a.name)) {
             this.appendSystem('🎤 Transcribing ' + a.name + '...');
             try {
@@ -628,26 +642,11 @@
             } catch (e) {
               this.appendSystem('❌ Transcription failed: ' + e.message);
             }
-          } else {
-            try {
-              const b64 = a.dataUrl.split(',')[1];
-              const resp = await fetch(UPLOAD_URL, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: a.name, content: b64 })
-              });
-              if (resp.ok) {
-                const result = await resp.json();
-                docPaths.push(result.path);
-              } else {
-                this.appendSystem('Upload failed for ' + a.name + ': ' + resp.statusText);
-              }
-            } catch (e) {
-              this.appendSystem('Upload failed for ' + a.name + ': ' + e.message);
-            }
           }
         }
 
-        if (docPaths.length) {
-          const pathNote = docPaths.map(p => '(attached file: ' + p + ')').join('\n');
+        if (uploadedFiles.length) {
+          const pathNote = uploadedFiles.map(f => '(attached file: ' + (f.path || f.url) + ')').join('\n');
           text = text ? text + '\n' + pathNote : pathNote;
         }
         attachments = imageAtts.length ? imageAtts : undefined;
@@ -662,6 +661,7 @@
       if (this.isHermesSelected()) {
         const hermesLabel = this.agentSelect.selectedOptions[0]?.textContent.trim() || 'Hermes';
         const hermesProgress = this.startHermesProgress(hermesLabel);
+        const hermesSendStartedAt = Date.now();
         this.startHermesHistoryPolling();
         try {
           const resp = await fetch('/api/hermes/chat', {
@@ -674,7 +674,8 @@
               fromDisplayName: 'User',
               sourceApp: 'virtual-office',
               sourceSurface: 'chat-window',
-              sourceLabel: 'Virtual Office Chat'
+              sourceLabel: 'Virtual Office Chat',
+              attachments: uploadedFiles
             })
           });
           const data = await resp.json();
@@ -689,54 +690,20 @@
             if (existing) existing.remove();
             this.streamingMsg = null;
           }
-          const finalTools = normalizeHermesTools(data.tools || []);
-          const finalRunId = data.runId || this.currentRunId || '';
-          finalTools.forEach((tool, idx) => {
-            const toolId = tool.id || `${idx}:${tool.name}:${JSON.stringify(tool.arguments || {}).slice(0, 80)}`;
-            const completedKey = `${finalRunId}:${toolId}`;
-            const payload = {
-              runId: finalRunId,
-              data: {
-                toolCallId: toolId,
-                phase: 'result',
-                name: tool.name,
-                args: tool.arguments || {},
-                result: tool.result || '',
-                isError: tool.status === 'error' || !!tool.error,
-                error: tool.error || ''
-              }
-            };
-            const domKey = this.toolKey(payload);
-            const alreadyRendered = this.hermesCompletedToolKeys.has(completedKey)
-              || [...this.messages.querySelectorAll('.chat-tool-msg')].some(el => el.dataset.toolKey === domKey);
-            if (alreadyRendered) return;
-            if (!this.liveToolCards.has(domKey)) {
-              this.appendToolCall({ ...payload, data: { ...payload.data, phase: 'start' } });
-            }
-            this.finishToolCall(payload);
-          });
-          this.finalizeRunToolCards(finalRunId);
-          this.appendMessage(
-            'assistant',
-            data.reply || '',
-            Date.now(),
-            [],
-            {
-              label: this.agentSelect.selectedOptions[0]?.textContent.trim() || 'Hermes',
-              kind: 'agent',
-              thinking: data.thinking || '',
-              reasoningTokens: data.reasoningTokens || 0,
-              approval: data.approval || null
-            },
-            []
-          );
-          this.scrollBottom(true);
+          await this.loadHistory({ recoverFinal: true });
           await this.pollHermesApproval().catch(() => {});
           this.setStatus('Hermes ready', 'connected');
         } catch (e) {
           this.stopHermesHistoryPolling();
-          this.finishHermesProgress(hermesProgress, false, e.message);
           this.removeTypingIndicator();
+          const recovered = await this.recoverHermesFinalFromHistory(hermesSendStartedAt).catch(() => false);
+          if (recovered) {
+            this.finishHermesProgress(hermesProgress, true);
+            await this.pollHermesApproval().catch(() => {});
+            this.setStatus('Hermes ready', 'connected');
+            return;
+          }
+          this.finishHermesProgress(hermesProgress, false, e.message);
           this.appendSystem('Hermes send failed: ' + e.message);
           this.setStatus('Hermes error', 'disconnected');
         }
@@ -1188,6 +1155,36 @@
       if (progress.thinking) this.updateTypingIndicator('Hermes is reasoning...');
     }
 
+    async recoverHermesFinalFromHistory(startedAt, timeoutMs = 45000) {
+      if (!this.isHermesSelected()) return false;
+      const deadline = Date.now() + timeoutMs;
+      const agentId = this.getSelectedAgentId() || this.selectedAgentKey;
+      while (Date.now() < deadline) {
+        const res = await fetch('/api/hermes/history?agentId=' + encodeURIComponent(agentId));
+        const data = await res.json();
+        if (data.ok && Array.isArray(data.messages)) {
+          const finalMsg = [...data.messages].reverse().find(msg =>
+            msg &&
+            msg.role === 'assistant' &&
+            msg.ephemeral !== 'hermes-progress' &&
+            (msg.text || msg.approval) &&
+            Number(msg.ts || 0) >= Number(startedAt || 0)
+          );
+          if (finalMsg) {
+            if (this.streamingMsg) {
+              const existing = this.messages.querySelector('.streaming-msg');
+              if (existing) existing.remove();
+              this.streamingMsg = null;
+            }
+            await this.loadHistory({ recoverFinal: true });
+            return true;
+          }
+        }
+        await new Promise(resolve => setTimeout(resolve, 1200));
+      }
+      return false;
+    }
+
     startHermesProgress(label) {
       this.stopHermesProgressTimers();
       const runId = 'hermes-' + Date.now() + '-' + Math.random().toString(36).slice(2);
@@ -1233,27 +1230,13 @@
           const status = card.querySelector('.chat-approval-status');
           if (status) status.textContent = choice === 'approve_once' ? 'approved once' : 'denied';
         }
-        if (choice === 'approve_once' && (data.reply || data.thinking || data.approval || (Array.isArray(data.tools) && data.tools.length))) {
-          this.appendMessage(
-            'assistant',
-            data.reply || '',
-            Date.now(),
-            [],
-            {
-              label: this.agentSelect.selectedOptions[0]?.textContent.trim() || 'Hermes',
-              kind: 'agent',
-              thinking: data.thinking || '',
-              reasoningTokens: data.reasoningTokens || 0,
-              approval: data.approval || null
-            },
-            []
-          );
+        if (choice === 'approve_once') {
           await this.pollHermesApproval().catch(() => {});
         } else if (choice === 'deny') {
           this.appendSystem('Hermes approval denied.');
           await this.pollHermesApproval().catch(() => {});
         }
-        this.setStatus('Hermes ready', 'connected');
+        this.setStatus(choice === 'approve_once' ? 'Hermes approval sent' : 'Hermes ready', 'connected');
       } catch (e) {
         buttons.forEach(btn => btn.disabled = false);
         if (card) {
