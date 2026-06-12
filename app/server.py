@@ -8091,13 +8091,65 @@ class ApiUsageCollector:
             time.sleep(self.INTERVAL)
 
     def _read_profiles(self):
-        """Read auth profiles and return {profileId: profileData} for supported providers."""
+        """Read OpenClaw auth profiles from the configured native store."""
+        sqlite_profiles = self._read_profiles_from_sqlite()
+        if sqlite_profiles:
+            return sqlite_profiles
         try:
             with open(self._auth_profiles_path, "r") as f:
                 ap = json.load(f)
             return ap.get("profiles", {})
         except Exception:
             return {}
+
+    def _read_profiles_from_sqlite(self):
+        db_path = os.path.join(OPENCLAW_AGENT_DIR, "openclaw-agent.sqlite")
+        if not os.path.exists(db_path):
+            return {}
+        try:
+            con = sqlite3.connect(db_path)
+            con.row_factory = sqlite3.Row
+            table_names = [
+                row[0]
+                for row in con.execute("select name from sqlite_master where type='table'")
+            ]
+            for table in ("auth_profile_store", "auth_profile_stores"):
+                if table not in table_names:
+                    continue
+                cols = [row[1] for row in con.execute(f"pragma table_info({table})")]
+                if "store_json" not in cols:
+                    continue
+                for row in con.execute(f"select store_json from {table}").fetchall():
+                    try:
+                        data = json.loads(row["store_json"] or "{}")
+                    except Exception:
+                        continue
+                    profiles = data.get("profiles")
+                    if isinstance(profiles, dict) and profiles:
+                        con.close()
+                        return profiles
+            con.close()
+        except Exception:
+            return {}
+        return {}
+
+    def _profile_rank(self, profile):
+        """Prefer profiles that can expose real quota windows over plain API keys."""
+        prov = profile.get("provider", "")
+        has_token = bool(profile.get("access") or profile.get("token"))
+        has_key = bool(profile.get("key"))
+        ptype = str(profile.get("type") or profile.get("mode") or "").lower()
+        if prov in ("openai", "openai-codex") and has_token:
+            return 0
+        if prov == "anthropic" and has_token:
+            return 0
+        if prov == "github-copilot" and has_token:
+            return 1
+        if has_token or ptype in ("oauth", "token", "subscription"):
+            return 2
+        if has_key:
+            return 5
+        return 9
 
     def _collect(self):
         """Run one collection cycle across all configured providers."""
@@ -8107,12 +8159,22 @@ class ApiUsageCollector:
             return {"providers": [], "timestamp": now, "source": "no-profiles"}
 
         providers = []
-        seen = set()
-
+        grouped = {}
         for pid, profile in profiles.items():
-            prov = profile.get("provider", pid.split(":")[0])
-            if prov in seen:
+            if not isinstance(profile, dict):
                 continue
+            prov = profile.get("provider") or pid.split(":", 1)[0]
+            if not prov:
+                continue
+            profile = dict(profile)
+            profile["_profileId"] = pid
+            canonical = "openai" if prov == "openai-codex" else prov
+            grouped.setdefault(canonical, []).append(profile)
+
+        for canonical, provider_profiles in grouped.items():
+            provider_profiles.sort(key=self._profile_rank)
+            profile = provider_profiles[0]
+            prov = profile.get("provider") or canonical
 
             token = profile.get("access") or profile.get("token")
             api_key = profile.get("key")
@@ -8121,24 +8183,28 @@ class ApiUsageCollector:
             result = None
             if prov == "anthropic" and token:
                 result = self._fetch_claude(token, now)
-            elif prov == "openai-codex" and token:
+            elif prov in ("openai", "openai-codex") and token:
                 result = self._fetch_codex(token, account_id, now)
             elif prov == "github-copilot" and token:
                 result = self._fetch_copilot(token, now)
-            elif api_key and prov not in ("ollama", "lmstudio"):
-                # API key provider — no usage endpoint, just list it
+            elif api_key and canonical not in ("ollama", "lmstudio"):
                 result = {
-                    "provider": prov,
-                    "displayName": _PROVIDER_LABELS.get(prov, prov.replace("-", " ").title()),
+                    "provider": canonical,
+                    "displayName": _PROVIDER_LABELS.get(canonical, canonical.replace("-", " ").title()),
                     "type": "api_key",
                     "usage": None,
+                    "status": "configured",
+                    "message": "API key configured. This provider does not expose account quota windows through the standard API key interface.",
                 }
 
             if result:
+                result.setdefault("provider", canonical)
+                result.setdefault("profileId", profile.get("_profileId", ""))
+                result.setdefault("authType", str(profile.get("type") or profile.get("mode") or ("oauth" if token else "api_key")))
+                result.setdefault("profilesFound", len(provider_profiles))
                 providers.append(result)
-                seen.add(prov)
 
-        return {"providers": providers, "timestamp": now, "source": "direct-api"}
+        return {"providers": providers, "timestamp": now, "source": "openclaw-native-auth"}
 
     def _http_get(self, url, headers):
         """Make an HTTP GET request. Returns (status, response_body_dict_or_None)."""
@@ -8170,12 +8236,15 @@ class ApiUsageCollector:
         entry = {
             "provider": "anthropic",
             "displayName": _PROVIDER_LABELS.get("anthropic", "Claude"),
+            "type": "oauth",
         }
         if status != 200 or not data:
             msg = ""
             if data and isinstance(data, dict):
                 msg = data.get("error", {}).get("message", "") if isinstance(data.get("error"), dict) else str(data.get("error", ""))
             entry["error"] = f"HTTP {status}: {msg}" if msg else f"HTTP {status}"
+            if status == 429:
+                entry["message"] = "Claude usage endpoint is rate limited. Model access can still work; usage will refresh after the provider allows another check."
             return entry
 
         # Parse usage windows
@@ -8208,7 +8277,7 @@ class ApiUsageCollector:
 
     # --- OpenAI Codex ---
     def _fetch_codex(self, token, account_id, now):
-        """Fetch Codex/ChatGPT usage from OpenAI endpoint."""
+        """Fetch ChatGPT/Codex usage from OpenAI's OAuth-backed usage endpoint."""
         headers = {
             "Authorization": f"Bearer {token}",
             "User-Agent": "CodexBar",
@@ -8219,11 +8288,13 @@ class ApiUsageCollector:
 
         status, data = self._http_get("https://chatgpt.com/backend-api/wham/usage", headers)
         entry = {
-            "provider": "openai-codex",
-            "displayName": _PROVIDER_LABELS.get("openai-codex", "Codex"),
+            "provider": "openai",
+            "displayName": _PROVIDER_LABELS.get("openai", "OpenAI"),
+            "type": "oauth",
         }
         if status != 200 or not data:
             entry["error"] = f"HTTP {status}"
+            entry["message"] = "OpenAI usage requires a valid ChatGPT/Codex OAuth session. API-key billing usage is not exposed here."
             return entry
 
         windows = []
