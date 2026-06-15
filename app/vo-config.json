@@ -46,10 +46,14 @@
     "homePath": "~/.codex",
     "binary": "codex",
     "workspaceRoot": "/data/codex-agents",
+    "mainWorkspace": "/data/codex-main",
     "timeoutSec": 900,
     "model": "",
     "sandbox": "workspace-write",
     "approvalPolicy": "never",
-    "preferAppServer": true
+    "preferAppServer": true,
+    "includeMain": true,
+    "includeNativeAgents": true,
+    "registerNativeAgents": true
   }
 }

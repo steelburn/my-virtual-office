@@ -30,7 +30,9 @@ For Docker deployments, mount or otherwise expose the Hermes home directory and 
 
 Virtual Office can create Codex-backed office agents when the Codex CLI is available to the app. Chat uses Codex's native `codex app-server` JSON-RPC protocol for thread start/resume, live progress, and interrupt support. `codex exec` is retained only as an explicit compatibility fallback.
 
-For Docker deployments, install Codex inside the container image or set `VO_CODEX_BIN` to a Codex executable path available inside the container. Set `VO_CODEX_HOME` to a deployment-specific Codex home so auth and config stay out of the repo and are not tied to any developer's machine. Useful variables: `VO_CODEX_BIN`, `VO_CODEX_HOME`, `VO_CODEX_WORKSPACE_ROOT`, `VO_CODEX_PREFER_APP_SERVER`, and `VO_CODEX_APPROVAL_POLICY`.
+Discovery includes Virtual Office-created Codex agents, Codex's standard `$CODEX_HOME/agents/*.toml` custom agents, and a synthesized `Main` entry for the default Codex root agent. Newly created Virtual Office Codex agents can use the default Codex agents directory or a custom parent directory. Default-directory creation registers a native custom-agent TOML file under `$CODEX_HOME/agents` when `VO_CODEX_REGISTER_NATIVE_AGENTS=1`; custom-directory creation writes a project-local `.codex/agents/<profile>.toml` and keeps a small Virtual Office registry so the agent remains discoverable.
+
+For Docker deployments, install Codex inside the container image or set `VO_CODEX_BIN` to a Codex executable path available inside the container. Set `VO_CODEX_HOME` to a deployment-specific Codex home so auth and config stay out of the repo and are not tied to any developer's machine. Useful variables: `VO_CODEX_BIN`, `VO_CODEX_HOME`, `VO_CODEX_WORKSPACE_ROOT`, `VO_CODEX_MAIN_WORKSPACE`, `VO_CODEX_INCLUDE_MAIN`, `VO_CODEX_INCLUDE_NATIVE_AGENTS`, `VO_CODEX_REGISTER_NATIVE_AGENTS`, `VO_CODEX_PREFER_APP_SERVER`, and `VO_CODEX_APPROVAL_POLICY`.
 
 ## Features
 

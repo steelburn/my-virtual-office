@@ -1127,6 +1127,24 @@ button:active { transform: translateY(3px); box-shadow: none; }
     line-height: 1.4;
     margin-top: -4px;
 }
+.agent-create-codex-options {
+    display: grid;
+    gap: 8px;
+    padding: 10px;
+    border: 1px solid #323653;
+    border-radius: 6px;
+    background: rgba(18, 24, 39, 0.8);
+}
+.agent-create-codex-options[hidden],
+.agent-create-codex-custom[hidden] {
+    display: none;
+}
+.agent-create-codex-note {
+    min-height: 16px;
+    color: #9da8bd;
+    font-size: 11px;
+    line-height: 1.4;
+}
 .agent-create-error {
     min-height: 16px;
     color: #ff8a80;

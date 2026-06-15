@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import threading
 import time
+import tomllib
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -38,6 +39,10 @@ class CodexProvider:
     sandbox: str = "workspace-write"
     approval_policy: str = "never"
     prefer_app_server: bool = True
+    main_workspace: str | None = None
+    include_main: bool = True
+    include_native_agents: bool = True
+    register_native_agents: bool = True
 
     provider_kind: str = "codex"
     provider_type: str = "harness"
@@ -55,10 +60,18 @@ class CodexProvider:
             or os.environ.get("VO_CODEX_WORKSPACE_ROOT")
             or os.path.join(os.environ.get("VO_STATUS_DIR", "/data"), "codex-agents")
         )
+        self.main_workspace = os.path.expanduser(
+            self.main_workspace
+            or os.environ.get("VO_CODEX_MAIN_WORKSPACE")
+            or self.workspace_root
+        )
         self.sandbox = str(self.sandbox or "workspace-write")
         self.approval_policy = str(self.approval_policy or "never")
         self.model = str(self.model or "")
         self.prefer_app_server = str(os.environ.get("VO_CODEX_PREFER_APP_SERVER", str(self.prefer_app_server))).lower() not in ("0", "false", "no", "off")
+        self.include_main = str(os.environ.get("VO_CODEX_INCLUDE_MAIN", str(self.include_main))).lower() not in ("0", "false", "no", "off")
+        self.include_native_agents = str(os.environ.get("VO_CODEX_INCLUDE_NATIVE_AGENTS", str(self.include_native_agents))).lower() not in ("0", "false", "no", "off")
+        self.register_native_agents = str(os.environ.get("VO_CODEX_REGISTER_NATIVE_AGENTS", str(self.register_native_agents))).lower() not in ("0", "false", "no", "off")
 
     def is_available(self) -> bool:
         return bool(
@@ -92,6 +105,7 @@ class CodexProvider:
                     "binary": self.binary,
                     "homePath": self.home_path,
                     "workspaceRoot": self.workspace_root,
+                    "mainWorkspace": self._main_workspace(),
                     "authOk": auth_ok,
                     "authStatus": self._account_status_text(account_result),
                     "codexHome": (init.get("result") or {}).get("codexHome") if isinstance(init, dict) else self.home_path,
@@ -111,6 +125,7 @@ class CodexProvider:
                 "binary": self.binary,
                 "homePath": self.home_path,
                 "workspaceRoot": self.workspace_root,
+                "mainWorkspace": self._main_workspace(),
                 "authOk": auth_ok,
                 "authStatus": auth_text,
                 "error": "" if auth_ok else (auth_text or "Codex is not logged in"),
@@ -120,53 +135,92 @@ class CodexProvider:
             return {"ok": False, "protocol": "exec", "error": str(exc), "agents": []}
 
     def discover_agents(self) -> list[dict[str, Any]]:
-        if not self.is_available() or not self.workspace_root or not os.path.isdir(self.workspace_root):
+        if not self.is_available():
             return []
 
         agents: list[dict[str, Any]] = []
-        for name in sorted(os.listdir(self.workspace_root)):
-            agent_dir = os.path.join(self.workspace_root, name)
-            if not os.path.isdir(agent_dir):
-                continue
-            meta_path = os.path.join(agent_dir, "office-agent.json")
+        seen_profiles: set[str] = set()
+        if self.include_main:
+            agents.append(self._agent_entry(
+                profile="main",
+                name="Main",
+                emoji="🤖",
+                role="Default Codex agent",
+                model=self.model or "",
+                workspace=self._main_workspace(),
+                source="native-main",
+                last_active=self._last_active(self._main_workspace()),
+            ))
+            seen_profiles.add("main")
+
+        if not self.workspace_root or not os.path.isdir(self.workspace_root):
+            return agents + self._discover_native_agents(seen_profiles)
+
+        for agent_dir in self._office_agent_dirs():
             try:
-                with open(meta_path, "r", encoding="utf-8") as f:
+                with open(os.path.join(agent_dir, "office-agent.json"), "r", encoding="utf-8") as f:
                     meta = json.load(f)
             except (FileNotFoundError, json.JSONDecodeError, OSError):
                 continue
-            profile = self._safe_profile_name(meta.get("profile") or name)
-            suffix = self._safe_suffix(profile)
-            agents.append({
-                "id": f"codex-{suffix}",
-                "statusKey": f"codex-{suffix}",
-                "providerKind": self.provider_kind,
-                "providerType": self.provider_type,
-                "providerAgentId": profile,
-                "profile": profile,
-                "name": meta.get("name") or self._display_name(profile),
-                "emoji": meta.get("emoji") or "🤖",
-                "role": meta.get("role") or "Codex Agent",
-                "model": meta.get("model") or self.model or "",
-                "provider": "Codex App Server" if self.prefer_app_server else "Codex CLI",
-                "workspace": agent_dir,
-                "home": agent_dir,
-                "binary": self.binary,
-                "lastActiveAt": self._last_active(agent_dir),
-                "capabilities": ["chat", "status", "sessions", "files", "streaming", "interrupt"],
-            })
+            profile = self._safe_profile_name(meta.get("profile") or os.path.basename(agent_dir))
+            if profile in seen_profiles:
+                continue
+            seen_profiles.add(profile)
+            agents.append(self._agent_entry(
+                profile=profile,
+                name=meta.get("name") or self._display_name(profile),
+                emoji=meta.get("emoji") or "🤖",
+                role=meta.get("role") or "Codex Agent",
+                model=meta.get("model") or self.model or "",
+                workspace=agent_dir,
+                source=meta.get("creationMode") or "virtual-office",
+                last_active=self._last_active(agent_dir),
+                native_agent_path=meta.get("nativeAgentPath") or "",
+            ))
+        agents.extend(self._discover_native_agents(seen_profiles))
         return agents
 
-    def create_agent(self, name: str, role: str = "Codex Agent", model: str | None = None, emoji: str = "🤖", profile: str | None = None, prompt: str | None = None) -> dict[str, Any]:
+    def create_agent(
+        self,
+        name: str,
+        role: str = "Codex Agent",
+        model: str | None = None,
+        emoji: str = "🤖",
+        profile: str | None = None,
+        prompt: str | None = None,
+        creation_mode: str = "standard",
+        custom_directory: str | None = None,
+    ) -> dict[str, Any]:
         if not self.is_available():
             return {"ok": False, "error": f"Codex CLI is not available. Set VO_CODEX_BIN or install codex on PATH."}
 
         safe_profile = self._safe_profile_name(profile or name)
         if not safe_profile:
             return {"ok": False, "error": "Invalid Codex profile name"}
-        agent_dir = os.path.join(self.workspace_root or "", safe_profile)
+        if self._profile_exists(safe_profile):
+            return {"ok": False, "error": f"Codex agent '{safe_profile}' already exists"}
+
+        mode = str(creation_mode or "standard").strip().lower()
+        if mode not in {"standard", "custom"}:
+            mode = "standard"
+        if mode == "custom":
+            parent_dir = self._resolve_custom_parent(custom_directory)
+            if not parent_dir:
+                return {"ok": False, "error": "A custom parent directory is required for custom Codex agent creation"}
+            native_agents_dir = self._native_agents_dir()
+            if native_agents_dir and self._path_is_inside(parent_dir, native_agents_dir):
+                return {"ok": False, "error": "Custom workspace directory cannot be inside the Codex agents TOML directory. Use the standard Codex directory option instead."}
+            agent_dir = os.path.join(parent_dir, safe_profile)
+        else:
+            agent_dir = os.path.join(self.workspace_root or "", safe_profile)
         meta_path = os.path.join(agent_dir, "office-agent.json")
         if os.path.exists(meta_path):
             return {"ok": False, "error": f"Codex agent '{safe_profile}' already exists"}
+
+        native_agent_path = self._native_agent_file_path(safe_profile) if mode == "standard" else ""
+        should_register_native = mode == "standard" and self.register_native_agents and native_agent_path
+        if should_register_native and os.path.exists(native_agent_path):
+            return {"ok": False, "error": f"Native Codex agent '{safe_profile}' already exists in {native_agent_path}"}
 
         os.makedirs(os.path.join(agent_dir, ".codex", "agents"), exist_ok=True)
         model_value = (model or self.model or "").strip()
@@ -180,13 +234,21 @@ class CodexProvider:
             "model": model_value,
             "providerKind": self.provider_kind,
             "providerType": self.provider_type,
+            "creationMode": mode,
+            "customParentDirectory": os.path.dirname(agent_dir) if mode == "custom" else "",
             "createdAt": int(time.time()),
         }
+        if should_register_native:
+            meta["nativeAgentPath"] = native_agent_path
         self._write_json(meta_path, meta)
         self._write_text(os.path.join(agent_dir, "IDENTITY.md"), self._identity_md(name, role, emoji))
         self._write_text(os.path.join(agent_dir, "AGENTS.md"), self._agents_md(name, role, instructions))
         self._write_text(os.path.join(agent_dir, ".codex", "config.toml"), self._config_toml(model_value))
         self._write_text(os.path.join(agent_dir, ".codex", "agents", f"{safe_profile}.toml"), self._agent_toml(safe_profile, role, instructions, model_value))
+        if should_register_native:
+            self._write_text(native_agent_path, self._agent_toml(safe_profile, role, instructions, model_value))
+        if mode == "custom":
+            self._save_external_agent(safe_profile, agent_dir)
 
         return {
             "ok": True,
@@ -194,6 +256,8 @@ class CodexProvider:
             "agentId": f"codex-{safe_profile}",
             "name": name,
             "workspace": agent_dir,
+            "creationMode": mode,
+            "nativeAgentPath": native_agent_path if should_register_native else "",
             "message": f"Codex agent '{name}' created successfully",
         }
 
@@ -201,10 +265,29 @@ class CodexProvider:
         safe_profile = self._safe_profile_name(profile)
         if not safe_profile:
             return {"ok": False, "error": "profile is required"}
+        if safe_profile == "main":
+            return {"ok": False, "error": "The built-in Codex Main agent cannot be deleted"}
         agent_dir = os.path.join(self.workspace_root or "", safe_profile)
+        meta = self._load_meta(agent_dir)
         if not os.path.isdir(agent_dir):
+            native_path = self._native_agent_file_path(safe_profile)
+            if native_path and os.path.isfile(native_path):
+                os.remove(native_path)
+                return {"ok": True, "deleted": True, "profile": safe_profile, "agentId": f"codex-{safe_profile}", "nativeAgentPath": native_path}
+            external_dir = self._external_agent_dir(safe_profile)
+            if external_dir and os.path.isdir(external_dir):
+                shutil.rmtree(external_dir)
+                self._remove_external_agent(safe_profile)
+                return {"ok": True, "deleted": True, "profile": safe_profile, "agentId": f"codex-{safe_profile}"}
             return {"ok": True, "deleted": False, "profile": safe_profile, "agentId": f"codex-{safe_profile}"}
         shutil.rmtree(agent_dir)
+        self._remove_external_agent(safe_profile)
+        native_path = str(meta.get("nativeAgentPath") or "")
+        if native_path and os.path.isfile(native_path) and self._is_native_agent_path(native_path):
+            try:
+                os.remove(native_path)
+            except OSError:
+                pass
         return {"ok": True, "deleted": True, "profile": safe_profile, "agentId": f"codex-{safe_profile}"}
 
     def send_chat_message(
@@ -242,7 +325,7 @@ class CodexProvider:
 
         self._ensure_paths()
         safe_profile = self._safe_profile_name(profile)
-        agent_dir = os.path.join(self.workspace_root or "", safe_profile)
+        agent_dir = self._runtime_workspace(safe_profile)
         if not os.path.isdir(agent_dir):
             return {"ok": False, "error": f"Codex agent workspace not found: {agent_dir}", "reply": "", "sessionId": session_id or ""}
 
@@ -267,9 +350,11 @@ class CodexProvider:
                 "cwd": agent_dir,
                 "approvalPolicy": self.approval_policy,
                 "sandbox": self.sandbox,
-                "developerInstructions": self._thread_instructions(agent_dir),
                 "threadSource": "user",
             }
+            developer_instructions = self._thread_instructions(agent_dir, safe_profile)
+            if developer_instructions:
+                thread_params["developerInstructions"] = developer_instructions
             if self.model:
                 thread_params["model"] = self.model
             if session_id:
@@ -347,11 +432,11 @@ class CodexProvider:
             return {"ok": False, "error": "message is required", "reply": "", "sessionId": session_id or ""}
 
         safe_profile = self._safe_profile_name(profile)
-        agent_dir = os.path.join(self.workspace_root or "", safe_profile)
+        agent_dir = self._runtime_workspace(safe_profile)
         if not os.path.isdir(agent_dir):
             return {"ok": False, "error": f"Codex agent workspace not found: {agent_dir}", "reply": "", "sessionId": session_id or ""}
 
-        prompt = self._delivery_prompt(agent_dir, message)
+        prompt = self._delivery_prompt(agent_dir, message, safe_profile)
         cmd = [self.binary, "exec"]
         if session_id:
             cmd.extend(["resume", "--json", "--skip-git-repo-check"])
@@ -410,12 +495,18 @@ class CodexProvider:
             os.makedirs(self.home_path, exist_ok=True)
         if self.workspace_root:
             os.makedirs(self.workspace_root, exist_ok=True)
+        if self.main_workspace:
+            os.makedirs(self.main_workspace, exist_ok=True)
 
-    def _thread_instructions(self, agent_dir: str) -> str:
+    def _thread_instructions(self, agent_dir: str, profile: str | None = None) -> str:
         meta = self._load_meta(agent_dir)
+        if not meta and profile:
+            meta = self._load_native_agent_meta(profile)
+        if str((meta or {}).get("source") or "") == "native-main":
+            return ""
         name = meta.get("name") or "Codex"
         role = meta.get("role") or "Codex Agent"
-        instructions = meta.get("prompt") or role
+        instructions = meta.get("prompt") or meta.get("developer_instructions") or role
         return (
             f"You are {name}, a Virtual Office Codex agent.\n"
             f"Role: {role}\n\n"
@@ -423,8 +514,11 @@ class CodexProvider:
             "Respond from that persona. When changing files, keep work scoped to this workspace unless explicitly asked otherwise."
         )
 
-    def _delivery_prompt(self, agent_dir: str, message: str) -> str:
-        return f"{self._thread_instructions(agent_dir)}\n\nUser message:\n{message}"
+    def _delivery_prompt(self, agent_dir: str, message: str, profile: str | None = None) -> str:
+        instructions = self._thread_instructions(agent_dir, profile)
+        if not instructions:
+            return f"User message:\n{message}"
+        return f"{instructions}\n\nUser message:\n{message}"
 
     def _parse_exec_json(self, stdout: str) -> dict[str, Any]:
         session_id = ""
@@ -513,6 +607,247 @@ class CodexProvider:
         except Exception:
             return {}
 
+    def _agent_entry(
+        self,
+        *,
+        profile: str,
+        name: str,
+        emoji: str,
+        role: str,
+        model: str,
+        workspace: str,
+        source: str,
+        last_active: int = 0,
+        native_agent_path: str = "",
+    ) -> dict[str, Any]:
+        suffix = self._safe_suffix(profile)
+        return {
+            "id": f"codex-{suffix}",
+            "statusKey": f"codex-{suffix}",
+            "providerKind": self.provider_kind,
+            "providerType": self.provider_type,
+            "providerAgentId": profile,
+            "profile": profile,
+            "name": name or self._display_name(profile),
+            "emoji": emoji or "🤖",
+            "role": role or "Codex Agent",
+            "model": model or self.model or "",
+            "provider": "Codex App Server" if self.prefer_app_server else "Codex CLI",
+            "workspace": workspace,
+            "home": workspace,
+            "binary": self.binary,
+            "lastActiveAt": last_active,
+            "codexSource": source,
+            "nativeAgentPath": native_agent_path,
+            "capabilities": ["chat", "status", "sessions", "files", "streaming", "interrupt"],
+        }
+
+    def _office_agent_dirs(self) -> list[str]:
+        dirs: list[str] = []
+        seen: set[str] = set()
+        if self.workspace_root and os.path.isdir(self.workspace_root):
+            for name in sorted(os.listdir(self.workspace_root)):
+                agent_dir = os.path.join(self.workspace_root, name)
+                if os.path.isdir(agent_dir):
+                    real = os.path.abspath(agent_dir)
+                    dirs.append(agent_dir)
+                    seen.add(real)
+        for _profile, agent_dir in sorted(self._load_external_agents().items()):
+            if not agent_dir or not os.path.isdir(agent_dir):
+                continue
+            real = os.path.abspath(agent_dir)
+            if real in seen:
+                continue
+            dirs.append(agent_dir)
+            seen.add(real)
+        return dirs
+
+    def _discover_native_agents(self, seen_profiles: set[str]) -> list[dict[str, Any]]:
+        if not self.include_native_agents:
+            return []
+        agents_dir = self._native_agents_dir()
+        if not agents_dir or not os.path.isdir(agents_dir):
+            return []
+        agents: list[dict[str, Any]] = []
+        for filename in sorted(os.listdir(agents_dir)):
+            if not filename.endswith(".toml"):
+                continue
+            path = os.path.join(agents_dir, filename)
+            meta = self._load_native_agent_file(path)
+            if not meta:
+                continue
+            profile = self._safe_profile_name(meta.get("profile") or meta.get("name") or os.path.splitext(filename)[0])
+            if not profile or profile in seen_profiles:
+                continue
+            seen_profiles.add(profile)
+            agents.append(self._agent_entry(
+                profile=profile,
+                name=str(meta.get("name") or self._display_name(profile)),
+                emoji=str(meta.get("emoji") or "🤖"),
+                role=str(meta.get("description") or meta.get("role") or "Codex Agent"),
+                model=str(meta.get("model") or self.model or ""),
+                workspace=self._main_workspace(),
+                source="native-agent",
+                last_active=self._last_active(path),
+                native_agent_path=path,
+            ))
+        return agents
+
+    def _runtime_workspace(self, profile: str) -> str:
+        safe_profile = self._safe_profile_name(profile)
+        vo_dir = os.path.join(self.workspace_root or "", safe_profile)
+        if os.path.isfile(os.path.join(vo_dir, "office-agent.json")):
+            return vo_dir
+        external_dir = self._external_agent_dir(safe_profile)
+        if external_dir and os.path.isfile(os.path.join(external_dir, "office-agent.json")):
+            return external_dir
+        return self._main_workspace()
+
+    def _profile_exists(self, profile: str) -> bool:
+        safe_profile = self._safe_profile_name(profile)
+        if safe_profile == "main":
+            return True
+        for agent_dir in self._office_agent_dirs():
+            meta = self._load_meta(agent_dir)
+            if self._safe_profile_name(meta.get("profile") or os.path.basename(agent_dir)) == safe_profile:
+                return True
+        native_path = self._native_agent_file_path(safe_profile)
+        if native_path and os.path.isfile(native_path):
+            return True
+        return False
+
+    def _main_workspace(self) -> str:
+        return os.path.expanduser(self.main_workspace or self.workspace_root or os.getcwd())
+
+    def _native_agents_dir(self) -> str:
+        if not self.home_path:
+            return ""
+        return os.path.join(os.path.expanduser(self.home_path), "agents")
+
+    def _native_agent_file_path(self, profile: str) -> str:
+        agents_dir = self._native_agents_dir()
+        if not agents_dir:
+            return ""
+        return os.path.join(agents_dir, f"{self._safe_profile_name(profile)}.toml")
+
+    def _is_native_agent_path(self, path: str) -> bool:
+        agents_dir = self._native_agents_dir()
+        if not agents_dir:
+            return False
+        return self._path_is_inside(path, agents_dir)
+
+    @staticmethod
+    def _path_is_inside(path: str, parent: str) -> bool:
+        try:
+            return os.path.commonpath([os.path.abspath(parent), os.path.abspath(path)]) == os.path.abspath(parent)
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _resolve_custom_parent(value: str | None) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        return os.path.abspath(os.path.expanduser(raw))
+
+    def _registry_path(self) -> str:
+        root = self.workspace_root or self.home_path or os.getcwd()
+        return os.path.join(os.path.expanduser(root), "office-codex-agent-registry.json")
+
+    def _load_external_agents(self) -> dict[str, str]:
+        path = self._registry_path()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+        agents = data.get("agents") if isinstance(data, dict) else {}
+        if not isinstance(agents, dict):
+            return {}
+        result: dict[str, str] = {}
+        for profile, agent_dir in agents.items():
+            safe_profile = self._safe_profile_name(profile)
+            if safe_profile and isinstance(agent_dir, str) and agent_dir.strip():
+                result[safe_profile] = os.path.abspath(os.path.expanduser(agent_dir.strip()))
+        return result
+
+    def _save_external_agents(self, agents: dict[str, str]) -> None:
+        path = self._registry_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        data = {
+            "schema": "my-virtual-office.codex-agent-registry.v1",
+            "updatedAt": int(time.time()),
+            "agents": {self._safe_profile_name(k): os.path.abspath(os.path.expanduser(v)) for k, v in sorted(agents.items()) if k and v},
+        }
+        self._write_json(path, data)
+
+    def _save_external_agent(self, profile: str, agent_dir: str) -> None:
+        agents = self._load_external_agents()
+        agents[self._safe_profile_name(profile)] = os.path.abspath(os.path.expanduser(agent_dir))
+        self._save_external_agents(agents)
+
+    def _remove_external_agent(self, profile: str) -> None:
+        agents = self._load_external_agents()
+        safe_profile = self._safe_profile_name(profile)
+        if safe_profile not in agents:
+            return
+        agents.pop(safe_profile, None)
+        self._save_external_agents(agents)
+
+    def _external_agent_dir(self, profile: str) -> str:
+        return self._load_external_agents().get(self._safe_profile_name(profile), "")
+
+    def _load_native_agent_meta(self, profile: str) -> dict[str, Any]:
+        safe_profile = self._safe_profile_name(profile)
+        if safe_profile == "main":
+            return {
+                "profile": "main",
+                "name": "Main",
+                "role": "Default Codex agent",
+                "description": "Default Codex agent",
+                "prompt": "",
+                "source": "native-main",
+            }
+        agents_dir = self._native_agents_dir()
+        if not agents_dir or not os.path.isdir(agents_dir):
+            return {}
+        direct = self._native_agent_file_path(safe_profile)
+        candidates = [direct] if direct else []
+        candidates.extend(
+            os.path.join(agents_dir, name)
+            for name in sorted(os.listdir(agents_dir))
+            if name.endswith(".toml") and os.path.join(agents_dir, name) != direct
+        )
+        for path in candidates:
+            meta = self._load_native_agent_file(path)
+            if not meta:
+                continue
+            meta_profile = self._safe_profile_name(meta.get("profile") or meta.get("name") or os.path.splitext(os.path.basename(path))[0])
+            if meta_profile == safe_profile:
+                meta["profile"] = safe_profile
+                meta["nativeAgentPath"] = path
+                meta["role"] = meta.get("description") or meta.get("role") or "Codex Agent"
+                meta["prompt"] = meta.get("developer_instructions") or meta.get("prompt") or ""
+                meta["source"] = "native-agent"
+                return meta
+        return {}
+
+    @staticmethod
+    def _load_native_agent_file(path: str) -> dict[str, Any]:
+        try:
+            with open(path, "rb") as f:
+                data = tomllib.load(f)
+        except (FileNotFoundError, OSError, tomllib.TOMLDecodeError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        name = str(data.get("name") or "").strip()
+        description = str(data.get("description") or "").strip()
+        instructions = str(data.get("developer_instructions") or "").strip()
+        if not (name and description and instructions):
+            return {}
+        return data
+
     @staticmethod
     def _resolve_binary(value: str | None) -> str:
         candidates = [
@@ -564,6 +899,11 @@ class CodexProvider:
 
     @staticmethod
     def _last_active(agent_dir: str) -> int:
+        if os.path.isfile(agent_dir):
+            try:
+                return int(os.path.getmtime(agent_dir))
+            except OSError:
+                return 0
         latest = 0
         try:
             for root, dirs, files in os.walk(agent_dir):

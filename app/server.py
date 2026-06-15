@@ -208,6 +208,11 @@ def _load_vo_config():
     hermes_cfg = cfg.get("hermes") or {}
     codex_cfg = cfg.get("codex") or {}
 
+    codex_workspace_root = _env_or(
+        "VO_CODEX_WORKSPACE_ROOT",
+        codex_cfg.get("workspaceRoot", os.path.join(_env_or("VO_STATUS_DIR", presence.get("statusDir", "/data")), "codex-agents")),
+    )
+
     return {
         "office": {
             "name": _env_or("VO_OFFICE_NAME", office.get("name", "Virtual Office")),
@@ -265,12 +270,16 @@ def _load_vo_config():
             "enabled": str(_env_or("VO_CODEX_ENABLED", codex_cfg.get("enabled", True))).lower() not in ("0", "false", "no", "off"),
             "homePath": _env_or("VO_CODEX_HOME", codex_cfg.get("homePath", os.path.expanduser("~/.codex"))),
             "binary": _env_or("VO_CODEX_BIN", codex_cfg.get("binary", "")),
-            "workspaceRoot": _env_or("VO_CODEX_WORKSPACE_ROOT", codex_cfg.get("workspaceRoot", os.path.join(_env_or("VO_STATUS_DIR", presence.get("statusDir", "/data")), "codex-agents"))),
+            "workspaceRoot": codex_workspace_root,
+            "mainWorkspace": _env_or("VO_CODEX_MAIN_WORKSPACE", codex_cfg.get("mainWorkspace", codex_workspace_root)),
             "timeoutSec": int(_env_or("VO_CODEX_TIMEOUT_SEC", codex_cfg.get("timeoutSec", 900))),
             "model": _env_or("VO_CODEX_MODEL", codex_cfg.get("model", "")),
             "sandbox": _env_or("VO_CODEX_SANDBOX", codex_cfg.get("sandbox", "workspace-write")),
             "approvalPolicy": _env_or("VO_CODEX_APPROVAL_POLICY", codex_cfg.get("approvalPolicy", "never")),
             "preferAppServer": str(_env_or("VO_CODEX_PREFER_APP_SERVER", codex_cfg.get("preferAppServer", True))).lower() not in ("0", "false", "no", "off"),
+            "includeMain": str(_env_or("VO_CODEX_INCLUDE_MAIN", codex_cfg.get("includeMain", True))).lower() not in ("0", "false", "no", "off"),
+            "includeNativeAgents": str(_env_or("VO_CODEX_INCLUDE_NATIVE_AGENTS", codex_cfg.get("includeNativeAgents", True))).lower() not in ("0", "false", "no", "off"),
+            "registerNativeAgents": str(_env_or("VO_CODEX_REGISTER_NATIVE_AGENTS", codex_cfg.get("registerNativeAgents", True))).lower() not in ("0", "false", "no", "off"),
         },
     }
 
@@ -2059,6 +2068,10 @@ def _discover_roster():
         codex_approval_policy=codex.get("approvalPolicy") or "never",
         codex_prefer_app_server=codex.get("preferAppServer", True),
         codex_timeout_sec=int(codex.get("timeoutSec") or 900),
+        codex_main_workspace=codex.get("mainWorkspace"),
+        codex_include_main=codex.get("includeMain", True),
+        codex_include_native_agents=codex.get("includeNativeAgents", True),
+        codex_register_native_agents=codex.get("registerNativeAgents", True),
     )
 
 _discovered_roster = _discover_roster()
@@ -2453,6 +2466,10 @@ def _codex_provider():
         sandbox=codex_cfg.get("sandbox") or "workspace-write",
         approval_policy=codex_cfg.get("approvalPolicy") or "never",
         prefer_app_server=codex_cfg.get("preferAppServer", True),
+        main_workspace=codex_cfg.get("mainWorkspace"),
+        include_main=codex_cfg.get("includeMain", True),
+        include_native_agents=codex_cfg.get("includeNativeAgents", True),
+        register_native_agents=codex_cfg.get("registerNativeAgents", True),
     )
 
 
@@ -3662,6 +3679,10 @@ def _handle_codex_test(body=None):
         sandbox=cfg.get("sandbox") or "workspace-write",
         approval_policy=cfg.get("approvalPolicy") or "never",
         prefer_app_server=cfg.get("preferAppServer", True),
+        main_workspace=cfg.get("mainWorkspace"),
+        include_main=cfg.get("includeMain", True),
+        include_native_agents=cfg.get("includeNativeAgents", True),
+        register_native_agents=cfg.get("registerNativeAgents", True),
     ).test()
     return result
 
@@ -3786,7 +3807,9 @@ def _handle_agent_platforms():
         binary=hermes_cfg.get("binary"),
         enabled=hermes_cfg.get("enabled", True),
     ).test()
+    codex_cfg = VO_CONFIG.get("codex", {})
     codex_status = _codex_provider().test()
+    codex_home = codex_status.get("homePath") or codex_cfg.get("homePath") or ""
     return {
         "ok": True,
         "platforms": [
@@ -3818,6 +3841,14 @@ def _handle_agent_platforms():
                 "create": bool(codex_status.get("ok")),
                 "delete": bool(codex_status.get("ok")),
                 "error": "" if codex_status.get("ok") else codex_status.get("error", "Codex is not available"),
+                "codex": {
+                    "homePath": codex_home,
+                    "nativeAgentsDir": os.path.join(codex_home, "agents") if codex_home else "",
+                    "workspaceRoot": codex_status.get("workspaceRoot") or codex_cfg.get("workspaceRoot") or "",
+                    "mainWorkspace": codex_status.get("mainWorkspace") or codex_cfg.get("mainWorkspace") or "",
+                    "defaultCreationMode": "standard",
+                    "registerNativeAgents": bool(codex_cfg.get("registerNativeAgents", True)),
+                },
             },
         ],
     }
@@ -4427,8 +4458,19 @@ def _handle_codex_agent_create(body, name):
     prompt = body.get("prompt") or body.get("systemPrompt") or body.get("instructions") or role
     model = body.get("model") or VO_CONFIG.get("codex", {}).get("model", "")
     profile = body.get("id") or body.get("profile") or _sanitize_agent_id(name)
+    creation_mode = body.get("codexCreationMode") or body.get("creationMode") or body.get("agentDirectoryMode") or "standard"
+    custom_directory = body.get("codexCustomDirectory") or body.get("customDirectory") or body.get("agentDirectory") or ""
     provider = _codex_provider()
-    result = provider.create_agent(name=name, role=role, model=model, emoji=emoji, profile=profile, prompt=prompt)
+    result = provider.create_agent(
+        name=name,
+        role=role,
+        model=model,
+        emoji=emoji,
+        profile=profile,
+        prompt=prompt,
+        creation_mode=creation_mode,
+        custom_directory=custom_directory,
+    )
     if not result.get("ok"):
         return {"error": result.get("error", "Codex agent creation failed"), "_status": 500}
     global _discovered_at
@@ -4443,6 +4485,8 @@ def _handle_codex_agent_create(body, name):
         "profile": result.get("profile"),
         "name": name,
         "workspace": result.get("workspace"),
+        "creationMode": result.get("creationMode"),
+        "nativeAgentPath": result.get("nativeAgentPath"),
         "message": result.get("message", f"Codex agent '{name}' created successfully"),
     }
 

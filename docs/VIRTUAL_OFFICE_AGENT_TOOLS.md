@@ -39,13 +39,24 @@ Use when the office needs to create or remove agents on a connected platform.
 - `POST /api/agent/create`
 - `DELETE /api/agent/delete`
 
-`POST /api/agent/create` accepts `platform: "openclaw"`, `platform: "hermes"`, or `platform: "codex"`. OpenClaw creation goes through Gateway `agents.create` / `agents.files.set` so the agent is runnable immediately and files are owned by the OpenClaw user. Hermes creation maps one office agent to one Hermes profile and uses `hermes profile create/delete`. Codex creation maps one office agent to a Codex workspace under the configured `codex.workspaceRoot`, writes `AGENTS.md` plus `.codex/agents/<profile>.toml`, and chats through Codex's native app-server JSON-RPC protocol. `codex exec` is only a compatibility fallback when app-server is explicitly disabled.
+`POST /api/agent/create` accepts `platform: "openclaw"`, `platform: "hermes"`, or `platform: "codex"`. OpenClaw creation goes through Gateway `agents.create` / `agents.files.set` so the agent is runnable immediately and files are owned by the OpenClaw user. Hermes creation maps one office agent to one Hermes profile and uses `hermes profile create/delete`. Codex creation maps one office agent to a Codex workspace, writes `AGENTS.md` plus `.codex/agents/<profile>.toml`, and chats through Codex's native app-server JSON-RPC protocol. `codex exec` is only a compatibility fallback when app-server is explicitly disabled.
+
+Codex creation supports two location modes:
+
+- `codexCreationMode: "standard"`: create under configured `codex.workspaceRoot` and register `$CODEX_HOME/agents/<profile>.toml` when native registration is enabled.
+- `codexCreationMode: "custom"` with `codexCustomDirectory`: create `<codexCustomDirectory>/<profile>` and write project-local `.codex/agents/<profile>.toml`. Virtual Office stores a registry entry under `codex.workspaceRoot` so the custom agent remains discoverable.
+
+Codex discovery also reads the standard `$CODEX_HOME/agents/*.toml` custom-agent directory and includes a synthesized `codex-main` entry for Codex's default Main agent.
 
 Codex configuration is product-neutral:
 
 - `VO_CODEX_BIN`: Codex CLI executable, default `codex` on `PATH`
 - `VO_CODEX_HOME`: Codex auth/config home for this deployment, default `VO_STATUS_DIR/codex-home` in Docker
 - `VO_CODEX_WORKSPACE_ROOT`: Office-created Codex agent workspaces
+- `VO_CODEX_MAIN_WORKSPACE`: Workspace used by `codex-main` and native custom agents
+- `VO_CODEX_INCLUDE_MAIN`: include Codex's default Main agent, enabled by default
+- `VO_CODEX_INCLUDE_NATIVE_AGENTS`: read `$CODEX_HOME/agents/*.toml`, enabled by default
+- `VO_CODEX_REGISTER_NATIVE_AGENTS`: write `$CODEX_HOME/agents/<profile>.toml` when creating VO Codex agents, enabled by default
 - `VO_CODEX_PREFER_APP_SERVER`: native app-server integration on by default
 - `VO_CODEX_APPROVAL_POLICY`: Codex approval policy, default `never` so unattended Office runs do not hang on approval prompts
 

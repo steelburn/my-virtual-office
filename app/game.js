@@ -13789,6 +13789,14 @@ function _acpShowCreateAgentDialog(platforms) {
                 '<form class="agent-create-form">' +
                     '<label>Agent Platform<select name="platform">' + optionsHtml + '</select></label>' +
                     '<div class="agent-create-platform-note"></div>' +
+                    '<div class="agent-create-codex-options" hidden>' +
+                        '<label>Codex Location<select name="codexCreationMode">' +
+                            '<option value="standard">Default Codex agents directory</option>' +
+                            '<option value="custom">Custom parent directory</option>' +
+                        '</select></label>' +
+                        '<label class="agent-create-codex-custom" hidden>Custom Parent Directory<input name="codexCustomDirectory" placeholder="/path/to/agent-workspaces" autocomplete="off"></label>' +
+                        '<div class="agent-create-codex-note"></div>' +
+                    '</div>' +
                     '<label>Name<input name="name" maxlength="80" placeholder="New Agent" autocomplete="off"></label>' +
                     '<div class="agent-create-row">' +
                         '<label>Role<input name="role" maxlength="160" value="' + escAttr(defaults.role) + '"></label>' +
@@ -13814,11 +13822,38 @@ function _acpShowCreateAgentDialog(platforms) {
             var emoji = modal.querySelector('input[name="emoji"]');
             var prompt = modal.querySelector('textarea[name="prompt"]');
             var note = modal.querySelector('.agent-create-platform-note');
+            var codexOptions = modal.querySelector('.agent-create-codex-options');
             if (!role.value.trim() || role.value === lastDefaults.role) role.value = next.role;
             if (!emoji.value.trim() || emoji.value === lastDefaults.emoji) emoji.value = next.emoji;
             if (!prompt.value.trim() || prompt.value === lastDefaults.prompt) prompt.value = next.prompt;
             note.textContent = p.description || '';
+            if (codexOptions) {
+                codexOptions.hidden = p.id !== 'codex';
+                updateCodexDirectoryControls();
+            }
             lastDefaults = next;
+        }
+        function updateCodexDirectoryControls() {
+            var p = selectedPlatform();
+            var codexBox = modal.querySelector('.agent-create-codex-options');
+            var mode = modal.querySelector('select[name="codexCreationMode"]');
+            var custom = modal.querySelector('.agent-create-codex-custom');
+            var customInput = modal.querySelector('input[name="codexCustomDirectory"]');
+            var note = modal.querySelector('.agent-create-codex-note');
+            if (!codexBox || !mode || !custom || !note) return;
+            var isCodex = p.id === 'codex';
+            codexBox.hidden = !isCodex;
+            if (!isCodex) return;
+            var codex = p.codex || {};
+            var nativeDir = codex.nativeAgentsDir || '$CODEX_HOME/agents';
+            var workspaceRoot = codex.workspaceRoot || '';
+            custom.hidden = mode.value !== 'custom';
+            if (mode.value === 'custom') {
+                note.textContent = 'Creates a project-local Codex agent under the custom parent directory.';
+                if (customInput && !customInput.value.trim() && workspaceRoot) customInput.placeholder = workspaceRoot;
+            } else {
+                note.textContent = 'Registers the agent in ' + nativeDir + ' and creates a managed workspace for Virtual Office.';
+            }
         }
         function close(value) {
             document.removeEventListener('keydown', onKeyDown);
@@ -13835,6 +13870,7 @@ function _acpShowCreateAgentDialog(platforms) {
             }
         });
         modal.querySelector('select[name="platform"]').addEventListener('change', updatePlatformDefaults);
+        modal.querySelector('select[name="codexCreationMode"]').addEventListener('change', updateCodexDirectoryControls);
         modal.querySelector('form').addEventListener('submit', function(e) {
             e.preventDefault();
             var error = modal.querySelector('.agent-create-error');
@@ -13842,19 +13878,28 @@ function _acpShowCreateAgentDialog(platforms) {
             var role = modal.querySelector('input[name="role"]').value.trim();
             var emoji = modal.querySelector('input[name="emoji"]').value.trim();
             var prompt = modal.querySelector('textarea[name="prompt"]').value.trim();
+            var codexCreationMode = modal.querySelector('select[name="codexCreationMode"]').value;
+            var codexCustomDirectory = modal.querySelector('input[name="codexCustomDirectory"]').value.trim();
             if (!name) {
                 error.textContent = 'Agent name is required.';
                 modal.querySelector('input[name="name"]').focus();
                 return;
             }
             var p = selectedPlatform();
+            if (p.id === 'codex' && codexCreationMode === 'custom' && !codexCustomDirectory) {
+                error.textContent = 'Custom parent directory is required for custom Codex creation.';
+                modal.querySelector('input[name="codexCustomDirectory"]').focus();
+                return;
+            }
             var fallback = _acpAgentPlatformDefaults(p.id);
             close({
                 selectedPlatform: p,
                 agentName: name,
                 agentRole: role || fallback.role,
                 agentEmoji: emoji || fallback.emoji,
-                agentPrompt: prompt || role || fallback.prompt
+                agentPrompt: prompt || role || fallback.prompt,
+                codexCreationMode: p.id === 'codex' ? codexCreationMode : '',
+                codexCustomDirectory: p.id === 'codex' ? codexCustomDirectory : ''
             });
         });
         document.addEventListener('keydown', onKeyDown);
@@ -13886,12 +13931,17 @@ function _acpCreateNewAgent() {
         var agentRole = form.agentRole;
         var agentEmoji = form.agentEmoji;
         var agentPrompt = form.agentPrompt;
+        var createPayload = { platform: selectedPlatform.id, name: agentName, role: agentRole, emoji: agentEmoji, prompt: agentPrompt };
+        if (selectedPlatform.id === 'codex') {
+            createPayload.codexCreationMode = form.codexCreationMode || 'standard';
+            createPayload.codexCustomDirectory = form.codexCustomDirectory || '';
+        }
 
         _acpShowToast('Creating agent in ' + selectedPlatform.label + '...');
         return fetch('/api/agent/create', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ platform: selectedPlatform.id, name: agentName, role: agentRole, emoji: agentEmoji, prompt: agentPrompt })
+            body: JSON.stringify(createPayload)
         }).then(function(res) { return res.json(); }).then(function(data) {
             return { data: data, platform: selectedPlatform, name: agentName, role: agentRole, emoji: agentEmoji, prompt: agentPrompt };
         });
