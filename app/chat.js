@@ -84,6 +84,7 @@
       this.recoveryTimer = null;
       this.hermesProgressTimers = [];
       this.hermesHistoryPollTimer = null;
+      this.hermesEventSource = null;
       this.hermesCompletedToolKeys = new Set();
       this.codexHistoryPollTimer = null;
       this.codexCompletedToolKeys = new Set();
@@ -181,6 +182,7 @@
       if (this.toolFlushTimer) { clearTimeout(this.toolFlushTimer); this.toolFlushTimer = null; }
       if (this.recoveryTimer) { clearInterval(this.recoveryTimer); this.recoveryTimer = null; }
       this.stopHermesProgressTimers();
+      this.closeHermesEventSource();
       this.pendingToolEvents.clear();
       this.currentRunId = null;
       this.sessionModel = '—';
@@ -784,39 +786,39 @@
         const hermesLabel = this.agentSelect.selectedOptions[0]?.textContent.trim() || 'Hermes';
         const hermesProgress = this.startHermesProgress(hermesLabel);
         const hermesSendStartedAt = Date.now();
-        this.startHermesHistoryPolling();
+        const hermesBody = {
+          agentId: this.getSelectedAgentId() || this.selectedAgentKey,
+          message: text || '(attached files)',
+          fromType: 'human',
+          fromDisplayName: 'User',
+          sourceApp: 'virtual-office',
+          sourceSurface: 'chat-window',
+          sourceLabel: 'Virtual Office Chat',
+          attachments: uploadedFiles
+        };
         try {
-          const resp = await fetch('/api/hermes/chat', {
+          const resp = await fetch('/api/hermes/runs', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              agentId: this.getSelectedAgentId() || this.selectedAgentKey,
-              message: text || '(attached files)',
-              fromType: 'human',
-              fromDisplayName: 'User',
-              sourceApp: 'virtual-office',
-              sourceSurface: 'chat-window',
-              sourceLabel: 'Virtual Office Chat',
-              attachments: uploadedFiles
-            })
+            body: JSON.stringify(hermesBody)
           });
           const data = await resp.json();
-          this.stopHermesHistoryPolling();
-          this.removeTypingIndicator();
-          if (!resp.ok || (data.ok === false && !data.approval)) throw new Error(data.error || data.reply || resp.statusText);
-          this.finishHermesProgress(hermesProgress, true);
-          if (this.streamingMsg) {
-            this.pendingStreamContent = data.reply || this.pendingStreamContent || this.streamingMsg.content || '';
-            this.flushStreamingRender(true);
-            const existing = this.messages.querySelector('.streaming-msg');
-            if (existing) existing.remove();
-            this.streamingMsg = null;
+          if (!resp.ok || data.ok === false) {
+            if (data.fallback) {
+              await this.sendHermesBlockingMessage(hermesBody, hermesProgress, hermesSendStartedAt);
+              return;
+            }
+            throw new Error(data.error || data.reply || resp.statusText);
           }
-          await this.loadHistory({ recoverFinal: true });
+          this.currentRunId = data.runId || null;
+          await this.streamHermesRunEvents(data.runId, hermesProgress);
+          this.removeTypingIndicator();
+          this.finishHermesProgress(hermesProgress, true);
+          await this.loadHistory({ recoverFinal: true, startedAt: hermesSendStartedAt });
           await this.pollHermesApproval().catch(() => {});
           this.setStatus('Hermes ready', 'connected');
         } catch (e) {
-          this.stopHermesHistoryPolling();
+          this.closeHermesEventSource();
           this.removeTypingIndicator();
           const recovered = await this.recoverHermesFinalFromHistory(hermesSendStartedAt).catch(() => false);
           if (recovered) {
@@ -882,6 +884,18 @@
 
     async sendStop() {
       try {
+        if (this.isHermesSelected()) {
+          const resp = await fetch('/api/hermes/interrupt', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agentId: this.getSelectedAgentId() || this.selectedAgentKey, runId: this.currentRunId || '' })
+          });
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok || data.ok === false) throw new Error(data.error || resp.statusText);
+          this.appendSystem('Stop sent');
+          this.setStatus('Hermes stopping...', 'connecting');
+          return;
+        }
         if (this.isCodexSelected()) {
           const resp = await fetch('/api/codex/interrupt', {
             method: 'POST',
@@ -1256,6 +1270,175 @@
     }
 
     clearActivityFeed() { this.messages.querySelectorAll('.chat-activity').forEach(el => el.remove()); }
+
+    closeHermesEventSource() {
+      if (this.hermesEventSource) {
+        try { this.hermesEventSource.close(); } catch (_) {}
+        this.hermesEventSource = null;
+      }
+    }
+
+    async sendHermesBlockingMessage(hermesBody, hermesProgress, hermesSendStartedAt) {
+      this.startHermesHistoryPolling();
+      try {
+        const resp = await fetch('/api/hermes/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(hermesBody)
+        });
+        const data = await resp.json();
+        this.stopHermesHistoryPolling();
+        this.removeTypingIndicator();
+        if (!resp.ok || (data.ok === false && !data.approval)) throw new Error(data.error || data.reply || resp.statusText);
+        this.finishHermesProgress(hermesProgress, true);
+        if (this.streamingMsg) {
+          this.pendingStreamContent = data.reply || this.pendingStreamContent || this.streamingMsg.content || '';
+          this.flushStreamingRender(true);
+          const existing = this.messages.querySelector('.streaming-msg');
+          if (existing) existing.remove();
+          this.streamingMsg = null;
+        }
+        await this.loadHistory({ recoverFinal: true, startedAt: hermesSendStartedAt });
+        await this.pollHermesApproval().catch(() => {});
+        this.setStatus('Hermes ready', 'connected');
+      } catch (e) {
+        this.stopHermesHistoryPolling();
+        throw e;
+      }
+    }
+
+    streamHermesRunEvents(runId, hermesProgress) {
+      if (!runId) return Promise.reject(new Error('Hermes run did not return a run id'));
+      this.closeHermesEventSource();
+      this.hermesCompletedToolKeys = new Set();
+      this.currentRunId = runId;
+      this.setStatus('Hermes stream active...', 'connecting');
+      this.markLiveEvent();
+      const agentId = this.getSelectedAgentId() || this.selectedAgentKey || '';
+      const url = '/api/hermes/runs/' + encodeURIComponent(runId) + '/events?agentId=' + encodeURIComponent(agentId);
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const source = new EventSource(url);
+        this.hermesEventSource = source;
+        const cleanup = () => {
+          if (this.hermesEventSource === source) this.hermesEventSource = null;
+          source.close();
+        };
+        const finish = (ok, value) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          if (ok) resolve(value);
+          else reject(value instanceof Error ? value : new Error(String(value || 'Hermes stream failed')));
+        };
+        const handle = (eventName, evt) => {
+          let data = {};
+          try { data = JSON.parse(evt.data || '{}'); } catch (_) {}
+          this.handleHermesNativeEvent(eventName, data);
+          if (['run.completed', 'run.failed', 'run.cancelled', 'run.canceled'].includes(eventName)) {
+            finish(eventName === 'run.completed', eventName === 'run.completed' ? data : new Error(data.error || eventName));
+          }
+        };
+        [
+          'run.started',
+          'message.delta',
+          'reasoning.available',
+          'tool.started',
+          'tool.completed',
+          'tool.failed',
+          'approval.request',
+          'run.completed',
+          'run.failed',
+          'run.cancelled',
+          'run.canceled'
+        ].forEach(name => source.addEventListener(name, evt => handle(name, evt)));
+        source.onmessage = evt => handle('message', evt);
+        source.onerror = () => {
+          if (!settled) finish(false, new Error('Hermes native stream disconnected'));
+        };
+      }).finally(() => {
+        this.finishHermesProgress(hermesProgress, true);
+      });
+    }
+
+    handleHermesNativeEvent(eventName, data) {
+      this.markLiveEvent();
+      const runId = data?.runId || this.currentRunId || '';
+      if (runId) this.currentRunId = runId;
+
+      if (eventName === 'run.started') {
+        this.updateTypingIndicator('Hermes is running...');
+        return;
+      }
+
+      if (eventName === 'message.delta') {
+        if (!this.streamingMsg || this.streamingMsg.id !== runId) {
+          this.streamingMsg = { id: runId, role: 'assistant', content: '' };
+          this.pendingStreamContent = '';
+          this.appendStreamingMessage();
+        }
+        if (data.reply) this.pendingStreamContent = data.reply;
+        else if (data.delta) this.pendingStreamContent += String(data.delta || '');
+        this.scheduleStreamingRender();
+        return;
+      }
+
+      if (eventName === 'reasoning.available') {
+        this.updateTypingIndicator('Hermes is reasoning...');
+        return;
+      }
+
+      if (eventName === 'approval.request') {
+        if (data.approval) this.appendHermesPendingApproval(data.approval, data.pending_count || 1);
+        this.updateTypingIndicator('Hermes is waiting for approval...');
+        return;
+      }
+
+      if (eventName === 'tool.started' || eventName === 'tool.completed' || eventName === 'tool.failed') {
+        const card = data.toolCard || {};
+        const isTerminal = eventName !== 'tool.started';
+        const payload = {
+          runId,
+          data: {
+            toolCallId: card.id || data.toolCallId || data.id || '',
+            phase: isTerminal ? 'result' : 'start',
+            name: card.name || data.tool || data.name || 'Hermes tool',
+            args: card.arguments || (card.args_preview ? { command: card.args_preview } : (data.preview ? { command: data.preview } : {})),
+            result: card.result || data.result || data.output || '',
+            isError: eventName === 'tool.failed' || card.status === 'error' || !!data.error,
+            error: data.error || card.error || ''
+          }
+        };
+        const label = formatToolLabel(payload.data.name, coerceToolArgs(payload.data.args));
+        this.updateTypingIndicator(isTerminal ? 'Processing...' : label);
+        if (isTerminal) {
+          if (!this.liveToolCards.has(this.toolKey(payload))) {
+            this.appendToolCall({ ...payload, data: { ...payload.data, phase: 'start' } });
+          }
+          this.finishToolCall(payload);
+        } else {
+          this.updateToolCall(payload);
+        }
+        return;
+      }
+
+      if (['run.completed', 'run.failed', 'run.cancelled', 'run.canceled'].includes(eventName)) {
+        const finalText = data.reply || data.output || this.pendingStreamContent || (this.streamingMsg ? this.streamingMsg.content : '');
+        this.flushStreamingRender(true);
+        this.flushToolEvents(true);
+        this.clearActivityFeed();
+        this.removeTypingIndicator();
+        if (this.streamingMsg) {
+          this.finalizeStreamingMessage(finalText);
+          this.streamingMsg = null;
+        } else if (finalText) {
+          this.appendMessage('assistant', finalText);
+        }
+        if (runId) this.finalizeRunToolCards(runId);
+        this.currentRunId = null;
+        this.stopRecoveryWatchdog();
+      }
+    }
 
     stopHermesProgressTimers() {
       if (!this.hermesProgressTimers?.length) return;

@@ -618,6 +618,9 @@ class HermesApiClient:
     def respond_approval(self, run_id: str, choice: str) -> dict[str, Any]:
         return self._json_request("POST", f"/v1/runs/{run_id}/approval", {"choice": choice})
 
+    def stop_run(self, run_id: str) -> dict[str, Any]:
+        return self._json_request("POST", f"/v1/runs/{run_id}/stop", {})
+
     def stream_run_events(self, run_id: str, timeout_sec: int | None = None):
         """Yield dict events from Hermes' SSE run stream."""
         req = urllib.request.Request(
