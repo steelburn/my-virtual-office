@@ -89,6 +89,8 @@
       this.codexCompletedToolKeys = new Set();
       this.hermesApprovalPollTimer = null;
       this.hermesApprovalLastId = '';
+      this.codexApprovalPollTimer = null;
+      this.codexApprovalLastId = '';
       this.sessionModel = '—';
       this.contextWindow = 0;
       this.contextUsed = 0;
@@ -270,9 +272,12 @@
       this.syncAgentSelect();
       this.resetConversation(`${systemPrefix} ${opt.textContent.trim()}`);
       const isHermes = this.isHermesSelected();
+      const isCodex = this.isCodexSelected();
       if (isHermes) this.startHermesApprovalPolling();
       else this.stopHermesApprovalPolling();
-      if (connected || isHermes || this.isCodexSelected()) {
+      if (isCodex) this.startCodexApprovalPolling();
+      else this.stopCodexApprovalPolling();
+      if (connected || isHermes || isCodex) {
         this.loadHistory();
         this.fetchSessionInfo();
       }
@@ -407,6 +412,61 @@
       this.scrollBottom();
     }
 
+    startCodexApprovalPolling() {
+      this.stopCodexApprovalPolling();
+      this.pollCodexApproval().catch(() => {});
+      this.codexApprovalPollTimer = setInterval(() => {
+        this.pollCodexApproval().catch(() => {});
+      }, HERMES_APPROVAL_POLL_MS);
+    }
+
+    stopCodexApprovalPolling() {
+      if (this.codexApprovalPollTimer) {
+        clearInterval(this.codexApprovalPollTimer);
+        this.codexApprovalPollTimer = null;
+      }
+      this.codexApprovalLastId = '';
+    }
+
+    async pollCodexApproval() {
+      if (!this.isCodexSelected() || !this.isVisibleForPolling()) return;
+      const agentId = this.getSelectedAgentId() || this.selectedAgentKey;
+      const res = await fetch('/api/codex/approval/pending?agentId=' + encodeURIComponent(agentId));
+      const data = await res.json();
+      if (!data.ok || !data.pending) return;
+      this.appendCodexPendingApproval(data.pending, data.pending_count || 1);
+    }
+
+    appendCodexPendingApproval(approval, pendingCount = 1) {
+      if (!approval) return;
+      const approvalId = approval.approval_id || approval.id || '';
+      if (approvalId) {
+        const existing = [...this.messages.querySelectorAll('[data-approval-id]')].find(el => el.dataset.approvalId === approvalId);
+        if (existing) return;
+      }
+      const enriched = {
+        ...approval,
+        id: approvalId || approval.id,
+        approval_id: approvalId || approval.approval_id,
+        pending_count: pendingCount,
+        provider: approval.provider || 'codex-app-server'
+      };
+      this.codexApprovalLastId = enriched.id || '';
+      this.appendMessage(
+        'assistant',
+        '',
+        Date.now(),
+        [],
+        {
+          label: this.agentSelect.selectedOptions[0]?.textContent.trim() || 'Codex',
+          kind: 'agent',
+          approval: enriched
+        },
+        []
+      );
+      this.scrollBottom();
+    }
+
     async fetchSessionInfo() {
       let gatewayContext = 0;
       try {
@@ -445,9 +505,11 @@
       try {
         if (this.isHermesSelected() || this.isCodexSelected()) {
           const isHermes = this.isHermesSelected();
+          const isCodex = this.isCodexSelected();
           const providerPath = isHermes ? 'hermes' : 'codex';
           const progressMarker = isHermes ? 'hermes-progress' : 'codex-progress';
           if (isHermes) this.startHermesApprovalPolling();
+          if (isCodex) this.startCodexApprovalPolling();
           const res = await fetch('/api/' + providerPath + '/history?agentId=' + encodeURIComponent(this.getSelectedAgentId() || this.selectedAgentKey));
           const data = await res.json();
           if (data.ok && Array.isArray(data.messages)) {
@@ -472,6 +534,7 @@
             this.scrollBottomAfterLayout();
           }
           if (isHermes) await this.pollHermesApproval().catch(() => {});
+          if (isCodex) await this.pollCodexApproval().catch(() => {});
           return;
         }
         const res = await rpc('chat.history', { sessionKey: this.sessionKey, limit: 500 });
@@ -1241,6 +1304,9 @@
 
       const runId = progress.runId || progress.progressId || this.currentRunId || '';
       if (runId) this.currentRunId = runId;
+      if (progress.approval && String(progress.approval.status || 'pending').toLowerCase() === 'pending') {
+        this.appendCodexPendingApproval(progress.approval, progress.approval.pending_count || 1);
+      }
 
       if (progress.text) {
         if (!this.streamingMsg || this.streamingMsg.id !== runId) {
@@ -1424,6 +1490,53 @@
         }
         this.appendSystem('Hermes approval failed: ' + e.message);
         this.setStatus('Hermes error', 'disconnected');
+      }
+    }
+
+    async respondCodexApproval(approval, choice, card) {
+      if (!approval || !this.isCodexSelected()) return;
+      const normalized = choice === 'approve' ? 'approve' : 'cancel';
+      const buttons = card ? [...card.querySelectorAll('button')] : [];
+      buttons.forEach(btn => btn.disabled = true);
+      if (card) {
+        card.classList.add('responding');
+        const status = card.querySelector('.chat-approval-status');
+        if (status) status.textContent = normalized === 'approve' ? 'Approving...' : 'Cancelling...';
+      }
+      try {
+        const resp = await fetch('/api/codex/approval/respond', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            agentId: this.getSelectedAgentId() || this.selectedAgentKey,
+            approval,
+            approval_id: approval.approval_id || approval.id || '',
+            choice: normalized,
+            fromDisplayName: 'User'
+          })
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.ok === false) throw new Error(data.error || data.reply || resp.statusText);
+        if (card) {
+          card.classList.remove('responding');
+          card.classList.add(normalized === 'approve' ? 'approved' : 'denied');
+          const status = card.querySelector('.chat-approval-status');
+          if (status) status.textContent = normalized === 'approve' ? 'approved' : 'cancelled';
+        }
+        if (normalized === 'cancel') {
+          this.appendSystem('Codex approval cancelled.');
+        }
+        await this.pollCodexApproval().catch(() => {});
+        this.setStatus(normalized === 'approve' ? 'Codex approval sent' : 'Codex ready', 'connected');
+      } catch (e) {
+        buttons.forEach(btn => btn.disabled = false);
+        if (card) {
+          card.classList.remove('responding');
+          const status = card.querySelector('.chat-approval-status');
+          if (status) status.textContent = 'error';
+        }
+        this.appendSystem('Codex approval failed: ' + e.message);
+        this.setStatus('Codex error', 'disconnected');
       }
     }
     isNearBottom(threshold = 24) {
@@ -2168,17 +2281,18 @@
   function renderHermesApprovalCard(approval, windowInstance) {
     const card = document.createElement('div');
     const status = String(approval.status || 'pending').toLowerCase();
-    card.className = 'chat-approval-card ' + (status.includes('denied') ? 'denied' : status.includes('approved') ? 'approved' : 'pending');
+    const isCodex = String(approval.provider || '').startsWith('codex') || String(approval.agentId || '').startsWith('codex-') || String(approval.title || '').toLowerCase().includes('codex');
+    card.className = 'chat-approval-card ' + (status.includes('denied') || status.includes('cancel') ? 'denied' : status.includes('approved') ? 'approved' : 'pending');
     card.dataset.approvalId = approval.approval_id || approval.id || '';
 
     const header = document.createElement('div');
     header.className = 'chat-approval-header';
     const icon = document.createElement('span');
     icon.className = 'chat-approval-icon';
-    icon.textContent = status.includes('denied') ? '✕' : status.includes('approved') ? '✓' : '!';
+    icon.textContent = (status.includes('denied') || status.includes('cancel')) ? '✕' : status.includes('approved') ? '✓' : '!';
     const title = document.createElement('span');
     title.className = 'chat-approval-title';
-    title.textContent = approval.title || 'Hermes approval required';
+    title.textContent = approval.title || (isCodex ? 'Codex approval required' : 'Hermes approval required');
     const state = document.createElement('span');
     state.className = 'chat-approval-status';
     const pendingCount = Number(approval.pending_count || approval.pendingCount || 0);
@@ -2187,11 +2301,11 @@
 
     const desc = document.createElement('div');
     desc.className = 'chat-approval-desc';
-    desc.textContent = approval.description || 'Hermes needs user approval before it can continue.';
+    desc.textContent = approval.description || (isCodex ? 'Codex needs user approval before it can continue.' : 'Hermes needs user approval before it can continue.');
 
     const cmd = document.createElement('pre');
     cmd.className = 'chat-approval-command';
-    cmd.textContent = approval.command || 'Approval-gated Hermes command';
+    cmd.textContent = approval.command || (isCodex ? 'Approval-gated Codex action' : 'Approval-gated Hermes command');
 
     card.append(header, desc, cmd);
     if (status === 'pending') {
@@ -2200,15 +2314,21 @@
       const allow = document.createElement('button');
       allow.type = 'button';
       allow.className = 'chat-approval-btn primary';
-      allow.textContent = 'Allow once';
-      allow.title = 'Retry this Hermes turn with approval bypass for this invocation only';
-      allow.addEventListener('click', () => windowInstance?.respondHermesApproval(approval, 'approve_once', card));
+      allow.textContent = isCodex ? 'Approve' : 'Allow once';
+      allow.title = isCodex ? 'Approve this Codex action for the active turn' : 'Retry this Hermes turn with one-time approval for this invocation only';
+      allow.addEventListener('click', () => {
+        if (isCodex) windowInstance?.respondCodexApproval(approval, 'approve', card);
+        else windowInstance?.respondHermesApproval(approval, 'approve_once', card);
+      });
       const deny = document.createElement('button');
       deny.type = 'button';
       deny.className = 'chat-approval-btn';
-      deny.textContent = 'Deny';
-      deny.title = 'Do not retry this blocked Hermes command';
-      deny.addEventListener('click', () => windowInstance?.respondHermesApproval(approval, 'deny', card));
+      deny.textContent = isCodex ? 'Cancel' : 'Deny';
+      deny.title = isCodex ? 'Cancel this Codex action' : 'Do not retry this blocked Hermes command';
+      deny.addEventListener('click', () => {
+        if (isCodex) windowInstance?.respondCodexApproval(approval, 'cancel', card);
+        else windowInstance?.respondHermesApproval(approval, 'deny', card);
+      });
       actions.append(allow, deny);
       card.appendChild(actions);
     }

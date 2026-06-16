@@ -28,7 +28,7 @@ For Docker deployments, mount or otherwise expose the Hermes home directory and 
 
 ### Codex
 
-Virtual Office can create Codex-backed office agents when the Codex CLI is available to the app. Chat uses Codex's native `codex app-server` JSON-RPC protocol for thread start/resume, live progress, and interrupt support. `codex exec` is retained only as an explicit compatibility fallback.
+Virtual Office can create Codex-backed office agents when the Codex CLI is available to the app. Chat uses Codex's native `codex app-server` JSON-RPC protocol for thread start/resume, live progress, approval requests, and interrupt support. `codex exec` is retained only as an explicit compatibility fallback.
 
 Discovery includes Virtual Office-created Codex agents, Codex's standard `$CODEX_HOME/agents/*.toml` custom agents, and a synthesized `Main` entry for the default Codex root agent. Newly created Virtual Office Codex agents can use the default Codex agents directory or a custom parent directory. Default-directory creation registers a native custom-agent TOML file under `$CODEX_HOME/agents` when `VO_CODEX_REGISTER_NATIVE_AGENTS=1`; custom-directory creation writes a project-local `.codex/agents/<profile>.toml` and keeps a small Virtual Office registry so the agent remains discoverable.
 

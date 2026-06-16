@@ -48,6 +48,8 @@ Codex creation supports two location modes:
 
 Codex discovery also reads the standard `$CODEX_HOME/agents/*.toml` custom-agent directory and includes a synthesized `codex-main` entry for Codex's default Main agent.
 
+Codex app-server approval requests are surfaced through chat history while a turn is running. The web chat renders pending command, file-change, and permission approval cards with Approve/Cancel controls. Integrations can also poll `GET /api/codex/approval/pending?agentId=<id>` and answer the active callback with `POST /api/codex/approval/respond` using `approval_id` and `choice: "approve"` or `"cancel"`.
+
 Codex configuration is product-neutral:
 
 - `VO_CODEX_BIN`: Codex CLI executable, default `codex` on `PATH`

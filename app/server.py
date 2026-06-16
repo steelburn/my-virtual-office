@@ -2573,6 +2573,7 @@ def _publish_codex_progress(profile, agent_id, progress_id, run_state):
         "tools": run_state.get("tools") or [],
         "thinking": run_state.get("thinking") or "Waiting for Codex app-server events.",
         "reasoningTokens": 0,
+        "approval": run_state.get("approval") if isinstance(run_state.get("approval"), dict) else None,
         "error": run_state.get("error") or None,
     })
     _save_codex_history(profile, history)
@@ -2582,6 +2583,40 @@ def _publish_codex_progress(profile, agent_id, progress_id, run_state):
 
 def _remove_codex_progress_messages(messages):
     return [m for m in messages if not (isinstance(m, dict) and m.get("ephemeral") == "codex-progress")]
+
+
+def _normalize_codex_approval_choice(choice):
+    choice = str(choice or "").strip().lower()
+    if choice in {"approve", "approved", "accept", "allow", "allow_once", "approve_once", "yes"}:
+        return "approve"
+    return "cancel"
+
+
+def _codex_approval_result_message(approval, choice):
+    approval = approval if isinstance(approval, dict) else {}
+    normalized = _normalize_codex_approval_choice(choice)
+    status = "approved" if normalized == "approve" else "cancelled"
+    return {
+        "role": "assistant",
+        "text": "",
+        "ts": int(time.time() * 1000),
+        "agentId": approval.get("agentId") or "codex-default",
+        "approval": {**approval, "status": status, "resolvedAt": int(time.time() * 1000), "choice": normalized},
+        "tools": [],
+        "thinking": "",
+        "reasoningTokens": 0,
+    }
+
+
+def _history_has_approval(messages, approval_id):
+    approval_id = str(approval_id or "")
+    if not approval_id:
+        return False
+    for msg in messages or []:
+        approval = msg.get("approval") if isinstance(msg, dict) and isinstance(msg.get("approval"), dict) else {}
+        if approval_id in {str(approval.get("id") or ""), str(approval.get("approval_id") or "")}:
+            return True
+    return False
 
 
 def _hermes_history_path(profile="default"):
@@ -3551,6 +3586,9 @@ def _handle_codex_chat(body):
     try:
         provider = _codex_provider()
         provider.model = agent.get("model") or provider.model or ""
+        requested_approval_policy = str(body.get("approvalPolicy") or body.get("codexApprovalPolicy") or "").strip()
+        if requested_approval_policy in {"untrusted", "on-request", "on-failure", "never"}:
+            provider.approval_policy = requested_approval_policy
         session_id = _get_codex_session_id(profile)
         status_key = agent.get("statusKey") or agent.get("id")
         gateway_presence.set_manual_override(status_key, "working", "Codex task")
@@ -3577,6 +3615,8 @@ def _handle_codex_chat(body):
         history = _remove_codex_progress_messages(_load_codex_history(profile))
         final_ts = int(time.time() * 1000)
         tools = result.get("tools") or []
+        approval = result.get("approval") if isinstance(result.get("approval"), dict) else None
+        approval_id = (approval or {}).get("approval_id") or (approval or {}).get("id") or ""
         if tools:
             history.append({
                 "role": "assistant",
@@ -3595,11 +3635,12 @@ def _handle_codex_chat(body):
             "sessionId": active_session_id,
             "runId": result.get("runId"),
             "tools": [],
-            "thinking": result.get("thinking") or "",
-            "reasoningTokens": 0,
-            "error": result.get("error") or None,
-            "interrupted": bool(result.get("interrupted")),
-        })
+                "thinking": result.get("thinking") or "",
+                "reasoningTokens": 0,
+                "error": result.get("error") or None,
+                "interrupted": bool(result.get("interrupted")),
+                "approval": approval if approval and not _history_has_approval(history, approval_id) else None,
+            })
         _save_codex_history(profile, history)
         gateway_presence.set_manual_override(agent.get("statusKey") or agent.get("id"), "idle" if result.get("ok") else "offline", "")
         return {
@@ -3613,6 +3654,7 @@ def _handle_codex_chat(body):
             "tools": tools,
             "thinking": result.get("thinking") or "",
             "reasoningTokens": 0,
+            "approval": approval,
             "interrupted": bool(result.get("interrupted")),
             "error": result.get("error"),
             "agent": {"id": agent.get("id"), "name": agent.get("name"), "providerKind": "codex", "profile": profile},
@@ -3659,6 +3701,59 @@ def _handle_codex_interrupt(body):
     else:
         result["_status"] = 409
     return result
+
+
+def _handle_codex_approval_pending(agent_key="codex-default"):
+    agent = _get_codex_agent(agent_key)
+    if not agent:
+        return {"ok": False, "error": f"Codex agent '{agent_key}' not found", "_status": 404}
+    profile = agent.get("profile") or agent.get("providerAgentId") or "default"
+    result = _codex_provider().pending_approval(profile)
+    pending = result.get("pending") if isinstance(result.get("pending"), dict) else None
+    if pending:
+        pending["agentId"] = pending.get("agentId") or agent.get("id") or agent_key
+        pending["profile"] = pending.get("profile") or profile
+    return result
+
+
+def _handle_codex_approval_respond(body):
+    approval = body.get("approval") if isinstance(body.get("approval"), dict) else {}
+    choice = _normalize_codex_approval_choice(body.get("choice") or body.get("action") or "")
+    agent_key = body.get("agentId") or approval.get("agentId") or "codex-default"
+    approval_id = str(body.get("approval_id") or body.get("approvalId") or approval.get("approval_id") or approval.get("id") or "").strip()
+    if not approval_id:
+        return {"ok": False, "error": "approval_id is required", "_status": 400}
+    agent = _get_codex_agent(agent_key)
+    if not agent:
+        return {"ok": False, "error": f"Codex agent '{agent_key}' not found", "_status": 404}
+    profile = agent.get("profile") or agent.get("providerAgentId") or "default"
+    result = _codex_provider().respond_approval(profile, approval_id, choice)
+    if not result.get("ok"):
+        result["_status"] = 409
+        return result
+
+    resolved_approval = result.get("approval") if isinstance(result.get("approval"), dict) else {**approval, "approval_id": approval_id, "id": approval_id}
+    resolved_approval["agentId"] = resolved_approval.get("agentId") or agent.get("id") or agent_key
+    resolved_approval["profile"] = resolved_approval.get("profile") or profile
+    history = _load_codex_history(profile)
+    if not _history_has_approval(history, approval_id):
+        history.append(_codex_approval_result_message(resolved_approval, choice))
+        _save_codex_history(profile, history)
+    gateway_presence.set_provider_event(agent.get("statusKey") or agent.get("id"), "codex", {
+        "event": "approval.responded",
+        "choice": choice,
+        "approval_id": approval_id,
+        "thread_id": resolved_approval.get("threadId") or resolved_approval.get("session_id") or "",
+        "turn_id": resolved_approval.get("turnId") or resolved_approval.get("runId") or "",
+    })
+    return {
+        "ok": True,
+        "choice": choice,
+        "approvalChoice": choice,
+        "providerPath": "app-server",
+        "approval": resolved_approval,
+        "message": "Codex approval approved." if choice == "approve" else "Codex approval cancelled.",
+    }
 
 
 def msg_matches_ephemeral(msg, marker):
@@ -9432,6 +9527,15 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             event_name = "approval" if result.get("pending") else "idle"
             payload = json.dumps(result)
             self.wfile.write(f"event: {event_name}\ndata: {payload}\n\n".encode("utf-8"))
+        elif request_path == "/api/codex/approval/pending":
+            agent_key = (query_params.get("agentId") or query_params.get("key") or ["codex-default"])[0]
+            result = _handle_codex_approval_pending(agent_key)
+            self.send_response(result.get("_status", 200))
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            result.pop("_status", None)
+            self.wfile.write(json.dumps(result).encode())
         elif self.path == "/api/hermes/test":
             result = _handle_hermes_test()
             self.send_response(200 if result.get("ok") else 503)
@@ -11117,6 +11221,17 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             length = int(self.headers.get('Content-Length', 0))
             body = json.loads(self.rfile.read(length)) if length else {}
             result = _handle_codex_interrupt(body)
+            self.send_response(result.get("_status", 200))
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            result.pop("_status", None)
+            self.wfile.write(json.dumps(result).encode())
+            return
+        elif self.path == "/api/codex/approval/respond":
+            length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            result = _handle_codex_approval_respond(body)
             self.send_response(result.get("_status", 200))
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
