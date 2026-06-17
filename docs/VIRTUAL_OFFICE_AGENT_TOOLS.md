@@ -60,6 +60,7 @@ Codex configuration is product-neutral:
 - `VO_CODEX_INCLUDE_NATIVE_AGENTS`: read `$CODEX_HOME/agents/*.toml`, enabled by default
 - `VO_CODEX_REGISTER_NATIVE_AGENTS`: write `$CODEX_HOME/agents/<profile>.toml` when creating VO Codex agents, enabled by default
 - `VO_CODEX_PREFER_APP_SERVER`: native app-server integration on by default
+- `VO_CODEX_SANDBOX`: Codex sandbox mode, Docker example defaults to `danger-full-access` because bubblewrap sandboxing usually needs extra container privileges
 - `VO_CODEX_APPROVAL_POLICY`: Codex approval policy, default `never` so unattended Office runs do not hang on approval prompts
 
 Never hardcode host usernames, personal auth paths, or a developer's local container layout into Codex product support.

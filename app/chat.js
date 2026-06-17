@@ -87,6 +87,7 @@
       this.hermesEventSource = null;
       this.hermesCompletedToolKeys = new Set();
       this.codexHistoryPollTimer = null;
+      this.codexEventSource = null;
       this.codexCompletedToolKeys = new Set();
       this.hermesApprovalPollTimer = null;
       this.hermesApprovalLastId = '';
@@ -183,6 +184,7 @@
       if (this.recoveryTimer) { clearInterval(this.recoveryTimer); this.recoveryTimer = null; }
       this.stopHermesProgressTimers();
       this.closeHermesEventSource();
+      this.closeCodexEventSource();
       this.pendingToolEvents.clear();
       this.currentRunId = null;
       this.sessionModel = '—';
@@ -198,10 +200,12 @@
       this.status.className = 'chat-status ' + (cls || '');
     }
 
-    formatTokens(n) {
-      if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
-      if (n >= 1000) return (n / 1000).toFixed(0) + 'k';
-      return String(n);
+    formatTokens(n, options = {}) {
+      const value = Number(n) || 0;
+      if (options.exact && value < 1000000) return Math.round(value).toLocaleString();
+      if (value >= 1000000) return (value / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
+      if (value >= 1000) return (value / 1000).toFixed(value < 100000 ? 1 : 0).replace(/\.0$/, '') + 'k';
+      return String(Math.round(value));
     }
 
     updateModelBar() {
@@ -215,6 +219,25 @@
       } else {
         this.contextInfo.textContent = '';
       }
+    }
+
+    applySessionMetrics(data = {}) {
+      if (!data || typeof data !== 'object') return;
+      if (data.model) this.sessionModel = data.model;
+      const tokenUsage = data.tokenUsage && typeof data.tokenUsage === 'object' ? data.tokenUsage : {};
+      const lastUsage = tokenUsage.last && typeof tokenUsage.last === 'object' ? tokenUsage.last : {};
+      const totalUsage = tokenUsage.total && typeof tokenUsage.total === 'object' ? tokenUsage.total : {};
+      const used = Number.isFinite(Number(data.contextUsed))
+        ? Number(data.contextUsed)
+        : (Number.isFinite(Number(lastUsage.totalTokens)) ? Number(lastUsage.totalTokens)
+          : (Number.isFinite(Number(lastUsage.inputTokens)) ? Number(lastUsage.inputTokens)
+            : (Number.isFinite(Number(totalUsage.totalTokens)) ? Number(totalUsage.totalTokens) : null)));
+      const windowSize = Number.isFinite(Number(data.contextWindow))
+        ? Number(data.contextWindow)
+        : (Number.isFinite(Number(tokenUsage.modelContextWindow)) ? Number(tokenUsage.modelContextWindow) : null);
+      if (used !== null && used >= 0) this.contextUsed = used;
+      if (windowSize !== null && windowSize > 0) this.contextWindow = windowSize;
+      this.updateModelBar();
     }
 
     autoResizeInput() {
@@ -263,6 +286,7 @@
           this.hasExplicitAgentSelection = true;
           this.saveSelection();
         }
+        if (connected || this.isHermesSelected() || this.isCodexSelected()) this.fetchSessionInfo();
         return;
       }
       this.selectedAgentKey = newAgentKey;
@@ -314,6 +338,7 @@
           this.agentSelect.appendChild(group);
         }
         this.syncAgentSelect();
+        if (connected || this.isHermesSelected() || this.isCodexSelected()) this.fetchSessionInfo();
       } catch (e) {
         console.warn('[chat] Failed to load agent list:', e);
       }
@@ -487,19 +512,19 @@
       let serverContext = 0;
       try {
         // Pass current agent ID so server returns the correct configured model
-        const agentId = this.getSelectedAgentId();
+        const agentId = this.getSelectedAgentId() || this.selectedAgentKey;
         const qs = agentId ? `?agent=${encodeURIComponent(agentId)}` : '';
         const res = await fetch('/session-info' + qs);
         const data = await res.json();
         // Always use the configured model from the server — this reflects
         // what the agent is SET to use, not what was last used historically.
         // The gateway transcript model can be stale (from before a model change).
-        if (data.model) this.sessionModel = data.model;
+        this.applySessionMetrics(data);
         if (data.contextWindow) serverContext = data.contextWindow;
       } catch (e) {
         console.warn('[chat] /session-info failed:', e);
       }
-      this.contextWindow = Math.max(gatewayContext, serverContext);
+      this.contextWindow = Math.max(gatewayContext, serverContext, this.contextWindow || 0);
       this.updateModelBar();
     }
 
@@ -515,6 +540,7 @@
           const res = await fetch('/api/' + providerPath + '/history?agentId=' + encodeURIComponent(this.getSelectedAgentId() || this.selectedAgentKey));
           const data = await res.json();
           if (data.ok && Array.isArray(data.messages)) {
+            this.applySessionMetrics(data);
             this.messages.innerHTML = '';
             for (const msg of data.messages) {
               if (msg.text || msg.thinking || msg.approval || (Array.isArray(msg.tools) && msg.tools.length)) {
@@ -613,6 +639,7 @@
           const data = await res.json();
           if (!data.ok) throw new Error(data.error || 'clear failed');
           this.resetConversation('New ' + providerName + ' session started');
+          await this.fetchSessionInfo();
         } catch (e) {
           this.appendSystem('Reset error: ' + e.message);
         }
@@ -837,32 +864,42 @@
       if (this.isCodexSelected()) {
         const codexLabel = this.agentSelect.selectedOptions[0]?.textContent.trim() || 'Codex';
         const codexSendStartedAt = Date.now();
+        const codexBody = {
+          agentId: this.getSelectedAgentId() || this.selectedAgentKey,
+          message: text || '(attached files)',
+          fromType: 'human',
+          fromDisplayName: 'User',
+          sourceApp: 'virtual-office',
+          sourceSurface: 'chat-window',
+          sourceLabel: 'Virtual Office Chat',
+          attachments: uploadedFiles
+        };
         this.updateTypingIndicator(codexLabel + ' is running Codex');
         this.setStatus('Codex running...', 'connecting');
-        this.startCodexHistoryPolling();
         try {
-          const resp = await fetch('/api/codex/chat', {
+          const resp = await fetch('/api/codex/runs', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              agentId: this.getSelectedAgentId() || this.selectedAgentKey,
-              message: text || '(attached files)',
-              fromType: 'human',
-              fromDisplayName: 'User',
-              sourceApp: 'virtual-office',
-              sourceSurface: 'chat-window',
-              sourceLabel: 'Virtual Office Chat',
-              attachments: uploadedFiles
-            })
+            body: JSON.stringify(codexBody)
           });
           const data = await resp.json();
-          this.stopCodexHistoryPolling();
+          if (!resp.ok || data.ok === false) {
+            if (data.fallback) {
+              await this.sendCodexBlockingMessage(codexBody, codexSendStartedAt);
+              return;
+            }
+            throw new Error(data.error || data.reply || resp.statusText);
+          }
+          this.currentRunId = data.runId || null;
+          await this.fetchSessionInfo();
+          await this.streamCodexRunEvents(data.runId);
           this.removeTypingIndicator();
-          if (!resp.ok || data.ok === false) throw new Error(data.error || data.reply || resp.statusText);
           await this.loadHistory({ recoverFinal: true, startedAt: codexSendStartedAt });
+          await this.fetchSessionInfo();
+          await this.pollCodexApproval().catch(() => {});
           this.setStatus('Codex ready', 'connected');
         } catch (e) {
-          this.stopCodexHistoryPolling();
+          this.closeCodexEventSource();
           this.removeTypingIndicator();
           await this.loadHistory({ recoverFinal: true, startedAt: codexSendStartedAt }).catch(() => {});
           this.appendSystem('Codex send failed: ' + e.message);
@@ -1278,6 +1315,13 @@
       }
     }
 
+    closeCodexEventSource() {
+      if (this.codexEventSource) {
+        try { this.codexEventSource.close(); } catch (_) {}
+        this.codexEventSource = null;
+      }
+    }
+
     async sendHermesBlockingMessage(hermesBody, hermesProgress, hermesSendStartedAt) {
       this.startHermesHistoryPolling();
       try {
@@ -1303,6 +1347,34 @@
         this.setStatus('Hermes ready', 'connected');
       } catch (e) {
         this.stopHermesHistoryPolling();
+        throw e;
+      }
+    }
+
+    async sendCodexBlockingMessage(codexBody, codexSendStartedAt) {
+      this.startCodexHistoryPolling();
+      try {
+        const resp = await fetch('/api/codex/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(codexBody)
+        });
+        const data = await resp.json();
+        this.stopCodexHistoryPolling();
+        this.removeTypingIndicator();
+        if (!resp.ok || data.ok === false) throw new Error(data.error || data.reply || resp.statusText);
+        if (this.streamingMsg) {
+          this.pendingStreamContent = data.reply || this.pendingStreamContent || this.streamingMsg.content || '';
+          this.flushStreamingRender(true);
+          const existing = this.messages.querySelector('.streaming-msg');
+          if (existing) existing.remove();
+          this.streamingMsg = null;
+        }
+        await this.loadHistory({ recoverFinal: true, startedAt: codexSendStartedAt });
+        await this.pollCodexApproval().catch(() => {});
+        this.setStatus('Codex ready', 'connected');
+      } catch (e) {
+        this.stopCodexHistoryPolling();
         throw e;
       }
     }
@@ -1440,6 +1512,142 @@
       }
     }
 
+    streamCodexRunEvents(runId) {
+      if (!runId) return Promise.reject(new Error('Codex run did not return a run id'));
+      this.closeCodexEventSource();
+      this.codexCompletedToolKeys = new Set();
+      this.currentRunId = runId;
+      this.setStatus('Codex stream active...', 'connecting');
+      this.markLiveEvent();
+      const agentId = this.getSelectedAgentId() || this.selectedAgentKey || '';
+      const url = '/api/codex/runs/' + encodeURIComponent(runId) + '/events?agentId=' + encodeURIComponent(agentId);
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const source = new EventSource(url);
+        this.codexEventSource = source;
+        const cleanup = () => {
+          if (this.codexEventSource === source) this.codexEventSource = null;
+          source.close();
+        };
+        const finish = (ok, value) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          if (ok) resolve(value);
+          else reject(value instanceof Error ? value : new Error(String(value || 'Codex stream failed')));
+        };
+        const handle = (eventName, evt) => {
+          let data = {};
+          try { data = JSON.parse(evt.data || '{}'); } catch (_) {}
+          this.handleCodexNativeEvent(eventName, data);
+          if (['run.completed', 'run.failed', 'run.cancelled', 'run.canceled'].includes(eventName)) {
+            finish(eventName === 'run.completed', eventName === 'run.completed' ? data : new Error(data.error || eventName));
+          }
+        };
+        [
+          'run.started',
+          'session.metrics',
+          'message.delta',
+          'reasoning.available',
+          'tool.started',
+          'tool.completed',
+          'tool.failed',
+          'approval.request',
+          'run.completed',
+          'run.failed',
+          'run.cancelled',
+          'run.canceled'
+        ].forEach(name => source.addEventListener(name, evt => handle(name, evt)));
+        source.onmessage = evt => handle('message', evt);
+        source.onerror = () => {
+          if (!settled) finish(false, new Error('Codex native stream disconnected'));
+        };
+      });
+    }
+
+    handleCodexNativeEvent(eventName, data) {
+      this.markLiveEvent();
+      this.applySessionMetrics(data);
+      const runId = data?.runId || this.currentRunId || '';
+      if (runId) this.currentRunId = runId;
+
+      if (eventName === 'run.started') {
+        this.updateTypingIndicator('Codex is running...');
+        this.fetchSessionInfo().catch(() => {});
+        return;
+      }
+
+      if (eventName === 'message.delta') {
+        if (!this.streamingMsg || this.streamingMsg.id !== runId) {
+          this.streamingMsg = { id: runId, role: 'assistant', content: '' };
+          this.pendingStreamContent = '';
+          this.appendStreamingMessage();
+        }
+        if (data.reply) this.pendingStreamContent = data.reply;
+        else if (data.delta) this.pendingStreamContent += String(data.delta || '');
+        this.scheduleStreamingRender();
+        return;
+      }
+
+      if (eventName === 'reasoning.available') {
+        this.updateTypingIndicator('Codex is reasoning...');
+        return;
+      }
+
+      if (eventName === 'approval.request') {
+        if (data.approval) this.appendCodexPendingApproval(data.approval, data.pending_count || 1);
+        this.updateTypingIndicator('Codex is waiting for approval...');
+        return;
+      }
+
+      if (eventName === 'tool.started' || eventName === 'tool.completed' || eventName === 'tool.failed') {
+        const card = data.toolCard || {};
+        const isTerminal = eventName !== 'tool.started';
+        const payload = {
+          runId,
+          data: {
+            toolCallId: card.id || data.toolCallId || data.id || '',
+            phase: isTerminal ? 'result' : 'start',
+            name: card.name || data.tool || data.name || 'Codex tool',
+            args: card.arguments || (card.args_preview ? { command: card.args_preview } : (data.preview ? { command: data.preview } : {})),
+            result: card.result || data.result || data.output || '',
+            isError: eventName === 'tool.failed' || card.status === 'error' || !!data.error,
+            error: data.error || card.error || ''
+          }
+        };
+        const label = formatToolLabel(payload.data.name, coerceToolArgs(payload.data.args));
+        this.updateTypingIndicator(isTerminal ? 'Processing...' : label);
+        if (isTerminal) {
+          if (!this.liveToolCards.has(this.toolKey(payload))) {
+            this.appendToolCall({ ...payload, data: { ...payload.data, phase: 'start' } });
+          }
+          this.finishToolCall(payload);
+          this.codexCompletedToolKeys.add(`${runId}:${payload.data.toolCallId}`);
+        } else {
+          this.updateToolCall(payload);
+        }
+        return;
+      }
+
+      if (['run.completed', 'run.failed', 'run.cancelled', 'run.canceled'].includes(eventName)) {
+        const finalText = data.reply || data.output || this.pendingStreamContent || (this.streamingMsg ? this.streamingMsg.content : '');
+        this.flushStreamingRender(true);
+        this.flushToolEvents(true);
+        this.clearActivityFeed();
+        this.removeTypingIndicator();
+        if (this.streamingMsg) {
+          this.finalizeStreamingMessage(finalText);
+          this.streamingMsg = null;
+        } else if (finalText) {
+          this.appendMessage('assistant', finalText);
+        }
+        if (runId) this.finalizeRunToolCards(runId);
+        this.currentRunId = null;
+        this.stopRecoveryWatchdog();
+        this.fetchSessionInfo().catch(() => {});
+      }
+    }
+
     stopHermesProgressTimers() {
       if (!this.hermesProgressTimers?.length) return;
       for (const timer of this.hermesProgressTimers) clearTimeout(timer);
@@ -1484,6 +1692,8 @@
         msg && msg.role === 'assistant' && msg.ephemeral === 'codex-progress'
       );
       if (!progress) return;
+
+      this.applySessionMetrics(progress);
 
       const runId = progress.runId || progress.progressId || this.currentRunId || '';
       if (runId) this.currentRunId = runId;
@@ -2090,7 +2300,10 @@
     if (_modelBarInterval) clearInterval(_modelBarInterval);
     _modelBarInterval = setInterval(() => {
       if (!connected) return;
-      chatWindows.forEach(w => w.fetchContextUsage());
+      chatWindows.forEach(w => {
+        if (w.isHermesSelected?.() || w.isCodexSelected?.()) w.fetchSessionInfo();
+        else w.fetchContextUsage();
+      });
     }, 60000);
   }
 

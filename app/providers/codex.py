@@ -394,6 +394,10 @@ class CodexProvider:
             with _ACTIVE_RUNS_LOCK:
                 _ACTIVE_RUNS[safe_profile] = client
 
+            def handle_turn_event(msg: dict[str, Any]) -> None:
+                state.handle_message(msg)
+                emit_progress(force=str(msg.get("method") or "") == "thread/tokenUsage/updated")
+
             turn_response = client.request(
                 "turn/start",
                 {
@@ -403,7 +407,7 @@ class CodexProvider:
                     "approvalPolicy": self.approval_policy,
                     "model": self.model or None,
                 },
-                event_handler=lambda msg: (state.handle_message(msg), emit_progress())[0],
+                event_handler=handle_turn_event,
             )
             turn = ((turn_response.get("result") or {}).get("turn") or {}) if isinstance(turn_response, dict) else {}
             state.turn_id = str(turn.get("id") or state.turn_id or "")
@@ -415,13 +419,24 @@ class CodexProvider:
             while not state.completed:
                 if time.time() > deadline:
                     client.interrupt()
-                    return {"ok": False, "error": "Codex app-server call timed out", "reply": state.reply_text(), "sessionId": state.thread_id, "runId": state.turn_id, "providerPath": "app-server", "tools": state.tools(), "thinking": state.thinking(), "approval": state.approval()}
+                    return {"ok": False, "error": "Codex app-server call timed out", "reply": state.reply_text(), "sessionId": state.thread_id, "runId": state.turn_id, "providerPath": "app-server", "tools": state.tools(), "thinking": state.thinking(), "approval": state.approval(), "tokenUsage": state.token_usage()}
                 msg = client.next_message(timeout=0.5)
                 if msg is None:
                     if client.poll() is not None:
                         break
                     continue
-                client._handle_or_forward(msg, lambda event: (state.handle_message(event), emit_progress())[0])
+                client._handle_or_forward(msg, handle_turn_event)
+
+            # Codex can emit thread/tokenUsage/updated immediately after
+            # turn/completed. Drain briefly so the client records official usage.
+            usage_deadline = time.time() + 1.0
+            while time.time() < usage_deadline:
+                msg = client.next_message(timeout=0.2)
+                if msg is None:
+                    if client.poll() is not None:
+                        break
+                    continue
+                client._handle_or_forward(msg, handle_turn_event)
 
             emit_progress(force=True)
             reply = state.reply_text()
@@ -438,12 +453,13 @@ class CodexProvider:
                 "tools": state.tools(),
                 "thinking": state.thinking(),
                 "approval": state.approval(),
+                "tokenUsage": state.token_usage(),
                 "error": "" if ok else (error_text or f"Codex turn {state.status or 'failed'}"),
                 "providerPath": "app-server",
                 "interrupted": state.status == "interrupted",
             }
         except Exception as exc:
-            return {"ok": False, "error": str(exc), "reply": state.reply_text(), "sessionId": state.thread_id or session_id or "", "runId": state.turn_id, "providerPath": "app-server", "tools": state.tools(), "thinking": state.thinking(), "approval": state.approval()}
+            return {"ok": False, "error": str(exc), "reply": state.reply_text(), "sessionId": state.thread_id or session_id or "", "runId": state.turn_id, "providerPath": "app-server", "tools": state.tools(), "thinking": state.thinking(), "approval": state.approval(), "tokenUsage": state.token_usage()}
         finally:
             with _ACTIVE_RUNS_LOCK:
                 if _ACTIVE_RUNS.get(safe_profile) is client:
@@ -1396,6 +1412,7 @@ class CodexAppRunState:
         self._tools: dict[str, dict[str, Any]] = {}
         self._tool_order: list[str] = []
         self._approval: dict[str, Any] | None = None
+        self._token_usage: dict[str, Any] = {}
 
     def handle_message(self, msg: dict[str, Any]) -> None:
         method = str(msg.get("method") or "")
@@ -1424,6 +1441,10 @@ class CodexAppRunState:
                     lines.append(f"- {step.get('step') or ''} ({status})".strip())
             explanation = params.get("explanation")
             self._plan = "\n".join([str(explanation or "").strip(), *lines]).strip()
+        elif method == "thread/tokenUsage/updated":
+            token_usage = params.get("tokenUsage") if isinstance(params.get("tokenUsage"), dict) else {}
+            if token_usage:
+                self._token_usage = token_usage
         elif method in {"item/started", "item/completed"}:
             item = params.get("item") if isinstance(params.get("item"), dict) else {}
             self._handle_item(item, completed=(method == "item/completed"))
@@ -1462,6 +1483,7 @@ class CodexAppRunState:
             "status": self.status,
             "error": self.error_text(),
             "approval": self.approval(),
+            "tokenUsage": self.token_usage(),
         }
 
     def reply_text(self) -> str:
@@ -1484,6 +1506,9 @@ class CodexAppRunState:
 
     def set_approval(self, approval: dict[str, Any] | None) -> None:
         self._approval = dict(approval) if isinstance(approval, dict) else None
+
+    def token_usage(self) -> dict[str, Any]:
+        return dict(self._token_usage) if isinstance(self._token_usage, dict) else {}
 
     def error_text(self) -> str:
         return "\n".join(dict.fromkeys([e for e in self._errors if e]))[:2000]

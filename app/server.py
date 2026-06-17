@@ -8,6 +8,7 @@ import http.server
 import json
 import os
 import mimetypes
+import queue
 import sys
 import threading
 import traceback
@@ -2503,6 +2504,74 @@ def _load_codex_state(profile="default"):
         return {"messages": []}
 
 
+def _codex_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _codex_context_used_from_token_usage(token_usage):
+    token_usage = token_usage if isinstance(token_usage, dict) else {}
+    last = token_usage.get("last") if isinstance(token_usage.get("last"), dict) else {}
+    last_total = _codex_int(last.get("totalTokens"), 0)
+    if last_total:
+        return last_total
+    last_input = _codex_int(last.get("inputTokens"), 0)
+    if last_input:
+        return last_input
+    total = token_usage.get("total") if isinstance(token_usage.get("total"), dict) else {}
+    return _codex_int(total.get("totalTokens"), 0)
+
+
+def _codex_context_window_from_token_usage(token_usage):
+    token_usage = token_usage if isinstance(token_usage, dict) else {}
+    return _codex_int(token_usage.get("modelContextWindow"), 0)
+
+
+def _get_codex_token_usage(profile="default"):
+    state = _load_codex_state(profile)
+    token_usage = state.get("tokenUsage") if isinstance(state.get("tokenUsage"), dict) else {}
+    return token_usage
+
+
+def _set_codex_token_usage(profile="default", token_usage=None):
+    if not isinstance(token_usage, dict) or not token_usage:
+        return
+    path = _codex_history_path(profile)
+    state = _load_codex_state(profile)
+    state["tokenUsage"] = token_usage
+    state["contextUsed"] = _codex_context_used_from_token_usage(token_usage)
+    context_window = _codex_context_window_from_token_usage(token_usage)
+    if context_window:
+        state["contextWindow"] = context_window
+    state.setdefault("messages", [])
+    state["updatedAt"] = int(time.time() * 1000)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(state, f, indent=2)
+    try:
+        os.chmod(path, 0o666)
+    except OSError:
+        pass
+
+
+def _clear_codex_token_usage(profile="default"):
+    path = _codex_history_path(profile)
+    state = _load_codex_state(profile)
+    for key in ("tokenUsage", "contextUsed", "contextWindow"):
+        state.pop(key, None)
+    state.setdefault("messages", [])
+    state["updatedAt"] = int(time.time() * 1000)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(state, f, indent=2)
+    try:
+        os.chmod(path, 0o666)
+    except OSError:
+        pass
+
+
 def _save_codex_history(profile, messages):
     path = _codex_history_path(profile)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -2565,7 +2634,8 @@ def _publish_codex_progress(profile, agent_id, progress_id, run_state):
     ]
     session_id = run_state.get("threadId") or _get_codex_session_id(profile) or ""
     run_id = run_state.get("runId") or run_state.get("turnId") or ""
-    history.append({
+    token_usage = run_state.get("tokenUsage") if isinstance(run_state.get("tokenUsage"), dict) else {}
+    progress_message = {
         "role": "assistant",
         "text": run_state.get("reply") or "",
         "ts": int(time.time() * 1000),
@@ -2579,7 +2649,15 @@ def _publish_codex_progress(profile, agent_id, progress_id, run_state):
         "reasoningTokens": 0,
         "approval": run_state.get("approval") if isinstance(run_state.get("approval"), dict) else None,
         "error": run_state.get("error") or None,
-    })
+    }
+    if token_usage:
+        progress_message["tokenUsage"] = token_usage
+        progress_message["contextUsed"] = _codex_context_used_from_token_usage(token_usage)
+        context_window = _codex_context_window_from_token_usage(token_usage)
+        if context_window:
+            progress_message["contextWindow"] = context_window
+        _set_codex_token_usage(profile, token_usage)
+    history.append(progress_message)
     _save_codex_history(profile, history)
     if session_id or run_id:
         _set_codex_active_run(profile, session_id, run_id)
@@ -2587,6 +2665,266 @@ def _publish_codex_progress(profile, agent_id, progress_id, run_state):
 
 def _remove_codex_progress_messages(messages):
     return [m for m in messages if not (isinstance(m, dict) and m.get("ephemeral") == "codex-progress")]
+
+
+CODEX_STREAM_RUNS_LOCK = threading.Lock()
+CODEX_STREAM_RUNS = {}
+
+
+def _remember_codex_stream_run(meta):
+    if not isinstance(meta, dict) or not meta.get("runId"):
+        return
+    with CODEX_STREAM_RUNS_LOCK:
+        CODEX_STREAM_RUNS[str(meta["runId"])] = meta
+
+
+def _get_codex_stream_run(run_id):
+    with CODEX_STREAM_RUNS_LOCK:
+        meta = CODEX_STREAM_RUNS.get(str(run_id or ""))
+        return meta if isinstance(meta, dict) else None
+
+
+def _clear_codex_stream_run(run_id):
+    with CODEX_STREAM_RUNS_LOCK:
+        CODEX_STREAM_RUNS.pop(str(run_id or ""), None)
+
+
+def _codex_stream_event_payload(run_id, agent, profile, run_state=None, **extra):
+    run_state = run_state if isinstance(run_state, dict) else {}
+    payload = {
+        "runId": run_id,
+        "agentId": (agent or {}).get("id") or "",
+        "profile": profile or "",
+        "sessionId": run_state.get("threadId") or _get_codex_session_id(profile) or "",
+        "turnId": run_state.get("turnId") or run_state.get("runId") or "",
+        "reply": run_state.get("reply") or "",
+        "tools": run_state.get("tools") or [],
+        "thinking": run_state.get("thinking") or "",
+        "approval": run_state.get("approval") if isinstance(run_state.get("approval"), dict) else None,
+        "error": run_state.get("error") or "",
+        "status": run_state.get("status") or "",
+        "providerPath": "app-server",
+    }
+    token_usage = run_state.get("tokenUsage") if isinstance(run_state.get("tokenUsage"), dict) else {}
+    if token_usage:
+        payload["tokenUsage"] = token_usage
+        payload["contextUsed"] = _codex_context_used_from_token_usage(token_usage)
+        context_window = _codex_context_window_from_token_usage(token_usage)
+        if context_window:
+            payload["contextWindow"] = context_window
+    payload.update({k: v for k, v in extra.items() if v is not None})
+    return payload
+
+
+def _codex_tool_stream_key(tool, idx=0):
+    if not isinstance(tool, dict):
+        return str(idx)
+    return str(tool.get("id") or f"{idx}:{tool.get('name') or 'tool'}:{json.dumps(tool.get('arguments') or {}, sort_keys=True, default=str)[:120]}")
+
+
+def _handle_codex_run_start(body):
+    """Start a Codex message in the background and expose progress over SSE."""
+    message = (body.get("message") or "").strip()
+    agent_key = body.get("agentId") or body.get("key") or body.get("sessionKey") or "codex-default"
+    if not message:
+        return {"ok": False, "error": "message is required", "_status": 400}
+
+    agent = _get_codex_agent(agent_key)
+    if not agent:
+        return {"ok": False, "error": f"Codex agent '{agent_key}' not found", "_status": 404}
+
+    profile = agent.get("profile") or agent.get("providerAgentId") or "default"
+    run_id = f"codex-{int(time.time() * 1000)}-{str(uuid.uuid4())[:8]}"
+    progress_id = f"codex-progress-{run_id}"
+    events = queue.Queue()
+    status_key = agent.get("statusKey") or agent.get("id")
+    meta = {
+        "runId": run_id,
+        "agentId": agent.get("id"),
+        "agentKey": agent_key,
+        "profile": profile,
+        "statusKey": status_key,
+        "events": events,
+        "startedAt": int(time.time() * 1000),
+        "done": False,
+        "result": None,
+    }
+    _remember_codex_stream_run(meta)
+
+    def enqueue(event_name, payload=None):
+        payload = payload if isinstance(payload, dict) else {}
+        payload.setdefault("runId", run_id)
+        payload.setdefault("agentId", agent.get("id") or "")
+        payload.setdefault("profile", profile)
+        try:
+            events.put_nowait({"event": event_name, "data": payload, "ts": int(time.time() * 1000)})
+        except Exception:
+            pass
+
+    def worker():
+        last_reply = ""
+        last_thinking = ""
+        last_approval_id = ""
+        last_token_usage_signature = ""
+        seen_tools = {}
+        enqueue("run.started", {"providerPath": "app-server"})
+
+        def on_progress(run_state):
+            nonlocal last_reply, last_thinking, last_approval_id, last_token_usage_signature
+            run_state = run_state if isinstance(run_state, dict) else {}
+            with CODEX_STREAM_RUNS_LOCK:
+                meta["sessionId"] = run_state.get("threadId") or meta.get("sessionId") or ""
+                meta["turnId"] = run_state.get("turnId") or run_state.get("runId") or meta.get("turnId") or ""
+            gateway_presence.set_provider_event(status_key, "codex", {
+                "event": "turn.stream",
+                "thread_id": run_state.get("threadId") or "",
+                "turn_id": run_state.get("turnId") or run_state.get("runId") or "",
+                "status": run_state.get("status") or "",
+            })
+
+            token_usage = run_state.get("tokenUsage") if isinstance(run_state.get("tokenUsage"), dict) else {}
+            if token_usage:
+                token_usage_signature = json.dumps(token_usage, sort_keys=True, default=str)
+                if token_usage_signature != last_token_usage_signature:
+                    last_token_usage_signature = token_usage_signature
+                    enqueue("session.metrics", _codex_stream_event_payload(run_id, agent, profile, run_state))
+
+            reply = str(run_state.get("reply") or "")
+            if reply and reply != last_reply:
+                delta = reply[len(last_reply):] if reply.startswith(last_reply) else ""
+                last_reply = reply
+                enqueue("message.delta", _codex_stream_event_payload(run_id, agent, profile, run_state, delta=delta))
+
+            thinking = str(run_state.get("thinking") or "")
+            if thinking and thinking != last_thinking:
+                last_thinking = thinking
+                enqueue("reasoning.available", _codex_stream_event_payload(run_id, agent, profile, run_state))
+
+            approval = run_state.get("approval") if isinstance(run_state.get("approval"), dict) else None
+            approval_id = str((approval or {}).get("approval_id") or (approval or {}).get("id") or "")
+            if approval and approval_id and approval_id != last_approval_id:
+                last_approval_id = approval_id
+                enqueue("approval.request", _codex_stream_event_payload(run_id, agent, profile, run_state, approval=approval))
+
+            for idx, tool in enumerate(run_state.get("tools") or []):
+                if not isinstance(tool, dict):
+                    continue
+                key = _codex_tool_stream_key(tool, idx)
+                status = str(tool.get("status") or "").lower()
+                is_terminal = status in {"done", "error", "failed"}
+                prior = seen_tools.get(key)
+                if not prior:
+                    enqueue("tool.started", _codex_stream_event_payload(run_id, agent, profile, run_state, toolCard=tool, toolCallId=key))
+                if is_terminal and (not prior or prior.get("status") != status or prior.get("result") != tool.get("result") or prior.get("error") != tool.get("error")):
+                    event_name = "tool.failed" if status in {"error", "failed"} or tool.get("error") else "tool.completed"
+                    enqueue(event_name, _codex_stream_event_payload(run_id, agent, profile, run_state, toolCard=tool, toolCallId=key))
+                seen_tools[key] = dict(tool)
+
+        run_body = dict(body)
+        run_body["_streamRunId"] = run_id
+        run_body["_streamProgressId"] = progress_id
+        run_body["_onProgress"] = on_progress
+        try:
+            result = _handle_codex_chat(run_body)
+        except Exception as exc:
+            result = {"ok": False, "error": str(exc), "_status": 500}
+        with CODEX_STREAM_RUNS_LOCK:
+            meta["done"] = True
+            meta["result"] = result
+        if result.get("ok"):
+            token_usage = result.get("tokenUsage") if isinstance(result.get("tokenUsage"), dict) else {}
+            enqueue("run.completed", {
+                "runId": run_id,
+                "agentId": agent.get("id") or "",
+                "profile": profile,
+                "sessionId": result.get("sessionId") or _get_codex_session_id(profile) or "",
+                "turnId": result.get("runId") or meta.get("turnId") or "",
+                "reply": result.get("reply") or "",
+                "tools": result.get("tools") or [],
+                "thinking": result.get("thinking") or "",
+                "approval": result.get("approval") if isinstance(result.get("approval"), dict) else None,
+                "tokenUsage": token_usage,
+                "contextUsed": _codex_context_used_from_token_usage(token_usage),
+                "contextWindow": _codex_context_window_from_token_usage(token_usage),
+                "providerPath": result.get("providerPath") or "app-server",
+            })
+        else:
+            token_usage = result.get("tokenUsage") if isinstance(result.get("tokenUsage"), dict) else {}
+            enqueue("run.failed", {
+                "runId": run_id,
+                "agentId": agent.get("id") or "",
+                "profile": profile,
+                "sessionId": result.get("sessionId") or _get_codex_session_id(profile) or "",
+                "turnId": result.get("runId") or meta.get("turnId") or "",
+                "reply": result.get("reply") or "",
+                "tools": result.get("tools") or [],
+                "thinking": result.get("thinking") or "",
+                "approval": result.get("approval") if isinstance(result.get("approval"), dict) else None,
+                "tokenUsage": token_usage,
+                "contextUsed": _codex_context_used_from_token_usage(token_usage),
+                "contextWindow": _codex_context_window_from_token_usage(token_usage),
+                "providerPath": result.get("providerPath") or "app-server",
+                "error": result.get("error") or result.get("reply") or "Codex run failed",
+            })
+        threading.Timer(600, _clear_codex_stream_run, args=(run_id,)).start()
+
+    threading.Thread(target=worker, daemon=True, name=f"codex-run-{run_id}").start()
+    return {
+        "ok": True,
+        "runId": run_id,
+        "providerPath": "app-server",
+        "agent": {"id": agent.get("id"), "name": agent.get("name"), "providerKind": "codex", "profile": profile},
+    }
+
+
+def _handle_codex_run_events(handler, run_id):
+    meta = _get_codex_stream_run(run_id)
+    if not meta:
+        handler.send_response(404)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("Access-Control-Allow-Origin", "*")
+        handler.end_headers()
+        handler.wfile.write(b"event: run.failed\ndata: {\"error\":\"Codex run not found\"}\n\n")
+        return
+
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream")
+    handler.send_header("Cache-Control", "no-cache")
+    handler.send_header("Connection", "keep-alive")
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.end_headers()
+
+    events = meta.get("events")
+    if not isinstance(events, queue.Queue):
+        return
+
+    last_keepalive = time.time()
+    try:
+        while True:
+            try:
+                item = events.get(timeout=0.5)
+            except queue.Empty:
+                if time.time() - last_keepalive >= 10:
+                    handler.wfile.write(b": keepalive\n\n")
+                    handler.wfile.flush()
+                    last_keepalive = time.time()
+                if meta.get("done") and events.empty():
+                    break
+                continue
+
+            event_name = str(item.get("event") or "message")
+            payload = item.get("data") if isinstance(item.get("data"), dict) else {}
+            encoded = json.dumps(payload, ensure_ascii=False, default=str)
+            handler.wfile.write(f"event: {event_name}\ndata: {encoded}\n\n".encode("utf-8"))
+            handler.wfile.flush()
+            if event_name in {"run.completed", "run.failed", "run.cancelled", "run.canceled"}:
+                break
+    except (BrokenPipeError, ConnectionError, OSError):
+        pass
+    finally:
+        if meta.get("done"):
+            _clear_codex_stream_run(run_id)
 
 
 def _normalize_codex_approval_choice(choice):
@@ -3887,6 +4225,9 @@ def _handle_codex_chat(body):
     codex_cfg = VO_CONFIG.get("codex", {})
     timeout = int(body.get("timeoutSec") or codex_cfg.get("timeoutSec") or 900)
     profile = agent.get("profile") or agent.get("providerAgentId") or "default"
+    stream_run_id = str(body.get("_streamRunId") or "").strip()
+    stream_progress_id = str(body.get("_streamProgressId") or "").strip()
+    stream_progress_cb = body.get("_onProgress") if callable(body.get("_onProgress")) else None
     from_type = str(body.get("fromType") or body.get("senderType") or "").strip().lower()
     is_human_source = from_type in {"human", "user", "chat", "ui"}
     attachments = body.get("attachments") if isinstance(body.get("attachments"), list) else []
@@ -3918,7 +4259,7 @@ def _handle_codex_chat(body):
         "fromType": from_type or "",
         "attachments": attachments,
     })
-    progress_id = f"codex-progress-{now_ms}"
+    progress_id = stream_progress_id or f"codex-progress-{now_ms}"
     history.append({
         "role": "assistant",
         "text": "",
@@ -3926,6 +4267,7 @@ def _handle_codex_chat(body):
         "agentId": agent.get("id"),
         "ephemeral": "codex-progress",
         "progressId": progress_id,
+        "runId": stream_run_id,
         "tools": [],
         "thinking": "Starting Codex app-server.",
         "reasoningTokens": 0,
@@ -3950,6 +4292,11 @@ def _handle_codex_chat(body):
                 "status": run_state.get("status") or "",
             })
             _publish_codex_progress(profile, agent.get("id"), progress_id, run_state)
+            if stream_progress_cb:
+                try:
+                    stream_progress_cb(run_state)
+                except Exception:
+                    pass
 
         result = provider.send_chat_message(profile, delivery_message, session_id=session_id, timeout_sec=timeout, on_progress=on_progress)
         active_session_id = result.get("sessionId") or session_id
@@ -3966,6 +4313,11 @@ def _handle_codex_chat(body):
         tools = result.get("tools") or []
         approval = result.get("approval") if isinstance(result.get("approval"), dict) else None
         approval_id = (approval or {}).get("approval_id") or (approval or {}).get("id") or ""
+        token_usage = result.get("tokenUsage") if isinstance(result.get("tokenUsage"), dict) else {}
+        context_used = _codex_context_used_from_token_usage(token_usage)
+        token_context_window = _codex_context_window_from_token_usage(token_usage)
+        if token_usage:
+            _set_codex_token_usage(profile, token_usage)
         if tools:
             history.append({
                 "role": "assistant",
@@ -3984,12 +4336,15 @@ def _handle_codex_chat(body):
             "sessionId": active_session_id,
             "runId": result.get("runId"),
             "tools": [],
-                "thinking": result.get("thinking") or "",
-                "reasoningTokens": 0,
-                "error": result.get("error") or None,
-                "interrupted": bool(result.get("interrupted")),
-                "approval": approval if approval and not _history_has_approval(history, approval_id) else None,
-            })
+            "thinking": result.get("thinking") or "",
+            "reasoningTokens": 0,
+            "error": result.get("error") or None,
+            "interrupted": bool(result.get("interrupted")),
+            "approval": approval if approval and not _history_has_approval(history, approval_id) else None,
+            "tokenUsage": token_usage or None,
+            "contextUsed": context_used,
+            "contextWindow": token_context_window or None,
+        })
         _save_codex_history(profile, history)
         gateway_presence.set_manual_override(agent.get("statusKey") or agent.get("id"), "idle" if result.get("ok") else "offline", "")
         return {
@@ -4004,6 +4359,9 @@ def _handle_codex_chat(body):
             "thinking": result.get("thinking") or "",
             "reasoningTokens": 0,
             "approval": approval,
+            "tokenUsage": token_usage,
+            "contextUsed": context_used,
+            "contextWindow": token_context_window,
             "interrupted": bool(result.get("interrupted")),
             "error": result.get("error"),
             "agent": {"id": agent.get("id"), "name": agent.get("name"), "providerKind": "codex", "profile": profile},
@@ -8796,6 +9154,36 @@ def get_agent_messages(agent_key, max_messages=500):
         messages.sort(key=lambda m: m.get("epochMs") or 0)
     return messages[-max_messages:]
 
+
+def get_codex_agent_messages(profile, max_messages=500):
+    """Read recent Codex provider history for floor chat bubbles."""
+    messages = []
+    for msg in _load_codex_history(profile)[-max_messages:]:
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role") or "assistant")
+        text = str(msg.get("text") or "")
+        tools = msg.get("tools") if isinstance(msg.get("tools"), list) else []
+        thinking = str(msg.get("thinking") or "")
+        approval = msg.get("approval") if isinstance(msg.get("approval"), dict) else None
+        if not text and not tools and not thinking and not approval:
+            continue
+        epoch_ms = _codex_int(msg.get("epochMs") or msg.get("ts"), 0)
+        messages.append({
+            "role": role,
+            "text": text[:500],
+            "ts": epoch_ms,
+            "epochMs": epoch_ms,
+            "from": msg.get("from") or ("User" if role == "user" else ""),
+            "fromType": msg.get("fromType") or "",
+            "tools": tools,
+            "thinking": thinking,
+            "reasoningTokens": _codex_int(msg.get("reasoningTokens"), 0),
+            "approval": approval,
+            "source": msg.get("source") or "codex",
+        })
+    return messages[-max_messages:]
+
 GATEWAY_URL = VO_CONFIG["openclaw"]["gatewayUrl"]
 GATEWAY_URL_FALLBACK = GATEWAY_URL.replace("127.0.0.1", "localhost") if "127.0.0.1" in GATEWAY_URL else GATEWAY_URL
 
@@ -9458,6 +9846,10 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
                     agent = _get_hermes_agent(agent_key) or {}
                     profile = agent.get("profile") or agent.get("providerAgentId") or "default"
                     msgs = _load_hermes_history(profile)[-500:]
+                elif _is_codex_agent(agent_key):
+                    agent = _get_codex_agent(agent_key) or {}
+                    profile = agent.get("profile") or agent.get("providerAgentId") or "default"
+                    msgs = get_codex_agent_messages(profile, max_messages=500)
                 else:
                     msgs = get_agent_messages(agent_key, max_messages=500)
                 if msgs:
@@ -9469,7 +9861,7 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             # This works across all VO instances since they read the same session files.
             project_work = {}
             for agent_key, agent_id in AGENT_SESSION_IDS.items():
-                if _is_hermes_agent(agent_key):
+                if _is_hermes_agent(agent_key) or _is_codex_agent(agent_key):
                     continue
                 try:
                     sdir = os.path.join(WORKSPACE_BASE, f"agents/{agent_id}/sessions")
@@ -9666,12 +10058,12 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
-            qs = self.path.split("?", 1)[1] if "?" in self.path else ""
-            agent_id = None
-            for part in qs.split("&"):
-                if part.startswith("agent="):
-                    agent_id = part[6:]
-                    break
+            parsed = urllib.parse.urlparse(self.path)
+            query = urllib.parse.parse_qs(parsed.query)
+            agent_id = (
+                (query.get("agent") or query.get("agentId") or query.get("key") or query.get("sessionKey") or [""])[0]
+                or None
+            )
             info = self._get_session_info(agent_id=agent_id)
             self.wfile.write(json.dumps(info).encode())
         elif self.path == "/models":
@@ -9850,11 +10242,20 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             agent_key = (qs.get("agentId") or qs.get("key") or ["codex-default"])[0]
             agent = _get_codex_agent(agent_key)
             profile = (agent or {}).get("profile") or (agent or {}).get("providerAgentId") or "default"
+            state = _load_codex_state(profile)
+            token_usage = _get_codex_token_usage(profile)
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
-            self.wfile.write(json.dumps({"ok": True, "messages": _load_codex_history(profile), "sessionId": _get_codex_session_id(profile)}).encode())
+            self.wfile.write(json.dumps({
+                "ok": True,
+                "messages": _load_codex_history(profile),
+                "sessionId": _get_codex_session_id(profile),
+                "tokenUsage": token_usage,
+                "contextUsed": _codex_context_used_from_token_usage(token_usage) or _codex_int(state.get("contextUsed"), 0),
+                "contextWindow": _codex_context_window_from_token_usage(token_usage) or _codex_int(state.get("contextWindow"), 0),
+            }).encode())
         elif request_path == "/api/hermes/approval/pending":
             agent_key = (query_params.get("agentId") or query_params.get("key") or ["hermes-default"])[0]
             session_id = (query_params.get("session_id") or query_params.get("sessionId") or [""])[0]
@@ -9879,6 +10280,9 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
         elif request_path.startswith("/api/hermes/runs/") and request_path.endswith("/events"):
             run_id = urllib.parse.unquote(request_path[len("/api/hermes/runs/"):-len("/events")].strip("/"))
             _handle_hermes_run_events(self, run_id)
+        elif request_path.startswith("/api/codex/runs/") and request_path.endswith("/events"):
+            run_id = urllib.parse.unquote(request_path[len("/api/codex/runs/"):-len("/events")].strip("/"))
+            _handle_codex_run_events(self, run_id)
         elif request_path == "/api/codex/approval/pending":
             agent_key = (query_params.get("agentId") or query_params.get("key") or ["codex-default"])[0]
             result = _handle_codex_approval_pending(agent_key)
@@ -10516,27 +10920,28 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
 
         return models
 
-    def _get_session_info(self, agent_id=None):
-        """Return model name and context window for a specific agent (or default).
+    def _load_model_config(self):
+        try:
+            with open(CONFIG_PATH, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
 
-        When agent_id is provided, resolves that agent's configured model
-        (per-agent override or default). Otherwise returns the main/default agent model.
-        """
-        if agent_id and _is_hermes_agent(agent_id):
-            agent = _get_hermes_agent(agent_id) or {}
-            model = agent.get("model") or "Hermes"
-            provider = agent.get("provider") or "Hermes"
-            return {"model": model, "provider": provider, "providerKind": "hermes", "contextWindow": 0}
-        if agent_id and _is_codex_agent(agent_id):
-            agent = _get_codex_agent(agent_id) or {}
-            model = agent.get("model") or VO_CONFIG.get("codex", {}).get("model") or "Codex default"
-            provider = agent.get("provider") or "Codex CLI"
-            return {"model": model, "provider": provider, "providerKind": "codex", "contextWindow": 200000 if str(model).startswith("gpt-5") else 0}
+    def _default_config_model(self, cfg):
+        cfg = cfg if isinstance(cfg, dict) else {}
+        default_model = cfg.get("agents", {}).get("defaults", {}).get("model", {}).get("primary", "")
+        for a in cfg.get("agents", {}).get("list", []):
+            if a.get("default") and a.get("model"):
+                return a["model"]
+        return default_model or "unknown"
 
-        # Known context windows — keyed by full provider/model AND by model name alone.
+    def _context_window_for_model(self, model, cfg):
+        model = str(model or "")
+        cfg = cfg if isinstance(cfg, dict) else {}
+        # Known context windows - keyed by full provider/model AND by model name alone.
         # The model-name-only keys act as fallbacks for alternative providers
-        # (e.g. openai-codex/gpt-5.4-pro matches via "gpt-5.4-pro" → "gpt-5" family).
-        KNOWN_CONTEXT = {
+        # (e.g. openai-codex/gpt-5.4-pro matches via "gpt-5.4-pro" -> "gpt-5" family).
+        known_context = {
             # Anthropic
             "anthropic/claude-opus-4-6": 1000000,
             "anthropic/claude-sonnet-4-6": 1000000,
@@ -10557,8 +10962,7 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             "openai/o3": 200000,
             "openai/o4-mini": 200000,
         }
-        # Model-name prefix → context window (matches any provider)
-        KNOWN_CONTEXT_PREFIXES = [
+        known_context_prefixes = [
             ("claude-opus", 1000000),
             ("claude-sonnet-4", 1000000),
             ("claude-sonnet", 200000),
@@ -10571,20 +10975,51 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             ("o3", 200000),
             ("o4-mini", 200000),
         ]
-        try:
-            with open(CONFIG_PATH, "r") as f:
-                cfg = json.load(f)
-        except Exception as e:
-            return {"model": "unknown", "contextWindow": 0, "error": str(e)}
 
-        # Get default model (global fallback)
-        default_model = cfg.get("agents", {}).get("defaults", {}).get("model", {}).get("primary", "unknown")
+        for prov_name, prov_data in cfg.get("models", {}).get("providers", {}).items():
+            for m in prov_data.get("models", []):
+                full_id = f"{prov_name}/{m['id']}"
+                if full_id == model and m.get("contextWindow"):
+                    return m["contextWindow"]
 
-        # Check main/default agent override
-        for a in cfg.get("agents", {}).get("list", []):
-            if a.get("default") and a.get("model"):
-                default_model = a["model"]
-                break
+        context_window = known_context.get(model, 0)
+        if context_window == 0 and "/" in model:
+            model_name = model.split("/", 1)[1]
+            for prefix, ctx in known_context_prefixes:
+                if model_name.startswith(prefix):
+                    return ctx
+        return context_window
+
+    def _get_session_info(self, agent_id=None):
+        """Return model name and context window for a specific agent (or default).
+
+        When agent_id is provided, resolves that agent's configured model
+        (per-agent override or default). Otherwise returns the main/default agent model.
+        """
+        cfg = self._load_model_config()
+        default_model = self._default_config_model(cfg)
+        if agent_id and _is_hermes_agent(agent_id):
+            agent = _get_hermes_agent(agent_id) or {}
+            model = agent.get("model") or "Hermes"
+            provider = agent.get("provider") or "Hermes"
+            return {"model": model, "provider": provider, "providerKind": "hermes", "contextWindow": 0}
+        if agent_id and _is_codex_agent(agent_id):
+            agent = _get_codex_agent(agent_id) or {}
+            model = agent.get("model") or VO_CONFIG.get("codex", {}).get("model") or default_model
+            provider = agent.get("provider") or "Codex CLI"
+            profile = agent.get("profile") or agent.get("providerAgentId") or "default"
+            token_usage = _get_codex_token_usage(profile)
+            state = _load_codex_state(profile)
+            context_used = _codex_context_used_from_token_usage(token_usage) or _codex_int(state.get("contextUsed"), 0)
+            token_context_window = _codex_context_window_from_token_usage(token_usage) or _codex_int(state.get("contextWindow"), 0)
+            return {
+                "model": model,
+                "provider": provider,
+                "providerKind": "codex",
+                "contextWindow": token_context_window or self._context_window_for_model(model, cfg),
+                "contextUsed": context_used,
+                "tokenUsage": token_usage,
+            }
 
         model = default_model
 
@@ -10596,35 +11031,7 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
                         model = a["model"]
                     break
 
-        # Context window resolution (in priority order):
-        # 1. Custom provider config with explicit contextWindow
-        # 2. Exact match in KNOWN_CONTEXT (provider/model)
-        # 3. Prefix match on model name (handles alternative providers like openai-codex/)
-        context_window = 0
-
-        # 1. Check custom providers in config
-        for prov_name, prov_data in cfg.get("models", {}).get("providers", {}).items():
-            for m in prov_data.get("models", []):
-                full_id = f"{prov_name}/{m['id']}"
-                if full_id == model and m.get("contextWindow"):
-                    context_window = m["contextWindow"]
-                    break
-            if context_window > 0:
-                break
-
-        # 2. Exact match in known map
-        if context_window == 0:
-            context_window = KNOWN_CONTEXT.get(model, 0)
-
-        # 3. Prefix match on model name (after the /)
-        if context_window == 0 and "/" in model:
-            model_name = model.split("/", 1)[1]
-            for prefix, ctx in KNOWN_CONTEXT_PREFIXES:
-                if model_name.startswith(prefix):
-                    context_window = ctx
-                    break
-
-        return {"model": model, "contextWindow": context_window}
+        return {"model": model, "contextWindow": self._context_window_for_model(model, cfg)}
 
     def _get_providers(self):
         """Read providers, auth profiles, and models for the model manager UI."""
@@ -11593,6 +12000,30 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             result.pop("_status", None)
             self.wfile.write(json.dumps(result).encode())
             return
+        elif self.path == "/api/codex/runs":
+            length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            result = _handle_codex_run_start(body)
+            self.send_response(result.get("_status", 200))
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            result.pop("_status", None)
+            self.wfile.write(json.dumps(result).encode())
+            return
+        elif request_path.startswith("/api/codex/runs/") and request_path.endswith("/stop"):
+            run_id = urllib.parse.unquote(request_path[len("/api/codex/runs/"):-len("/stop")].strip("/"))
+            length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            body["runId"] = run_id
+            result = _handle_codex_interrupt(body)
+            self.send_response(result.get("_status", 200))
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            result.pop("_status", None)
+            self.wfile.write(json.dumps(result).encode())
+            return
         elif self.path == "/api/codex/chat":
             length = int(self.headers.get('Content-Length', 0))
             body = json.loads(self.rfile.read(length)) if length else {}
@@ -11681,6 +12112,7 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             session_id = _get_codex_session_id(profile)
             _save_codex_history(profile, [])
             _set_codex_session_id(profile, "")
+            _clear_codex_token_usage(profile)
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
