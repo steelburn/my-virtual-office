@@ -33,7 +33,7 @@
         .step-title { font-family: 'Press Start 2P', cursive; font-size: 10px; color: #ffd700; margin-bottom: 16px; }
         .step-desc { color: #aaa; font-size: 15px; margin-bottom: 20px; line-height: 1.6; }
         label { display: block; font-size: 14px; color: #ccc; margin-bottom: 6px; margin-top: 16px; }
-        input[type=text] { width: 100%; padding: 12px 16px; background: #0d0d1e; border: 1px solid #2a2a4e; border-radius: 8px; color: #e8e8f0; font-size: 15px; outline: none; }
+        input[type=text], input[type=password], input[type=number], select { width: 100%; padding: 12px 16px; background: #0d0d1e; border: 1px solid #2a2a4e; border-radius: 8px; color: #e8e8f0; font-size: 15px; outline: none; }
         input:focus { border-color: #ffd700; }
         .btn-row { display: flex; justify-content: space-between; margin-top: 28px; gap: 12px; }
         button { padding: 12px 28px; border: 2px solid #ffd700; background: #1a1a2e; color: #ffd700; font-family: 'Press Start 2P', cursive; font-size: 10px; border-radius: 8px; cursor: pointer; transition: all 0.2s; }
@@ -114,7 +114,7 @@
         <!-- Step 2: Connect Agent Providers -->
         <div class="step" id="step-2">
             <div class="step-title">2. CONNECT AGENT PROVIDERS</div>
-            <div class="step-desc">Tell the Virtual Office where your agent runtimes live. OpenClaw and Hermes agents can appear together in the same office.</div>
+            <div class="step-desc">Tell the Virtual Office where your agent runtimes live. OpenClaw, Hermes, and Codex agents can appear together in the same office.</div>
 
             <label>OpenClaw Home Directory</label>
             <input type="text" id="s-ocpath" value="" placeholder="/home/youruser/.openclaw">
@@ -128,7 +128,7 @@
                 <code style="color:#90caf9;">/home/youruser/.openclaw</code><br><br>
                 <b>Running Virtual Office in Docker?</b><br>
                 Use the path you mounted with <code>-v</code>. For example:<br>
-                <code style="color:#90caf9;font-size:13px;">docker run -v /home/eli/.openclaw:/openclaw ...</code><br>
+                <code style="color:#90caf9;font-size:13px;">docker run -v /home/youruser/.openclaw:/openclaw ...</code><br>
                 → enter <code style="color:#90caf9;">/openclaw</code><br><br>
                 <b>Not sure?</b> Run this in your terminal:<br>
                 <code style="color:#90caf9;font-size:13px;">ls ~/.openclaw/openclaw.json</code><br>
@@ -190,6 +190,46 @@
                     <div style="font-size:12px;color:#666;margin:6px 0 12px;line-height:1.5;">Running in Docker? Mount the Hermes home/CLI into the container and enter the mounted paths. Native live presence uses the Hermes API Server when available, with CLI fallback.</div>
                     <button onclick="testHermesConnection()" style="margin:0 0 12px;padding:8px 16px;font-size:9px;">🔍 TEST HERMES</button>
                     <div id="hermes-test-status"></div>
+                </div>
+            </div>
+
+            <div style="border-top:1px solid #333;padding-top:16px;margin-top:18px;">
+                <div style="font-size:13px;color:#ffd700;font-weight:bold;margin-bottom:8px;">⌘ Codex CLI Agents</div>
+                <label style="display:flex;align-items:center;gap:8px;margin-top:8px;">
+                    <input type="checkbox" id="s-codex-enable" checked> Auto-detect Codex CLI Agents
+                </label>
+                <div style="font-size:13px;color:#999;margin:6px 0 10px;line-height:1.5;">
+                    Virtual Office can create and chat with Codex-backed workspace agents through the native Codex CLI app-server protocol.
+                </div>
+                <div id="codex-fields" style="margin-top:10px;">
+                    <label>Codex Home Directory</label>
+                    <input type="text" id="s-codex-home" placeholder="/home/youruser/.codex">
+                    <label>Codex CLI Path</label>
+                    <input type="text" id="s-codex-bin" placeholder="codex or /home/youruser/.local/bin/codex">
+                    <label>Codex Workspace Root</label>
+                    <input type="text" id="s-codex-workspace" placeholder="/data/codex-agents">
+                    <label>Codex Main Workspace</label>
+                    <input type="text" id="s-codex-main-workspace" placeholder="/data/codex-main">
+                    <label>Default Model <span style="color:#666;font-size:12px">(optional)</span></label>
+                    <input type="text" id="s-codex-model" placeholder="leave blank to use Codex default">
+                    <label>Sandbox</label>
+                    <select id="s-codex-sandbox">
+                        <option value="workspace-write">workspace-write</option>
+                        <option value="danger-full-access">danger-full-access</option>
+                        <option value="read-only">read-only</option>
+                    </select>
+                    <label>Approval Policy</label>
+                    <select id="s-codex-approval">
+                        <option value="never">never</option>
+                        <option value="on-request">on-request</option>
+                        <option value="on-failure">on-failure</option>
+                        <option value="untrusted">untrusted</option>
+                    </select>
+                    <label style="display:flex;align-items:center;gap:8px;margin-top:10px;">
+                        <input type="checkbox" id="s-codex-appserver" checked> Prefer app-server protocol
+                    </label>
+                    <button onclick="testCodexConnection()" style="margin:0 0 12px;padding:8px 16px;font-size:9px;">🔍 TEST CODEX</button>
+                    <div id="codex-test-status"></div>
                 </div>
             </div>
 
@@ -362,6 +402,12 @@
     <script>
         var currentStep = 0;
 
+        function escapeHtml(value) {
+            return String(value == null ? '' : value).replace(/[&<>"']/g, function(ch) {
+                return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch];
+            });
+        }
+
         function nextStep(n) {
             document.getElementById('step-' + currentStep).classList.remove('active');
             document.getElementById('step-' + n).classList.add('active');
@@ -430,7 +476,12 @@
             document.getElementById('hermes-fields').style.display = this.checked ? 'block' : 'none';
         });
 
-        // Pre-populate Hermes fields from current config
+        // Codex enable toggle
+        document.getElementById('s-codex-enable').addEventListener('change', function() {
+            document.getElementById('codex-fields').style.display = this.checked ? 'block' : 'none';
+        });
+
+        // Pre-populate provider fields from current config
         fetch('/vo-config').then(function(r) { return r.json(); }).then(function(cfg) {
             var h = cfg.hermes || {};
             var hEnable = document.getElementById('s-hermes-enable');
@@ -445,6 +496,27 @@
             if (hApiKey && h.apiKeyConfigured) hApiKey.placeholder = 'Configured - leave blank to keep';
             var hFields = document.getElementById('hermes-fields');
             if (hFields && hEnable) hFields.style.display = hEnable.checked ? 'block' : 'none';
+            var c = cfg.codex || {};
+            var cEnable = document.getElementById('s-codex-enable');
+            var cFields = document.getElementById('codex-fields');
+            if (cEnable) cEnable.checked = c.enabled !== false;
+            if (cFields && cEnable) cFields.style.display = cEnable.checked ? 'block' : 'none';
+            var cHome = document.getElementById('s-codex-home');
+            var cBin = document.getElementById('s-codex-bin');
+            var cWorkspace = document.getElementById('s-codex-workspace');
+            var cMainWorkspace = document.getElementById('s-codex-main-workspace');
+            var cModel = document.getElementById('s-codex-model');
+            var cSandbox = document.getElementById('s-codex-sandbox');
+            var cApproval = document.getElementById('s-codex-approval');
+            var cAppServer = document.getElementById('s-codex-appserver');
+            if (cHome && c.homePath) cHome.value = c.homePath;
+            if (cBin && c.binary) cBin.value = c.binary;
+            if (cWorkspace && c.workspaceRoot) cWorkspace.value = c.workspaceRoot;
+            if (cMainWorkspace && c.mainWorkspace) cMainWorkspace.value = c.mainWorkspace;
+            if (cModel && c.model) cModel.value = c.model;
+            if (cSandbox && c.sandbox) cSandbox.value = c.sandbox;
+            if (cApproval && c.approvalPolicy) cApproval.value = c.approvalPolicy;
+            if (cAppServer) cAppServer.checked = c.preferAppServer !== false;
         }).catch(function(){});
 
         function testPcMetrics() {
@@ -510,16 +582,68 @@
                     if (agents.length) {
                         html += '<div class="agent-list-preview">';
                         agents.slice(0, 10).forEach(function(a) {
-                            html += '<div class="agent-row"><span class="emoji">' + (a.emoji || '⚕️') + '</span><span class="name">' + a.name + '</span><span class="role">' + (a.model || a.providerAgentId || 'Hermes') + '</span></div>';
+                            html += '<div class="agent-row"><span class="emoji">' + escapeHtml(a.emoji || '⚕️') + '</span><span class="name">' + escapeHtml(a.name) + '</span><span class="role">' + escapeHtml(a.model || a.providerAgentId || 'Hermes') + '</span></div>';
                         });
                         html += '</div>';
                     }
                     statusEl.innerHTML = html;
                 } else {
-                    statusEl.innerHTML = '<div class="status-box error">❌ Hermes not reachable: ' + (d.error || 'unknown error') + '</div>';
+                    statusEl.innerHTML = '<div class="status-box error">❌ Hermes not reachable: ' + escapeHtml(d.error || 'unknown error') + '</div>';
                 }
             }).catch(function(e) {
-                statusEl.innerHTML = '<div class="status-box error">Error: ' + e.message + '</div>';
+                statusEl.innerHTML = '<div class="status-box error">Error: ' + escapeHtml(e.message) + '</div>';
+            });
+        }
+
+        function codexPayloadFromSetup() {
+            return {
+                enabled: document.getElementById('s-codex-enable').checked,
+                homePath: document.getElementById('s-codex-home').value.trim() || null,
+                binary: document.getElementById('s-codex-bin').value.trim() || null,
+                workspaceRoot: document.getElementById('s-codex-workspace').value.trim() || null,
+                mainWorkspace: document.getElementById('s-codex-main-workspace').value.trim() || null,
+                model: document.getElementById('s-codex-model').value.trim() || '',
+                sandbox: document.getElementById('s-codex-sandbox').value || 'workspace-write',
+                approvalPolicy: document.getElementById('s-codex-approval').value || 'never',
+                preferAppServer: document.getElementById('s-codex-appserver').checked
+            };
+        }
+
+        function testCodexConnection() {
+            var payload = codexPayloadFromSetup();
+            var statusEl = document.getElementById('codex-test-status');
+            if (!payload.enabled) {
+                statusEl.innerHTML = '<div class="status-box info">Codex auto-detect is disabled.</div>';
+                return;
+            }
+            statusEl.innerHTML = '<div class="status-box info">Saving and testing Codex...</div>';
+            fetch('/setup/save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ codex: payload })
+            }).then(function() {
+                return fetch('/api/codex/test', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+            }).then(function(r) { return r.json(); }).then(function(d) {
+                if (d.ok) {
+                    var agents = d.agents || [];
+                    var html = '<div class="status-box success">✅ Codex connected — ' + escapeHtml(d.protocol || 'codex') + ' · found ' + agents.length + ' agent' + (agents.length === 1 ? '' : 's') + '</div>';
+                    if (agents.length) {
+                        html += '<div class="agent-list-preview">';
+                        agents.slice(0, 10).forEach(function(a) {
+                            html += '<div class="agent-row"><span class="emoji">' + escapeHtml(a.emoji || '🤖') + '</span><span class="name">' + escapeHtml(a.name) + '</span><span class="role">' + escapeHtml(a.model || a.providerAgentId || 'Codex') + '</span></div>';
+                        });
+                        html += '</div>';
+                    }
+                    statusEl.innerHTML = html;
+                } else {
+                    statusEl.innerHTML = '<div class="status-box error">❌ Codex not reachable: ' + escapeHtml(d.error || 'unknown error') + '</div>';
+                }
+            }).catch(function(e) {
+                statusEl.innerHTML = '<div class="status-box error">Error: ' + escapeHtml(e.message) + '</div>';
             });
         }
 
@@ -727,6 +851,7 @@
                     if (apiKey) h.apiKey = apiKey;
                     return h;
                 })(),
+                codex: codexPayloadFromSetup(),
                 _setupComplete: true
             };
 

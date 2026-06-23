@@ -291,7 +291,7 @@ def _load_vo_config():
 VO_CONFIG = _load_vo_config()
 
 try:
-    SMS_DEFAULT_TZ = ZoneInfo(os.environ.get("VO_SMS_TIMEZONE") or os.environ.get("TZ") or "America/New_York")
+    SMS_DEFAULT_TZ = ZoneInfo(os.environ.get("VO_SMS_TIMEZONE") or os.environ.get("TZ") or "UTC")
 except Exception:
     SMS_DEFAULT_TZ = timezone.utc
 
@@ -526,6 +526,209 @@ def _read_openclaw_auth_sqlite():
     return unique
 
 
+def _read_openclaw_auth_json():
+    profiles = []
+    try:
+        with open(AUTH_PROFILES_PATH, "r") as f:
+            data = json.load(f)
+    except Exception:
+        return profiles
+    for profile_id, profile in (data.get("profiles") or {}).items():
+        if not isinstance(profile, dict):
+            continue
+        provider = profile.get("provider") or profile_id.split(":", 1)[0]
+        ptype = profile.get("type") or profile.get("mode") or "profile"
+        email = profile.get("email") or ""
+        profiles.append({
+            "id": profile_id,
+            "provider": provider,
+            "type": ptype,
+            "label": profile_id + (f" ({email})" if email else ""),
+            "source": "auth-profiles.json",
+        })
+    return profiles
+
+
+def _read_openclaw_auth_profiles():
+    sqlite_profiles = _read_openclaw_auth_sqlite()
+    if sqlite_profiles:
+        return sqlite_profiles
+    return _read_openclaw_auth_json()
+
+
+def _quote_sqlite_identifier(name):
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _update_openclaw_sqlite_auth_stores(updater):
+    db_path = os.path.join(OPENCLAW_AGENT_DIR, "openclaw-agent.sqlite")
+    if not os.path.exists(db_path):
+        return 0, None
+    updated = 0
+    con = None
+    try:
+        con = sqlite3.connect(db_path)
+        con.row_factory = sqlite3.Row
+        tables = [r[0] for r in con.execute("select name from sqlite_master where type='table'")]
+        now_ms = int(time.time() * 1000)
+        for table in tables:
+            qtable = _quote_sqlite_identifier(table)
+            cols = [r[1] for r in con.execute(f"pragma table_info({qtable})")]
+            if not {"store_key", "store_json", "updated_at"}.issubset(set(cols)):
+                continue
+            rows = con.execute(f"select store_key, store_json from {qtable}").fetchall()
+            for row in rows:
+                try:
+                    data = json.loads(row["store_json"] or "{}")
+                except Exception:
+                    continue
+                if not isinstance(data.get("profiles"), dict):
+                    continue
+                changed = updater(data)
+                if not changed:
+                    continue
+                con.execute(
+                    f"update {qtable} set store_json = ?, updated_at = ? where store_key = ?",
+                    (json.dumps(data, separators=(",", ":")), now_ms, row["store_key"]),
+                )
+                updated += 1
+        con.commit()
+        return updated, None
+    except Exception as e:
+        return updated, str(e)
+    finally:
+        try:
+            if con:
+                con.close()
+        except Exception:
+            pass
+
+
+def _update_openclaw_auth_profiles_json(updater, create_if_missing=False):
+    if not os.path.exists(AUTH_PROFILES_PATH) and not create_if_missing:
+        return False, None
+    try:
+        os.makedirs(os.path.dirname(AUTH_PROFILES_PATH), exist_ok=True)
+        try:
+            with open(AUTH_PROFILES_PATH, "r") as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            data = {"version": 1, "profiles": {}, "lastGood": {}}
+        data.setdefault("version", 1)
+        data.setdefault("profiles", {})
+        changed = updater(data)
+        if not changed:
+            return False, None
+        tmp_path = AUTH_PROFILES_PATH + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, AUTH_PROFILES_PATH)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def _mirror_openclaw_config_auth_profile(provider, profile_id):
+    try:
+        with open(CONFIG_PATH, "r") as f:
+            cfg = json.load(f)
+        cfg.setdefault("auth", {}).setdefault("profiles", {})[profile_id] = {
+            "provider": provider,
+            "mode": "api_key",
+        }
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(cfg, f, indent=2)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def _remove_openclaw_config_auth_profiles(profile_ids):
+    try:
+        with open(CONFIG_PATH, "r") as f:
+            cfg = json.load(f)
+        profiles = cfg.setdefault("auth", {}).setdefault("profiles", {})
+        changed = False
+        for profile_id in profile_ids:
+            if profile_id in profiles:
+                profiles.pop(profile_id, None)
+                changed = True
+        if changed:
+            with open(CONFIG_PATH, "w") as f:
+                json.dump(cfg, f, indent=2)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def _save_openclaw_api_key_direct(provider, profile_id, api_key):
+    profile = {"type": "api_key", "provider": provider, "key": api_key}
+
+    def updater(data):
+        profiles = data.setdefault("profiles", {})
+        if profiles.get(profile_id) == profile:
+            return False
+        profiles[profile_id] = dict(profile)
+        last_good = data.get("lastGood")
+        if isinstance(last_good, dict):
+            last_good[provider] = profile_id
+        return True
+
+    sqlite_updates, sqlite_err = _update_openclaw_sqlite_auth_stores(updater)
+    json_updated, json_err = _update_openclaw_auth_profiles_json(
+        updater,
+        create_if_missing=(sqlite_updates == 0 and not sqlite_err),
+    )
+    if sqlite_err and not json_updated:
+        return {"ok": False, "error": f"Cannot write OpenClaw auth store: {sqlite_err}"}
+    if json_err and sqlite_updates == 0:
+        return {"ok": False, "error": f"Cannot write auth-profiles.json: {json_err}"}
+
+    _mirror_openclaw_config_auth_profile(provider, profile_id)
+    return {
+        "ok": True,
+        "provider": provider,
+        "profileId": profile_id,
+        "maskedKey": _mask_secret(api_key),
+        "source": "direct-auth-store",
+    }
+
+
+def _delete_openclaw_auth_direct(provider, profile_id=""):
+    deleted = set()
+
+    def should_delete(pid, profile):
+        if profile_id:
+            return pid == profile_id
+        if (profile.get("provider") or pid.split(":", 1)[0]) != provider:
+            return False
+        ptype = str(profile.get("type") or profile.get("mode") or "").lower()
+        return ptype in {"api_key", "key"} or "key" in profile
+
+    def updater(data):
+        profiles = data.setdefault("profiles", {})
+        remove = [pid for pid, profile in profiles.items() if isinstance(profile, dict) and should_delete(pid, profile)]
+        for pid in remove:
+            profiles.pop(pid, None)
+            deleted.add(pid)
+        last_good = data.get("lastGood")
+        if isinstance(last_good, dict):
+            for key, value in list(last_good.items()):
+                if value in remove:
+                    last_good.pop(key, None)
+        return bool(remove)
+
+    sqlite_updates, sqlite_err = _update_openclaw_sqlite_auth_stores(updater)
+    json_updated, json_err = _update_openclaw_auth_profiles_json(updater, create_if_missing=False)
+    if sqlite_err and not json_updated:
+        return {"ok": False, "error": f"Cannot write OpenClaw auth store: {sqlite_err}"}
+    if json_err and sqlite_updates == 0:
+        return {"ok": False, "error": f"Cannot write auth-profiles.json: {json_err}"}
+
+    _remove_openclaw_config_auth_profiles(deleted)
+    return {"ok": True, "provider": provider, "deletedProfiles": sorted(deleted), "source": "direct-auth-store"}
+
+
 def _read_openclaw_config_models(cfg):
     models = []
     default_model = cfg.get("agents", {}).get("defaults", {}).get("model", {}).get("primary", "")
@@ -574,6 +777,119 @@ def _read_openclaw_config_models(cfg):
     return list(deduped.values())
 
 
+_OPENCLAW_CLOUD_PROVIDER_IDS = {
+    "anthropic",
+    "openai",
+    "openai-codex",
+    "google",
+    "gemini",
+    "groq",
+    "openrouter",
+    "mistral",
+    "cohere",
+    "xai",
+    "github-copilot",
+    "copilot",
+}
+
+
+def _openclaw_provider_kind(provider, pdata):
+    provider = _safe_provider_id(provider)
+    pdata = pdata if isinstance(pdata, dict) else {}
+    api = str(pdata.get("api") or "").lower()
+    base_url = str(pdata.get("baseUrl") or "").strip()
+    if provider in {"ollama", "lmstudio"} or api == "ollama":
+        return "local"
+    if base_url:
+        return "local" if provider not in _OPENCLAW_CLOUD_PROVIDER_IDS else "cloud"
+    if provider in _OPENCLAW_CLOUD_PROVIDER_IDS:
+        return "cloud"
+    return "local"
+
+
+def _openclaw_local_providers_from_config(cfg):
+    providers = []
+    for provider, pdata in (cfg.get("models", {}).get("providers", {}) or {}).items():
+        if _openclaw_provider_kind(provider, pdata) != "local":
+            continue
+        model_rows = []
+        for model in pdata.get("models", []) or []:
+            model_id = str(model.get("id") or "").strip()
+            if not model_id:
+                continue
+            model_rows.append({
+                "id": model_id,
+                "name": model.get("name") or model_id,
+                "contextWindow": model.get("contextWindow", 0),
+                "maxTokens": model.get("maxTokens", 0),
+            })
+        providers.append({
+            "id": provider,
+            "provider": provider,
+            "baseUrl": pdata.get("baseUrl", ""),
+            "api": pdata.get("api", ""),
+            "apiKeyConfigured": bool(pdata.get("apiKey")),
+            "timeoutSeconds": pdata.get("timeoutSeconds"),
+            "models": model_rows,
+            "modelCount": len(model_rows),
+            "source": "openclaw-config",
+        })
+    return sorted(providers, key=lambda item: item.get("provider", ""))
+
+
+def _openclaw_cloud_providers_from_config(cfg, auth_profiles=None):
+    auth_profiles = auth_profiles or []
+    configured = {}
+    for model_id, data in (cfg.get("agents", {}).get("defaults", {}).get("models", {}) or {}).items():
+        provider = _provider_from_model_id(model_id)
+        if provider in _OPENCLAW_CLOUD_PROVIDER_IDS:
+            configured.setdefault(provider, []).append({
+                "id": model_id,
+                "name": model_id.split("/", 1)[-1],
+                "contextWindow": ((data or {}).get("params") or {}).get("contextWindow", 0) if isinstance(data, dict) else 0,
+                "source": "agents.defaults.models",
+            })
+    for provider, pdata in (cfg.get("models", {}).get("providers", {}) or {}).items():
+        if _openclaw_provider_kind(provider, pdata) != "cloud":
+            continue
+        for model in pdata.get("models", []) or []:
+            model_id = str(model.get("id") or "").strip()
+            if not model_id:
+                continue
+            configured.setdefault(provider, []).append({
+                "id": f"{provider}/{model_id}",
+                "name": model.get("name") or model_id,
+                "contextWindow": model.get("contextWindow", 0),
+                "source": "models.providers",
+            })
+    for profile in auth_profiles:
+        provider = profile.get("provider") or _provider_from_model_id(profile.get("id", ""))
+        if provider in _OPENCLAW_CLOUD_PROVIDER_IDS:
+            configured.setdefault(provider, [])
+
+    cloud_providers = []
+    for provider, models in configured.items():
+        seen = set()
+        model_rows = []
+        for model in models:
+            mid = model.get("id")
+            if not mid or mid in seen:
+                continue
+            seen.add(mid)
+            model_rows.append(model)
+        profiles = [p for p in auth_profiles if (p.get("provider") or _provider_from_model_id(p.get("id", ""))) == provider]
+        cloud_providers.append({
+            "id": provider,
+            "provider": provider,
+            "authProfiles": profiles,
+            "authTypes": sorted({str(p.get("type") or p.get("mode") or "profile") for p in profiles if p}),
+            "models": sorted(model_rows, key=lambda item: item.get("id", "")),
+            "modelCount": len(model_rows),
+            "source": "openclaw-cloud",
+        })
+    return sorted(cloud_providers, key=lambda item: item.get("provider", ""))
+
+
 def _get_openclaw_native_fallback(reason=""):
     try:
         with open(CONFIG_PATH, "r") as f:
@@ -588,15 +904,18 @@ def _get_openclaw_native_fallback(reason=""):
             "model": agent.get("model", ""),
         }
     models = _read_openclaw_config_models(cfg)
+    auth_profiles = _read_openclaw_auth_profiles()
     return {
         "ok": True,
         "warning": reason or "OpenClaw CLI unavailable; read mounted native config/auth store",
         "models": models,
-        "authProfiles": _read_openclaw_auth_sqlite(),
+        "authProfiles": auth_profiles,
         "authStatus": {"storePath": os.path.join(OPENCLAW_AGENT_DIR, "openclaw-agent.sqlite"), "source": "sqlite-fallback"},
         "defaultModel": cfg.get("agents", {}).get("defaults", {}).get("model", {}).get("primary", ""),
         "agents": agents,
         "providers": sorted({m["provider"] for m in models if m.get("provider")}),
+        "localProviders": _openclaw_local_providers_from_config(cfg),
+        "cloudProviders": _openclaw_cloud_providers_from_config(cfg, auth_profiles),
         "nativeCommands": {
             "list": "openclaw models list --all --json",
             "auth": "openclaw models auth list --json",
@@ -641,14 +960,20 @@ def _get_openclaw_native_models():
     auth_profiles = []
     if auth_result.get("ok"):
         auth_profiles = (auth_result.get("data") or {}).get("profiles", [])
+    if not auth_profiles:
+        auth_profiles = _read_openclaw_auth_profiles()
 
     status = status_result.get("data") if status_result.get("ok") else {}
     agents = {}
     default_model = ""
+    local_providers = []
+    cloud_providers = []
     try:
         with open(CONFIG_PATH, "r") as f:
             cfg = json.load(f)
         default_model = cfg.get("agents", {}).get("defaults", {}).get("model", {}).get("primary", "")
+        local_providers = _openclaw_local_providers_from_config(cfg)
+        cloud_providers = _openclaw_cloud_providers_from_config(cfg, auth_profiles)
         for agent in cfg.get("agents", {}).get("list", []):
             agents[agent.get("id")] = {
                 "id": agent.get("id"),
@@ -667,6 +992,8 @@ def _get_openclaw_native_models():
         "defaultModel": default_model,
         "agents": agents,
         "providers": sorted({m["provider"] for m in models if m.get("provider")}),
+        "localProviders": local_providers,
+        "cloudProviders": cloud_providers,
         "nativeCommands": {
             "list": "openclaw models list --all --json",
             "auth": "openclaw models auth list --json",
@@ -840,6 +1167,7 @@ def _get_hermes_native_models():
             })
 
     model_aliases = {}
+    local_provider_map = {}
     for profile_id, cfg_path in profiles:
         cfg = _load_yaml_file(cfg_path)
         aliases = cfg.get("model_aliases", {}) if isinstance(cfg, dict) else {}
@@ -858,6 +1186,20 @@ def _get_hermes_native_models():
                 "model": model,
                 "baseUrl": base_url,
             }
+            local_key = (profile_id, provider, base_url)
+            local_provider_map.setdefault(local_key, {
+                "id": f"{profile_id}:{provider}:{base_url}",
+                "profile": profile_id,
+                "provider": provider,
+                "baseUrl": base_url,
+                "models": [],
+                "source": "hermes-model-aliases",
+            })
+            local_provider_map[local_key]["models"].append({
+                "id": model,
+                "name": model,
+                "alias": alias,
+            })
             mid = f"{provider}/{model}"
             if not any(m.get("id") == mid for m in models):
                 models.append({
@@ -875,6 +1217,10 @@ def _get_hermes_native_models():
         "models": models,
         "providers": sorted(set(provider_cache.keys()) | {m.get("provider") for m in models if m.get("provider")}),
         "modelAliases": list(model_aliases.values()),
+        "localProviders": [
+            {**provider, "modelCount": len(provider.get("models", []))}
+            for provider in sorted(local_provider_map.values(), key=lambda item: (item.get("profile", ""), item.get("provider", ""), item.get("baseUrl", "")))
+        ],
         "nativeCommands": {
             "setup": "hermes model",
             "auth": "hermes auth list",
@@ -887,6 +1233,34 @@ def _get_native_model_state():
     return {
         "openclaw": _get_openclaw_native_models(),
         "hermes": _get_hermes_native_models(),
+        "codex": _get_codex_native_setup_state(),
+    }
+
+
+def _get_codex_native_setup_state():
+    cfg = VO_CONFIG.get("codex", {}) or {}
+    home_path = cfg.get("homePath") or os.path.expanduser("~/.codex")
+    return {
+        "ok": True,
+        "enabled": bool(cfg.get("enabled", True)),
+        "binary": cfg.get("binary") or "",
+        "homePath": home_path,
+        "workspaceRoot": cfg.get("workspaceRoot") or "",
+        "mainWorkspace": cfg.get("mainWorkspace") or "",
+        "model": cfg.get("model") or "",
+        "sandbox": cfg.get("sandbox") or "workspace-write",
+        "approvalPolicy": cfg.get("approvalPolicy") or "never",
+        "preferAppServer": bool(cfg.get("preferAppServer", True)),
+        "includeMain": bool(cfg.get("includeMain", True)),
+        "includeNativeAgents": bool(cfg.get("includeNativeAgents", True)),
+        "registerNativeAgents": bool(cfg.get("registerNativeAgents", True)),
+        "nativeAgentsDir": os.path.join(home_path, "agents") if home_path else "",
+        "nativeCommands": {
+            "login": "codex login",
+            "appServer": "codex app-server --stdio",
+            "exec": "codex exec",
+            "agents": "$CODEX_HOME/agents/*.toml",
+        },
     }
 
 
@@ -1080,6 +1454,9 @@ def _save_hermes_custom_provider(profile_id, provider, base_url, models):
     if not os.path.exists(cfg_path):
         return {"ok": False, "error": f"Hermes profile config not found: {cfg_path}"}
     def update_aliases(aliases):
+        for alias, entry in list(aliases.items()):
+            if isinstance(entry, dict) and _safe_provider_id(entry.get("provider")) == provider:
+                aliases.pop(alias, None)
         for entry in entries:
             alias = re.sub(r"[^a-zA-Z0-9_.:-]+", "-", entry["id"]).strip("-")[:100]
             aliases[alias] = {
@@ -1167,7 +1544,7 @@ def _save_openclaw_api_key(provider, api_key, profile_id=""):
     if not provider or not api_key:
         return {"ok": False, "error": "provider and API key are required"}
     if not OPENCLAW_BIN:
-        return {"ok": False, "error": "OpenClaw CLI is not configured"}
+        return _save_openclaw_api_key_direct(provider, profile_id, api_key)
     try:
         result = subprocess.run(
             [OPENCLAW_BIN, "models", "auth", "paste-api-key", "--provider", provider, "--profile-id", profile_id],
@@ -8762,6 +9139,7 @@ def _handle_workflow_stop(project_id):
         wf["stopFlag"].set()
         wf["active"] = False
         wf["phase"] = "stopped"
+        wf["currentTaskId"] = None
 
     _wf_persist_state(project_id)
     _wf_clear_persisted_state(project_id)
@@ -8848,7 +9226,7 @@ def _handle_workflow_status(project_id):
     # This catches cases where the workflow thread is mid-API-call (active=True in session)
     # but the in-memory state hasn't been updated yet
     session_active = False
-    if current_task and not active:
+    if current_task and not active and phase != "stopped":
         # Find the assignee for the current task
         task = next((t for t in p.get("tasks", []) if t["id"] == current_task), None)
         if task and task.get("assignee"):
@@ -9316,13 +9694,26 @@ def _reload_gateway_globals():
     """Reload all gateway-related globals from current VO_CONFIG.
     Call after VO_CONFIG has been refreshed (e.g. after /setup/save)."""
     global GATEWAY_URL, GATEWAY_URL_FALLBACK, _GW_LOCAL_HOST, GATEWAY_HTTP
-    global CONFIG_PATH, AUTH_PROFILES_PATH
+    global CONFIG_PATH, AUTH_PROFILES_PATH, OPENCLAW_HOME, OPENCLAW_AGENT_DIR, OPENCLAW_BIN, HERMES_HOME, HERMES_BIN
     GATEWAY_URL = VO_CONFIG["openclaw"]["gatewayUrl"]
     GATEWAY_URL_FALLBACK = GATEWAY_URL.replace("127.0.0.1", "localhost") if "127.0.0.1" in GATEWAY_URL else GATEWAY_URL
     _GW_LOCAL_HOST = _compute_local_host_header(GATEWAY_URL)
     GATEWAY_HTTP = VO_CONFIG["openclaw"]["gatewayHttp"]
     CONFIG_PATH = os.path.join(WORKSPACE_BASE, "openclaw.json")
     AUTH_PROFILES_PATH = os.path.join(WORKSPACE_BASE, "agents/main/agent/auth-profiles.json")
+    OPENCLAW_HOME = os.path.expanduser(os.environ.get("OPENCLAW_HOME") or WORKSPACE_BASE or "~/.openclaw")
+    OPENCLAW_AGENT_DIR = os.path.join(OPENCLAW_HOME, "agents/main/agent")
+    OPENCLAW_BIN = (
+        os.environ.get("OPENCLAW_BIN")
+        or VO_CONFIG.get("openclaw", {}).get("binary")
+        or shutil.which("openclaw")
+    )
+    HERMES_HOME = os.path.expanduser(os.environ.get("HERMES_HOME") or VO_CONFIG.get("hermes", {}).get("homePath") or "~/.hermes")
+    HERMES_BIN = (
+        os.environ.get("HERMES_BIN")
+        or VO_CONFIG.get("hermes", {}).get("binary")
+        or shutil.which("hermes")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -10462,6 +10853,21 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
                     "preferApi": VO_CONFIG.get("hermes", {}).get("preferApi", True),
                     "detected": bool(_handle_hermes_test().get("ok")),
                 },
+                "codex": {
+                    "enabled": VO_CONFIG.get("codex", {}).get("enabled", True),
+                    "homePath": VO_CONFIG.get("codex", {}).get("homePath"),
+                    "binary": VO_CONFIG.get("codex", {}).get("binary"),
+                    "workspaceRoot": VO_CONFIG.get("codex", {}).get("workspaceRoot"),
+                    "mainWorkspace": VO_CONFIG.get("codex", {}).get("mainWorkspace"),
+                    "timeoutSec": VO_CONFIG.get("codex", {}).get("timeoutSec", 900),
+                    "model": VO_CONFIG.get("codex", {}).get("model"),
+                    "sandbox": VO_CONFIG.get("codex", {}).get("sandbox", "workspace-write"),
+                    "approvalPolicy": VO_CONFIG.get("codex", {}).get("approvalPolicy", "never"),
+                    "preferAppServer": VO_CONFIG.get("codex", {}).get("preferAppServer", True),
+                    "includeMain": VO_CONFIG.get("codex", {}).get("includeMain", True),
+                    "includeNativeAgents": VO_CONFIG.get("codex", {}).get("includeNativeAgents", True),
+                    "registerNativeAgents": VO_CONFIG.get("codex", {}).get("registerNativeAgents", True),
+                },
                 "license": {
                     "licensed": lic["licensed"],
                     "tier": lic["tier"],
@@ -11264,44 +11670,11 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
         profile_id = str(req.get("profileId") or "").strip()
         if not provider and not profile_id:
             return {"ok": False, "error": "provider or profileId is required"}
-        deleted = []
-
-        try:
-            with open(AUTH_PROFILES_PATH) as f:
-                ap = json.load(f)
-            if profile_id:
-                to_delete = [profile_id] if profile_id in ap.get("profiles", {}) else []
-            else:
-                candidates = [f"{provider}:default", f"{provider}:api"]
-                to_delete = [k for k in candidates if k in ap.get("profiles", {})]
-
-            for k in to_delete:
-                del ap["profiles"][k]
-                deleted.append(k)
-                if k in ap.get("usageStats", {}):
-                    del ap["usageStats"][k]
-            if ap.get("lastGood", {}).get(provider) in deleted:
-                del ap["lastGood"][provider]
-
-            with open(AUTH_PROFILES_PATH, "w") as f:
-                json.dump(ap, f, indent=2)
-        except Exception:
-            pass
-
-        # Mirror in openclaw.json
-        try:
-            with open(CONFIG_PATH) as f:
-                cfg = json.load(f)
-            for k in deleted:
-                cfg.get("auth", {}).get("profiles", {}).pop(k, None)
-            ok, err = self._write_openclaw_config(cfg)
-            if not ok:
-                return {"ok": False, "error": err}
-        except Exception:
-            pass
-
+        result = _delete_openclaw_auth_direct(provider, profile_id)
+        if not result.get("ok"):
+            return result
         self._signal_gateway(restart=False)
-        return {"ok": True, "provider": provider, "deletedProfiles": deleted}
+        return result
 
     def _handle_save_custom_provider(self, req):
         """Save a custom provider (ollama, lmstudio, etc.) to openclaw.json."""
@@ -11328,7 +11701,7 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             # OpenClaw 2026.5.x expects the native Ollama API root, not /v1.
             base_url = re.sub(r"/v1/?$", "", (base_url or "").strip())
             requested_api = requested_api or "ollama"
-            requested_api_key = requested_api_key or existing.get("apiKey") or "ollama-tailscale-local"
+            requested_api_key = requested_api_key or existing.get("apiKey")
             requested_timeout = requested_timeout or existing.get("timeoutSeconds") or 300
 
         existing["baseUrl"] = base_url
