@@ -187,6 +187,8 @@
                     <input type="text" id="s-hermes-desktop-url" placeholder="http://127.0.0.1:62353">
                     <label>Desktop TCP Host <span style="color:#666;font-size:12px">(optional Docker route)</span></label>
                     <input type="text" id="s-hermes-desktop-tcp-host" placeholder="host.docker.internal">
+                    <label>Desktop TCP Port <span style="color:#666;font-size:12px">(optional route port)</span></label>
+                    <input type="text" id="s-hermes-desktop-tcp-port" placeholder="same as Desktop URL port">
                     <label>Desktop Host Header <span style="color:#666;font-size:12px">(optional logical host)</span></label>
                     <input type="text" id="s-hermes-desktop-host-header" placeholder="127.0.0.1:62353">
                     <label>Hermes Home Directory <span style="color:#666;font-size:12px">(optional CLI fallback)</span></label>
@@ -194,6 +196,7 @@
                     <label>Hermes CLI Path <span style="color:#666;font-size:12px">(optional CLI fallback)</span></label>
                     <input type="text" id="s-hermes-bin" placeholder="hermes or /home/youruser/.local/bin/hermes">
                     <div style="font-size:12px;color:#666;margin:6px 0 12px;line-height:1.5;">For the already-open Desktop app, paste its loopback URL. In Docker, Virtual Office will route loopback Desktop URLs through <code style="color:#90caf9;">host.docker.internal</code> while keeping Hermes' expected <code style="color:#90caf9;">127.0.0.1:&lt;port&gt;</code> identity.</div>
+                    <button onclick="discoverHermesDesktop()" style="margin:0 8px 12px 0;padding:8px 16px;font-size:9px;">🔎 AUTO DISCOVER DESKTOP APP</button>
                     <button onclick="testHermesConnection()" style="margin:0 0 12px;padding:8px 16px;font-size:9px;">🔍 TEST HERMES</button>
                     <div id="hermes-test-status"></div>
                 </div>
@@ -544,6 +547,7 @@
             var hApiKey = document.getElementById('s-hermes-api-key');
             var hDesktopUrl = document.getElementById('s-hermes-desktop-url');
             var hDesktopTcpHost = document.getElementById('s-hermes-desktop-tcp-host');
+            var hDesktopTcpPort = document.getElementById('s-hermes-desktop-tcp-port');
             var hDesktopHostHeader = document.getElementById('s-hermes-desktop-host-header');
             if (hEnable) hEnable.checked = h.enabled !== false;
             if (hHome && h.homePath) hHome.value = h.homePath;
@@ -551,6 +555,7 @@
             if (hApiUrl && h.apiUrl) hApiUrl.value = h.apiUrl;
             if (hDesktopUrl && h.desktopUrl) hDesktopUrl.value = h.desktopUrl;
             if (hDesktopTcpHost && h.desktopTcpHost) hDesktopTcpHost.value = h.desktopTcpHost;
+            if (hDesktopTcpPort && h.desktopTcpPort) hDesktopTcpPort.value = h.desktopTcpPort;
             if (hDesktopHostHeader && h.desktopHostHeader) hDesktopHostHeader.value = h.desktopHostHeader;
             if (hApiKey && h.apiKeyConfigured) hApiKey.placeholder = 'Configured - leave blank to keep';
             var hFields = document.getElementById('hermes-fields');
@@ -633,7 +638,7 @@
             });
         }
 
-        function testHermesConnection() {
+        function _setupHermesPayload() {
             var enabled = document.getElementById('s-hermes-enable').checked;
             var homePath = document.getElementById('s-hermes-home').value.trim();
             var binary = document.getElementById('s-hermes-bin').value.trim();
@@ -641,21 +646,75 @@
             var apiKey = document.getElementById('s-hermes-api-key').value.trim();
             var desktopUrl = document.getElementById('s-hermes-desktop-url').value.trim();
             var desktopTcpHost = document.getElementById('s-hermes-desktop-tcp-host').value.trim();
+            var desktopTcpPort = document.getElementById('s-hermes-desktop-tcp-port').value.trim();
             var desktopHostHeader = document.getElementById('s-hermes-desktop-host-header').value.trim();
+            var hermesPayload = { enabled: enabled, homePath: homePath || null, binary: binary || null, apiUrl: apiUrl || null, desktopUrl: desktopUrl || null, desktopTcpHost: desktopTcpHost || null, desktopTcpPort: desktopTcpPort || null, desktopHostHeader: desktopHostHeader || null, preferApi: !desktopUrl, preferDesktop: !!desktopUrl };
+            if (apiKey) hermesPayload.apiKey = apiKey;
+            return { enabled: enabled, apiKey: apiKey, hermes: hermesPayload };
+        }
+
+        function discoverHermesDesktop() {
+            var statusEl = document.getElementById('hermes-test-status');
+            var payload = _setupHermesPayload();
+            if (!payload.enabled) {
+                statusEl.innerHTML = '<div class="status-box info">Hermes auto-detect is disabled.</div>';
+                return;
+            }
+            statusEl.innerHTML = '<div class="status-box info">Looking for the open Hermes Desktop app...</div>';
+            fetch('/api/hermes/desktop/discover', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload.hermes)
+            }).then(function(r) { return r.json().then(function(d){ d._httpOk = r.ok; return d; }); }).then(function(d) {
+                if (d.found) {
+                    var urlEl = document.getElementById('s-hermes-desktop-url');
+                    var headerEl = document.getElementById('s-hermes-desktop-host-header');
+                    var hostEl = document.getElementById('s-hermes-desktop-tcp-host');
+                    var portEl = document.getElementById('s-hermes-desktop-tcp-port');
+                    if (urlEl) urlEl.value = d.desktopUrl || '';
+                    if (headerEl) headerEl.value = d.desktopHostHeader || '';
+                    if (hostEl && (d.chatReady || !hostEl.value.trim())) hostEl.value = d.desktopTcpHost || '';
+                    if (portEl && (d.chatReady || !portEl.value.trim())) portEl.value = d.desktopTcpPort || '';
+                    var route = d.desktopTcpHost ? '<br><span style="color:#9bb;">Route: ' + escapeHtml(d.desktopTcpHost + (d.desktopTcpPort ? ':' + d.desktopTcpPort : '')) + '</span>' : '';
+                    var source = (d.sources || []).length ? '<br><span style="color:#9bb;">Source: ' + escapeHtml((d.sources || []).join(', ')) + '</span>' : '';
+                    if (d.chatReady) {
+                        fetch('/setup/save', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ hermes: _setupHermesPayload().hermes })
+                        }).then(function() {
+                            statusEl.innerHTML = '<div class="status-box success">✅ Hermes Desktop app discovered, saved, and connected<br>' + escapeHtml(d.desktopUrl || '') + route + source + '</div>';
+                        }).catch(function(e) {
+                            statusEl.innerHTML = '<div class="status-box error">Hermes Desktop was discovered, but saving failed: ' + escapeHtml(e.message || String(e)) + '</div>';
+                        });
+                    } else {
+                        statusEl.innerHTML = '<div class="status-box info">Hermes Desktop app was found, but Virtual Office could not reach it from this server yet.<br>' + escapeHtml(d.error || d.message || '') + route + source + '</div>';
+                    }
+                } else {
+                    statusEl.innerHTML = '<div class="status-box error">Hermes Desktop app was not found. Open Hermes Desktop, then try again.</div>';
+                }
+            }).catch(function(e) {
+                statusEl.innerHTML = '<div class="status-box error">Desktop discovery failed: ' + escapeHtml(e.message || String(e)) + '</div>';
+            });
+        }
+
+        function testHermesConnection() {
+            var payload = _setupHermesPayload();
+            var enabled = payload.enabled;
+            var hermesPayload = payload.hermes;
+            var apiKey = payload.apiKey;
             var statusEl = document.getElementById('hermes-test-status');
             if (!enabled) {
                 statusEl.innerHTML = '<div class="status-box info">Hermes auto-detect is disabled.</div>';
                 return;
             }
             statusEl.innerHTML = '<div class="status-box info">Saving and testing Hermes...</div>';
-            var hermesPayload = { enabled: enabled, homePath: homePath || null, binary: binary || null, apiUrl: apiUrl || null, desktopUrl: desktopUrl || null, desktopTcpHost: desktopTcpHost || null, desktopHostHeader: desktopHostHeader || null, preferApi: !desktopUrl, preferDesktop: !!desktopUrl };
-            if (apiKey) hermesPayload.apiKey = apiKey;
             fetch('/setup/save', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ hermes: hermesPayload })
             }).then(function() {
-                var testPayload = { homePath: homePath || null, binary: binary || null, apiUrl: apiUrl || null, desktopUrl: desktopUrl || null, desktopTcpHost: desktopTcpHost || null, desktopHostHeader: desktopHostHeader || null };
+                var testPayload = Object.assign({}, hermesPayload);
                 if (apiKey) testPayload.apiKey = apiKey;
                 return fetch('/api/hermes/test', {
                     method: 'POST',
@@ -1004,6 +1063,7 @@
                         apiUrl: document.getElementById('s-hermes-api-url').value.trim() || null,
                         desktopUrl: desktopUrl || null,
                         desktopTcpHost: document.getElementById('s-hermes-desktop-tcp-host').value.trim() || null,
+                        desktopTcpPort: document.getElementById('s-hermes-desktop-tcp-port').value.trim() || null,
                         desktopHostHeader: document.getElementById('s-hermes-desktop-host-header').value.trim() || null,
                         preferApi: !desktopUrl,
                         preferDesktop: !!desktopUrl

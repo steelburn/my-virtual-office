@@ -12689,6 +12689,7 @@ function _mmLoadCurrentSettings() {
         var hermesApiKey = document.getElementById('mm-hermes-api-key');
         var hermesDesktopUrl = document.getElementById('mm-hermes-desktop-url');
         var hermesDesktopTcpHost = document.getElementById('mm-hermes-desktop-tcp-host');
+        var hermesDesktopTcpPort = document.getElementById('mm-hermes-desktop-tcp-port');
         var hermesDesktopHostHeader = document.getElementById('mm-hermes-desktop-host-header');
         if (gwInput) gwInput.value = (cfg.openclaw || {}).gatewayUrl || '';
         if (nameInput) nameInput.value = (cfg.office || {}).name || '';
@@ -12707,6 +12708,7 @@ function _mmLoadCurrentSettings() {
         if (hermesApiUrl) hermesApiUrl.value = hermesCfg.apiUrl || '';
         if (hermesDesktopUrl) hermesDesktopUrl.value = hermesCfg.desktopUrl || '';
         if (hermesDesktopTcpHost) hermesDesktopTcpHost.value = hermesCfg.desktopTcpHost || '';
+        if (hermesDesktopTcpPort) hermesDesktopTcpPort.value = hermesCfg.desktopTcpPort || '';
         if (hermesDesktopHostHeader) hermesDesktopHostHeader.value = hermesCfg.desktopHostHeader || '';
         if (hermesApiKey && hermesCfg.apiKeyConfigured) hermesApiKey.placeholder = 'Configured - leave blank to keep';
         // Auto-populate token from /gateway-info (shows current effective token)
@@ -12779,29 +12781,83 @@ function _mmLoadCurrentSettings() {
     });
 })();
 
-function mmTestHermes() {
-    var statusEl = document.getElementById('mm-hermes-status');
+function _mmHermesPayload() {
     var enabled = !!(document.getElementById('mm-hermes-enable') || {}).checked;
     var homePath = (document.getElementById('mm-hermes-home') || {}).value || '';
     var binary = (document.getElementById('mm-hermes-bin') || {}).value || '';
     var apiUrl = (document.getElementById('mm-hermes-api-url') || {}).value || '';
     var desktopUrl = (document.getElementById('mm-hermes-desktop-url') || {}).value || '';
     var desktopTcpHost = (document.getElementById('mm-hermes-desktop-tcp-host') || {}).value || '';
+    var desktopTcpPort = (document.getElementById('mm-hermes-desktop-tcp-port') || {}).value || '';
     var desktopHostHeader = (document.getElementById('mm-hermes-desktop-host-header') || {}).value || '';
     var apiKey = ((document.getElementById('mm-hermes-api-key') || {}).value || '').trim();
+    var hermesPayload = { enabled: enabled, homePath: homePath || null, binary: binary || null, apiUrl: apiUrl || null, desktopUrl: desktopUrl || null, desktopTcpHost: desktopTcpHost || null, desktopTcpPort: desktopTcpPort || null, desktopHostHeader: desktopHostHeader || null, preferApi: !desktopUrl, preferDesktop: !!desktopUrl };
+    if (apiKey) hermesPayload.apiKey = apiKey;
+    return { enabled: enabled, apiKey: apiKey, hermes: hermesPayload };
+}
+
+function mmDiscoverHermesDesktop() {
+    var statusEl = document.getElementById('mm-hermes-status');
+    var payload = _mmHermesPayload();
+    if (!payload.enabled) {
+        statusEl.innerHTML = '<div class="mm-status info">Hermes auto-detect is disabled.</div>';
+        return;
+    }
+    statusEl.innerHTML = '<div class="mm-status info">Looking for the open Hermes Desktop app...</div>';
+    fetch('/api/hermes/desktop/discover', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload.hermes)
+    }).then(function(r) { return r.json().then(function(d){ d._httpOk = r.ok; return d; }); }).then(function(d) {
+        if (d.found) {
+            var urlEl = document.getElementById('mm-hermes-desktop-url');
+            var hostEl = document.getElementById('mm-hermes-desktop-tcp-host');
+            var portEl = document.getElementById('mm-hermes-desktop-tcp-port');
+            var headerEl = document.getElementById('mm-hermes-desktop-host-header');
+            if (urlEl) urlEl.value = d.desktopUrl || '';
+            if (headerEl) headerEl.value = d.desktopHostHeader || '';
+            if (hostEl && (d.chatReady || !hostEl.value.trim())) hostEl.value = d.desktopTcpHost || '';
+            if (portEl && (d.chatReady || !portEl.value.trim())) portEl.value = d.desktopTcpPort || '';
+            var route = d.desktopTcpHost ? '<br><span style="color:#9bb;">Route: ' + escHtml(d.desktopTcpHost + (d.desktopTcpPort ? ':' + d.desktopTcpPort : '')) + '</span>' : '';
+            var source = (d.sources || []).length ? '<br><span style="color:#9bb;">Source: ' + escHtml((d.sources || []).join(', ')) + '</span>' : '';
+            if (d.chatReady) {
+                fetch('/setup/save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ hermes: _mmHermesPayload().hermes })
+                }).then(function() {
+                    statusEl.innerHTML = '<div class="mm-status ok">✅ Hermes Desktop app discovered, saved, and connected<br>' + escHtml(d.desktopUrl || '') + route + source + '</div>';
+                }).catch(function(e) {
+                    statusEl.innerHTML = '<div class="mm-status err">Hermes Desktop was discovered, but saving failed: ' + escHtml(e.message || String(e)) + '</div>';
+                });
+            } else {
+                statusEl.innerHTML = '<div class="mm-status info">Hermes Desktop app was found, but Virtual Office could not reach it from this server yet.<br>' + escHtml(d.error || d.message || '') + route + source + '</div>';
+            }
+        } else {
+            statusEl.innerHTML = '<div class="mm-status err">Hermes Desktop app was not found. Open Hermes Desktop, then try again.</div>';
+        }
+    }).catch(function(e) {
+        statusEl.innerHTML = '<div class="mm-status err">Desktop discovery failed: ' + escHtml(e.message || String(e)) + '</div>';
+    });
+}
+
+function mmTestHermes() {
+    var statusEl = document.getElementById('mm-hermes-status');
+    var payload = _mmHermesPayload();
+    var enabled = payload.enabled;
+    var hermesPayload = payload.hermes;
+    var apiKey = payload.apiKey;
     if (!enabled) {
         statusEl.innerHTML = '<div class="mm-status info">Hermes auto-detect is disabled.</div>';
         return;
     }
     statusEl.innerHTML = '<div class="mm-status info">Saving and testing Hermes...</div>';
-    var hermesPayload = { enabled: enabled, homePath: homePath || null, binary: binary || null, apiUrl: apiUrl || null, desktopUrl: desktopUrl || null, desktopTcpHost: desktopTcpHost || null, desktopHostHeader: desktopHostHeader || null, preferApi: !desktopUrl, preferDesktop: !!desktopUrl };
-    if (apiKey) hermesPayload.apiKey = apiKey;
     fetch('/setup/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ hermes: hermesPayload })
     }).then(function() {
-        var testPayload = { homePath: homePath || null, binary: binary || null, apiUrl: apiUrl || null, desktopUrl: desktopUrl || null, desktopTcpHost: desktopTcpHost || null, desktopHostHeader: desktopHostHeader || null };
+        var testPayload = Object.assign({}, hermesPayload);
         if (apiKey) testPayload.apiKey = apiKey;
         return fetch('/api/hermes/test', {
             method: 'POST',
@@ -13011,6 +13067,7 @@ function mmSaveSettings() {
     var _hApiKey = document.getElementById('mm-hermes-api-key');
     var _hDesktopUrl = document.getElementById('mm-hermes-desktop-url');
     var _hDesktopTcpHost = document.getElementById('mm-hermes-desktop-tcp-host');
+    var _hDesktopTcpPort = document.getElementById('mm-hermes-desktop-tcp-port');
     var _hDesktopHostHeader = document.getElementById('mm-hermes-desktop-host-header');
     if (_hCb) {
         var hermesSettings = {
@@ -13020,6 +13077,7 @@ function mmSaveSettings() {
             apiUrl: (_hApiUrl ? _hApiUrl.value.trim() : '') || null,
             desktopUrl: (_hDesktopUrl ? _hDesktopUrl.value.trim() : '') || null,
             desktopTcpHost: (_hDesktopTcpHost ? _hDesktopTcpHost.value.trim() : '') || null,
+            desktopTcpPort: (_hDesktopTcpPort ? _hDesktopTcpPort.value.trim() : '') || null,
             desktopHostHeader: (_hDesktopHostHeader ? _hDesktopHostHeader.value.trim() : '') || null,
             preferApi: !((_hDesktopUrl ? _hDesktopUrl.value.trim() : '')),
             preferDesktop: !!((_hDesktopUrl ? _hDesktopUrl.value.trim() : ''))

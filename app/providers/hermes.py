@@ -3,7 +3,8 @@
 This module is intentionally isolated from the OpenClaw discovery/runtime paths.
 It talks to Hermes through public CLI surfaces only, so the product can add
 Hermes support without hardcoding one user's setup or reading private Hermes
-internals such as .env, auth.json, memories, raw logs, or state.db contents.
+internals such as .env, auth.json, memories, or state.db contents. Desktop
+auto-discovery reads only the readiness port from Hermes Desktop's public log.
 """
 
 from __future__ import annotations
@@ -12,6 +13,8 @@ import os
 import re
 import shutil
 import socket
+import selectors
+import errno
 import subprocess
 import threading
 import time
@@ -1292,6 +1295,410 @@ def discover_api_agents(
         "cliAvailable": False,
         "apiAvailable": True,
     }]
+
+
+def _expand_candidate_path(path: str | None) -> str:
+    return os.path.expandvars(os.path.expanduser(str(path or "").strip()))
+
+
+def _default_desktop_log_paths(hermes_home: str | None = None, extra_paths: list[str] | None = None) -> list[str]:
+    paths: list[str] = []
+    for item in extra_paths or []:
+        if item:
+            paths.append(_expand_candidate_path(item))
+    for env_name in ("VO_HERMES_DESKTOP_LOG_PATH", "HERMES_DESKTOP_LOG_PATH"):
+        value = os.environ.get(env_name)
+        if value:
+            paths.append(_expand_candidate_path(value))
+    if hermes_home:
+        paths.append(os.path.join(_expand_candidate_path(hermes_home), "logs", "desktop.log"))
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        paths.append(os.path.join(_expand_candidate_path(local_app_data), "hermes", "logs", "desktop.log"))
+    paths.append(os.path.expanduser("~/.hermes/logs/desktop.log"))
+
+    seen = set()
+    result = []
+    for path in paths:
+        norm = os.path.normpath(path) if path else ""
+        key = norm.lower() if os.name == "nt" else norm
+        if norm and key not in seen:
+            seen.add(key)
+            result.append(norm)
+    return result
+
+
+def _tail_text(path: str, max_bytes: int = 262_144) -> str:
+    try:
+        with open(path, "rb") as f:
+            try:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(0, size - max_bytes))
+            except OSError:
+                pass
+            return f.read(max_bytes).decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _desktop_ports_from_log(path: str) -> list[int]:
+    text = _tail_text(path)
+    if not text:
+        return []
+    matches = []
+    pattern = re.compile(
+        r"HERMES_DASHBOARD_READY\s+port=(\d{2,5})|https?://(?:127\.0\.0\.1|localhost|\[::1\]):(\d{2,5})",
+        flags=re.IGNORECASE,
+    )
+    for match in pattern.finditer(text):
+        matches.append(match.group(1) or match.group(2))
+    ports: list[int] = []
+    for item in reversed(matches):
+        try:
+            port = int(item)
+        except Exception:
+            continue
+        if 1 <= port <= 65535 and port not in ports:
+            ports.append(port)
+    return ports
+
+
+def _port_from_url_or_host(value: str | None) -> int | None:
+    value = str(value or "").strip()
+    if not value:
+        return None
+    try:
+        parsed = urllib.parse.urlparse(value if "://" in value else f"http://{value}")
+        if parsed.port:
+            return int(parsed.port)
+    except Exception:
+        pass
+    match = re.search(r":(\d{2,5})(?:/|$)", value)
+    if not match:
+        return None
+    try:
+        port = int(match.group(1))
+        return port if 1 <= port <= 65535 else None
+    except Exception:
+        return None
+
+
+def _port_range_from_env() -> list[int]:
+    """Return bounded ports for optional Desktop route probing."""
+    raw = os.environ.get("VO_HERMES_DESKTOP_DISCOVERY_PORTS", "49152-65535")
+    ports: list[int] = []
+    for item in re.split(r"[\s,]+", raw.strip()):
+        if not item:
+            continue
+        if "-" in item:
+            left, right = item.split("-", 1)
+            try:
+                start = max(1, min(65535, int(left.strip())))
+                end = max(1, min(65535, int(right.strip())))
+            except Exception:
+                continue
+            if start > end:
+                start, end = end, start
+            ports.extend(range(start, end + 1))
+        else:
+            try:
+                port = int(item)
+            except Exception:
+                continue
+            if 1 <= port <= 65535:
+                ports.append(port)
+    seen = set()
+    result = []
+    for port in ports:
+        if port not in seen:
+            seen.add(port)
+            result.append(port)
+    return result[:20000]
+
+
+def _resolve_ipv4_host(host: str) -> str:
+    host = str(host or "").strip()
+    if not host:
+        return ""
+    try:
+        socket.inet_aton(host)
+        return host
+    except OSError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, 80, family=socket.AF_INET, type=socket.SOCK_STREAM)
+        if infos:
+            return infos[0][4][0]
+    except Exception:
+        return ""
+    return ""
+
+
+def _desktop_route_host_candidates(configured_host: str | None = None) -> list[tuple[str, str]]:
+    hosts: list[tuple[str, str]] = []
+    seen = set()
+
+    def add(host: str | None, source: str) -> None:
+        clean = str(host or "").strip()
+        if not clean:
+            return
+        key = clean.lower()
+        if key not in seen:
+            seen.add(key)
+            hosts.append((clean, source))
+
+    add(configured_host, "configured-route-host")
+    for item in re.split(r"[\s,]+", os.environ.get("VO_HERMES_DESKTOP_DISCOVERY_HOSTS", "").strip()):
+        add(item, "env-route-host")
+    add(os.environ.get("VO_HERMES_DESKTOP_DOCKER_HOST"), "env-docker-host")
+    add("host.docker.internal", "docker-host")
+    add("127.0.0.1", "direct-loopback")
+    return hosts
+
+
+def _scan_open_tcp_ports(host: str, ports: list[int], timeout_sec: float = 4.0) -> list[int]:
+    """Fast bounded TCP connect scan for user-triggered local Desktop discovery."""
+    target = _resolve_ipv4_host(host)
+    if not target or not ports:
+        return []
+    selector = selectors.DefaultSelector()
+    pending: dict[int, tuple[socket.socket, int]] = {}
+    open_ports: list[int] = []
+    deadline = time.monotonic() + max(0.25, min(float(timeout_sec or 4.0), 12.0))
+    batch_size = max(16, min(int(os.environ.get("VO_HERMES_DESKTOP_DISCOVERY_BATCH", "256") or 256), 1024))
+    remaining = iter(ports)
+
+    def close_fd(fd: int) -> None:
+        item = pending.pop(fd, None)
+        if not item:
+            return
+        sock, _ = item
+        try:
+            selector.unregister(sock)
+        except Exception:
+            pass
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    try:
+        exhausted = False
+        while time.monotonic() < deadline and (pending or not exhausted):
+            while len(pending) < batch_size and time.monotonic() < deadline and not exhausted:
+                try:
+                    port = next(remaining)
+                except StopIteration:
+                    exhausted = True
+                    break
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.setblocking(False)
+                    err = sock.connect_ex((target, int(port)))
+                    if err == 0:
+                        open_ports.append(int(port))
+                        sock.close()
+                    elif err in {errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY}:
+                        selector.register(sock, selectors.EVENT_WRITE)
+                        pending[sock.fileno()] = (sock, int(port))
+                    else:
+                        sock.close()
+                except Exception:
+                    try:
+                        sock.close()  # type: ignore[name-defined]
+                    except Exception:
+                        pass
+
+            wait = max(0.0, min(0.05, deadline - time.monotonic()))
+            events = selector.select(wait)
+            if not events and len(pending) >= batch_size:
+                continue
+            for key, _ in events:
+                fd = key.fd
+                sock, port = pending.get(fd, (None, None))  # type: ignore[assignment]
+                if not sock:
+                    continue
+                try:
+                    err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                    if err == 0:
+                        open_ports.append(int(port))
+                except Exception:
+                    pass
+                close_fd(fd)
+    finally:
+        for fd in list(pending):
+            close_fd(fd)
+        try:
+            selector.close()
+        except Exception:
+            pass
+
+    seen = set()
+    result = []
+    for port in open_ports:
+        if port not in seen:
+            seen.add(port)
+            result.append(port)
+    return result
+
+
+def _loopback_listener_ports(limit: int = 12) -> list[tuple[int, str]]:
+    commands = [
+        ["ss", "-ltnp"],
+        ["ss", "-ltn"],
+        ["netstat", "-an"],
+        ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"],
+    ]
+    found: dict[int, tuple[int, str]] = {}
+    for command in commands:
+        if not shutil.which(command[0]):
+            continue
+        try:
+            proc = subprocess.run(command, capture_output=True, text=True, timeout=2)
+        except Exception:
+            continue
+        output = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line or "LISTEN" not in line.upper():
+                continue
+            if not re.search(r"(?:127\.0\.0\.1|localhost|\[::1\]|::1)", line, flags=re.IGNORECASE):
+                continue
+            ports = re.findall(r"(?:127\.0\.0\.1|localhost|\[::1\]|::1)[\].:]*(\d{2,5})", line, flags=re.IGNORECASE)
+            if not ports:
+                ports = re.findall(r"\*:(\d{2,5})", line)
+            for item in ports:
+                try:
+                    port = int(item)
+                except Exception:
+                    continue
+                if not (1 <= port <= 65535):
+                    continue
+                lower = line.lower()
+                priority = 0
+                if "hermes" in lower:
+                    priority = 3
+                elif "python" in lower:
+                    priority = 2
+                elif port >= 49152:
+                    priority = 1
+                if priority <= 0:
+                    continue
+                existing = found.get(port)
+                if not existing or priority > existing[0]:
+                    label = "hermes" if priority == 3 else ("python" if priority == 2 else "loopback")
+                    found[port] = (priority, label)
+        if found:
+            break
+    ordered = sorted(found.items(), key=lambda item: (-item[1][0], -item[0]))
+    return [(port, detail) for port, (_, detail) in ordered[:limit]]
+
+
+def discover_desktop_backend(
+    *,
+    hermes_home: str | None = None,
+    desktop_url: str | None = None,
+    desktop_token: str | None = None,
+    desktop_host_header: str | None = None,
+    desktop_tcp_host: str | None = None,
+    desktop_tcp_port: int | str | None = None,
+    desktop_log_path: str | None = None,
+    timeout_sec: int = 2,
+) -> dict[str, Any]:
+    """Find a running Hermes Desktop `hermes serve` backend when possible."""
+    port_sources: dict[int, list[str]] = {}
+
+    def add_port(port: int | None, source: str) -> None:
+        if not port or not (1 <= int(port) <= 65535):
+            return
+        port_sources.setdefault(int(port), [])
+        if source not in port_sources[int(port)]:
+            port_sources[int(port)].append(source)
+
+    for path in _default_desktop_log_paths(hermes_home, [desktop_log_path] if desktop_log_path else []):
+        for port in _desktop_ports_from_log(path)[:5]:
+            add_port(port, "log:desktop.log")
+
+    add_port(_port_from_url_or_host(desktop_url), "configured-url")
+    add_port(_port_from_url_or_host(desktop_host_header), "configured-host-header")
+    for port, detail in _loopback_listener_ports():
+        add_port(port, f"listener:{detail}")
+
+    candidates: list[dict[str, Any]] = []
+    route_seen = set()
+    for port, sources in port_sources.items():
+        logical_url = f"http://127.0.0.1:{port}"
+        host_header = f"127.0.0.1:{port}"
+        route_options: list[tuple[str, int | str | None, str]] = []
+        if desktop_tcp_host:
+            route_options.append((str(desktop_tcp_host), desktop_tcp_port or None, "configured-route"))
+            route_options.append((str(desktop_tcp_host), None, "configured-host-current-port"))
+        route_options.append(("", None, "direct-loopback"))
+
+        for tcp_host, tcp_port, route_source in route_options:
+            key = (logical_url, host_header, tcp_host or "", str(tcp_port or ""))
+            if key in route_seen:
+                continue
+            route_seen.add(key)
+            client = HermesDesktopBackendClient(
+                base_url=logical_url,
+                token=desktop_token,
+                host_header=host_header,
+                tcp_host=tcp_host,
+                tcp_port=tcp_port,
+                timeout_sec=max(1, min(int(timeout_sec or 2), 5)),
+            )
+            status = client.test(verify_ws=True)
+            candidate = {
+                "ok": bool(status.get("ok")),
+                "chatReady": bool(status.get("chatReady")),
+                "desktopUrl": logical_url,
+                "desktopHostHeader": host_header,
+                "desktopTcpHost": status.get("tcpHost") or tcp_host or "",
+                "desktopTcpPort": status.get("tcpPort") or tcp_port or "",
+                "logicalUrl": status.get("logicalUrl") or logical_url,
+                "connectUrl": status.get("connectUrl") or "",
+                "websocketOk": bool(status.get("websocketOk")),
+                "authRequired": bool(status.get("authRequired")),
+                "version": status.get("version") or "",
+                "error": status.get("error") or "",
+                "sources": sources + [route_source],
+            }
+            candidates.append(candidate)
+
+    candidates.sort(key=lambda item: (
+        not item.get("chatReady"),
+        not item.get("ok"),
+        "log:" not in " ".join(item.get("sources") or []),
+        item.get("error") or "",
+    ))
+    best = candidates[0] if candidates else {}
+    discovered = any(
+        item.get("chatReady") or any(str(source).startswith("log:") for source in (item.get("sources") or []))
+        for item in candidates
+    )
+    result = {
+        "ok": bool(best.get("chatReady")),
+        "found": bool(discovered),
+        "desktopUrl": best.get("desktopUrl") or "",
+        "desktopHostHeader": best.get("desktopHostHeader") or "",
+        "desktopTcpHost": best.get("desktopTcpHost") or "",
+        "desktopTcpPort": best.get("desktopTcpPort") or "",
+        "logicalUrl": best.get("logicalUrl") or "",
+        "connectUrl": best.get("connectUrl") or "",
+        "chatReady": bool(best.get("chatReady")),
+        "websocketOk": bool(best.get("websocketOk")),
+        "authRequired": bool(best.get("authRequired")),
+        "version": best.get("version") or "",
+        "sources": best.get("sources") or [],
+        "candidates": candidates[:12],
+    }
+    if not candidates or not discovered:
+        result["error"] = "No Hermes Desktop backend was found. Open Hermes Desktop, then try discovery again."
+    elif not best.get("chatReady"):
+        result["error"] = best.get("error") or "Hermes Desktop was found, but the backend was not reachable from this server."
+    return result
 
 
 def discover_desktop_agents(

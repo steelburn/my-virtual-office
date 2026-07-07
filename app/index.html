@@ -58,6 +58,8 @@
                                 <input type="text" id="mm-hermes-desktop-url" class="mm-input" placeholder="http://127.0.0.1:62353">
                                 <label class="mm-label">Desktop TCP Host <span style="color:#666;font-size:9px">optional Docker route</span></label>
                                 <input type="text" id="mm-hermes-desktop-tcp-host" class="mm-input" placeholder="host.docker.internal">
+                                <label class="mm-label">Desktop TCP Port <span style="color:#666;font-size:9px">optional route port</span></label>
+                                <input type="text" id="mm-hermes-desktop-tcp-port" class="mm-input" placeholder="same as Desktop URL port">
                                 <label class="mm-label">Desktop Host Header <span style="color:#666;font-size:9px">optional logical host</span></label>
                                 <input type="text" id="mm-hermes-desktop-host-header" class="mm-input" placeholder="127.0.0.1:62353">
                                 <label class="mm-label">Hermes Home <span style="color:#666;font-size:9px">optional CLI fallback</span></label>
@@ -65,6 +67,7 @@
                                 <label class="mm-label">Hermes CLI <span style="color:#666;font-size:9px">optional CLI fallback</span></label>
                                 <input type="text" id="mm-hermes-bin" class="mm-input" placeholder="hermes or /home/user/.local/bin/hermes">
                                 <div style="font-size:9px;color:#666;margin:4px 0 8px;">For the already-open Desktop app, paste its loopback URL. In Docker, Virtual Office will route loopback Desktop URLs through <code>host.docker.internal</code> while keeping Hermes' expected <code>127.0.0.1:&lt;port&gt;</code> identity.</div>
+                                <button class="mm-btn" onclick="mmDiscoverHermesDesktop()">🔎 Auto Discover Desktop App</button>
                                 <button class="mm-btn mm-btn-primary" onclick="mmTestHermes()">🔍 Test Hermes</button>
                                 <div id="mm-hermes-status"></div>
                             </div>

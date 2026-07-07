@@ -286,6 +286,7 @@ def _load_vo_config():
             "desktopHostHeader": _env_or("VO_HERMES_DESKTOP_HOST_HEADER", hermes_cfg.get("desktopHostHeader", "")),
             "desktopTcpHost": _env_or("VO_HERMES_DESKTOP_TCP_HOST", hermes_cfg.get("desktopTcpHost", "")),
             "desktopTcpPort": _env_or("VO_HERMES_DESKTOP_TCP_PORT", hermes_cfg.get("desktopTcpPort", "")),
+            "desktopLogPath": _env_or("VO_HERMES_DESKTOP_LOG_PATH", hermes_cfg.get("desktopLogPath", "")),
             "preferApi": str(_env_or("VO_HERMES_PREFER_API", hermes_cfg.get("preferApi", True))).lower() not in ("0", "false", "no", "off"),
             "preferDesktop": str(_env_or("VO_HERMES_PREFER_DESKTOP", hermes_cfg.get("preferDesktop", True))).lower() not in ("0", "false", "no", "off"),
             "autoStartProfileApis": str(_env_or("VO_HERMES_AUTO_START_PROFILE_APIS", hermes_cfg.get("autoStartProfileApis", True))).lower() not in ("0", "false", "no", "off"),
@@ -2101,7 +2102,7 @@ def _delete_openclaw_auth(provider, profile_id="", agent_id=None, sync_all=False
 from discovery import discover_all_agents, discover_hermes_agents, get_agent_workspace_dir, get_agent_session_id
 from providers.codex import CodexProvider
 from providers.claude_code import ClaudeCodeProvider
-from providers.hermes import HermesApiClient, HermesDesktopBackendClient, HermesProvider
+from providers.hermes import HermesApiClient, HermesDesktopBackendClient, HermesProvider, discover_desktop_backend
 from license import get_license_status, activate_license, deactivate_license, check_feature, get_agent_limit
 from project_store import MarkdownProjectStore
 
@@ -6640,6 +6641,29 @@ def _test_hermes_desktop(desktop_url=None, desktop_token=None, desktop_host_head
         timeout_sec=min(int(VO_CONFIG.get("hermes", {}).get("timeoutSec") or 600), 10),
     )
     return client.test(verify_ws=True)
+
+
+def _handle_hermes_desktop_discover(body=None):
+    """Auto-discover the optional Hermes Desktop Backend connection point."""
+    body = body or {}
+    hermes_cfg = VO_CONFIG.get("hermes", {})
+    result = discover_desktop_backend(
+        hermes_home=body.get("homePath") or hermes_cfg.get("homePath"),
+        desktop_url=body.get("desktopUrl") or hermes_cfg.get("desktopUrl"),
+        desktop_token=body.get("desktopToken") or hermes_cfg.get("desktopToken") or "",
+        desktop_host_header=body.get("desktopHostHeader") or hermes_cfg.get("desktopHostHeader") or "",
+        desktop_tcp_host=body.get("desktopTcpHost") or hermes_cfg.get("desktopTcpHost") or "",
+        desktop_tcp_port=body.get("desktopTcpPort") or hermes_cfg.get("desktopTcpPort") or "",
+        desktop_log_path=body.get("desktopLogPath") or hermes_cfg.get("desktopLogPath") or "",
+        timeout_sec=min(int(hermes_cfg.get("timeoutSec") or 600), 3),
+    )
+    if result.get("ok"):
+        result["message"] = "Hermes Desktop Backend discovered and connected."
+    elif result.get("found"):
+        result["message"] = "Hermes Desktop Backend was found, but the route is not reachable from this server yet."
+    else:
+        result["message"] = result.get("error") or "Hermes Desktop Backend was not found."
+    return result
 
 
 def _handle_hermes_test(body=None):
@@ -12778,6 +12802,7 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
                     "desktopHostHeader": VO_CONFIG.get("hermes", {}).get("desktopHostHeader"),
                     "desktopTcpHost": VO_CONFIG.get("hermes", {}).get("desktopTcpHost"),
                     "desktopTcpPort": VO_CONFIG.get("hermes", {}).get("desktopTcpPort"),
+                    "desktopLogPath": VO_CONFIG.get("hermes", {}).get("desktopLogPath"),
                     "preferApi": VO_CONFIG.get("hermes", {}).get("preferApi", True),
                     "preferDesktop": VO_CONFIG.get("hermes", {}).get("preferDesktop", True),
                     "detected": bool(_handle_hermes_test().get("ok")),
@@ -14064,6 +14089,8 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
                             hermes_body.pop("desktopTcpHost", None)
                         if not hermes_body.get("desktopTcpPort") and existing[key].get("desktopTcpPort"):
                             hermes_body.pop("desktopTcpPort", None)
+                        if not hermes_body.get("desktopLogPath") and existing[key].get("desktopLogPath"):
+                            hermes_body.pop("desktopLogPath", None)
                         existing[key].update(hermes_body)
                         continue
                     if isinstance(body[key], dict) and isinstance(existing.get(key), dict):
@@ -14449,6 +14476,16 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             body = json.loads(self.rfile.read(length)) if length else {}
             result = _handle_hermes_test(body)
             self.send_response(200 if result.get("ok") else 503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode())
+            return
+        elif self.path == "/api/hermes/desktop/discover":
+            length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            result = _handle_hermes_desktop_discover(body)
+            self.send_response(200 if result.get("found") else 404)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
