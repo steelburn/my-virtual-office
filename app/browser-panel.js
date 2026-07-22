@@ -207,6 +207,9 @@
   // ─── Dragging ─────────────────────────────────────────────────────────────
   let dragActive = false;
   let dragOffsetX = 0, dragOffsetY = 0;
+  let dragPanelW = 0;
+  let dragMoveFrame = 0;
+  let pendingDragPoint = null;
 
   browserDragHandle.addEventListener('mousedown', (e) => {
     // Don't start drag if clicking a button
@@ -216,28 +219,39 @@
     const rect = browserPanel.getBoundingClientRect();
     dragOffsetX = e.clientX - rect.left;
     dragOffsetY = e.clientY - rect.top;
+    dragPanelW = rect.width;
     document.body.style.userSelect = 'none';
     e.preventDefault();
   });
 
-  document.addEventListener('mousemove', (e) => {
-    if (!dragActive) return;
-    let newX = e.clientX - dragOffsetX;
-    let newY = e.clientY - dragOffsetY;
+  function flushBrowserDrag() {
+    dragMoveFrame = 0;
+    if (!dragActive || !pendingDragPoint) return;
+    let newX = pendingDragPoint.clientX - dragOffsetX;
+    let newY = pendingDragPoint.clientY - dragOffsetY;
 
     // Clamp to viewport — keep at least 60px of header on-screen
-    const panelW = browserPanel.offsetWidth;
-    const panelH = browserPanel.offsetHeight;
-    newX = Math.max(-(panelW - 80), Math.min(window.innerWidth - 80, newX));
+    newX = Math.max(-(dragPanelW - 80), Math.min(window.innerWidth - 80, newX));
     newY = Math.max(0, Math.min(window.innerHeight - 40, newY));
 
     browserPanel.style.left = newX + 'px';
     browserPanel.style.top  = newY + 'px';
+  }
+
+  document.addEventListener('mousemove', (e) => {
+    if (!dragActive) return;
+    pendingDragPoint = { clientX: e.clientX, clientY: e.clientY };
+    if (!dragMoveFrame) dragMoveFrame = requestAnimationFrame(flushBrowserDrag);
   });
 
   document.addEventListener('mouseup', () => {
     if (dragActive) {
+      if (dragMoveFrame) {
+        cancelAnimationFrame(dragMoveFrame);
+        flushBrowserDrag();
+      }
       dragActive = false;
+      pendingDragPoint = null;
       document.body.style.userSelect = '';
       // Snap to nearest quadrant on drag release
       if (!isMaximized) {
@@ -251,6 +265,8 @@
   let resizeDir = null;
   let resizeStartX = 0, resizeStartY = 0;
   let resizeStartRect = null;
+  let resizeMoveFrame = 0;
+  let pendingResizePoint = null;
   const MIN_W = 400, MIN_H = 200;
 
   browserPanel.addEventListener('mousedown', (e) => {
@@ -271,10 +287,11 @@
     browserFrame.style.pointerEvents = 'none'; // prevent iframe stealing mouse
   });
 
-  document.addEventListener('mousemove', (e) => {
-    if (!resizeDir) return;
-    const dx = e.clientX - resizeStartX;
-    const dy = e.clientY - resizeStartY;
+  function flushBrowserResize() {
+    resizeMoveFrame = 0;
+    if (!resizeDir || !pendingResizePoint) return;
+    const dx = pendingResizePoint.clientX - resizeStartX;
+    const dy = pendingResizePoint.clientY - resizeStartY;
     let { left, top, width, height } = resizeStartRect;
 
     if (resizeDir.includes('e')) width = Math.max(MIN_W, width + dx);
@@ -286,11 +303,22 @@
     browserPanel.style.top = top + 'px';
     browserPanel.style.width = width + 'px';
     browserPanel.style.height = height + 'px';
+  }
+
+  document.addEventListener('mousemove', (e) => {
+    if (!resizeDir) return;
+    pendingResizePoint = { clientX: e.clientX, clientY: e.clientY };
+    if (!resizeMoveFrame) resizeMoveFrame = requestAnimationFrame(flushBrowserResize);
   });
 
   document.addEventListener('mouseup', () => {
     if (resizeDir) {
+      if (resizeMoveFrame) {
+        cancelAnimationFrame(resizeMoveFrame);
+        flushBrowserResize();
+      }
       resizeDir = null;
+      pendingResizePoint = null;
       document.body.style.userSelect = '';
       if (!userHasControl) browserFrame.style.pointerEvents = 'none';
       else browserFrame.style.pointerEvents = 'auto';

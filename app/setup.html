@@ -173,21 +173,14 @@
             <div style="border-top:1px solid #333;padding-top:16px;margin-top:18px;">
                 <div style="font-size:13px;color:#ffd700;font-weight:bold;margin-bottom:8px;">⚕️ Hermes Agents</div>
                 <label style="display:flex;align-items:center;gap:8px;margin-top:8px;">
-                    <input type="checkbox" id="s-hermes-enable" checked> Auto-detect local Hermes Agents
+                    <input type="checkbox" id="s-hermes-enable" checked> Show native Hermes agents
                 </label>
                 <div style="font-size:13px;color:#999;margin:6px 0 10px;line-height:1.5;">
-                    Virtual Office can also discover Hermes Agent profiles and show them beside OpenClaw agents. It uses the Hermes CLI/status surfaces and does not read Hermes secrets or private memory files.
+                    Add one authenticated API connection per native Hermes profile. Hermes remains the runtime and Virtual Office only connects to it.
                 </div>
                 <div id="hermes-fields" style="margin-top:10px;">
-                    <label>Hermes Home Directory</label>
-                    <input type="text" id="s-hermes-home" placeholder="/home/youruser/.hermes">
-                    <label>Hermes CLI Path</label>
-                    <input type="text" id="s-hermes-bin" placeholder="/home/youruser/.local/bin/hermes">
-                    <label>Hermes API URL</label>
-                    <input type="text" id="s-hermes-api-url" placeholder="http://127.0.0.1:8642">
-                    <label>Hermes API Key</label>
-                    <input type="password" id="s-hermes-api-key" placeholder="API_SERVER_KEY">
-                    <div style="font-size:12px;color:#666;margin:6px 0 12px;line-height:1.5;">Running in Docker? Mount the Hermes home/CLI into the container and enter the mounted paths. Native live presence uses the Hermes API Server when available, with CLI fallback.</div>
+                    <div id="s-hermes-connections"></div>
+                    <button type="button" onclick="setupAddHermesConnection()" style="margin:0 8px 12px 0;padding:8px 16px;font-size:9px;">＋ ADD CONNECTION</button>
                     <button onclick="testHermesConnection()" style="margin:0 0 12px;padding:8px 16px;font-size:9px;">🔍 TEST HERMES</button>
                     <div id="hermes-test-status"></div>
                 </div>
@@ -532,15 +525,8 @@
         fetch('/vo-config').then(function(r) { return r.json(); }).then(function(cfg) {
             var h = cfg.hermes || {};
             var hEnable = document.getElementById('s-hermes-enable');
-            var hHome = document.getElementById('s-hermes-home');
-            var hBin = document.getElementById('s-hermes-bin');
-            var hApiUrl = document.getElementById('s-hermes-api-url');
-            var hApiKey = document.getElementById('s-hermes-api-key');
             if (hEnable) hEnable.checked = h.enabled !== false;
-            if (hHome && h.homePath) hHome.value = h.homePath;
-            if (hBin && h.binary) hBin.value = h.binary;
-            if (hApiUrl && h.apiUrl) hApiUrl.value = h.apiUrl;
-            if (hApiKey && h.apiKeyConfigured) hApiKey.placeholder = 'Configured - leave blank to keep';
+            setupRenderHermesConnections(h.connections || []);
             var hFields = document.getElementById('hermes-fields');
             if (hFields && hEnable) hFields.style.display = hEnable.checked ? 'block' : 'none';
             var c = cfg.codex || {};
@@ -621,48 +607,79 @@
             });
         }
 
-        function testHermesConnection() {
+        function setupAddHermesConnection(connection) {
+            var container = document.getElementById('s-hermes-connections');
+            if (!container) return;
+            connection = connection || {};
+            var row = document.createElement('div');
+            row.className = 's-hermes-connection';
+            row.style.cssText = 'border:1px solid #333;padding:10px;margin:0 0 10px;border-radius:4px;';
+            row.innerHTML = '<label>Connection ID</label><input class="hermes-connection-id" value="' + escapeHtml(connection.id || '') + '" placeholder="aster">' +
+                '<label>Display Name</label><input class="hermes-connection-name" value="' + escapeHtml(connection.name || '') + '" placeholder="Aster">' +
+                '<label>Native Gateway URL</label><input class="hermes-connection-url" value="' + escapeHtml(connection.apiUrl || '') + '" placeholder="http://host.docker.internal:8642">' +
+                '<label>API Server Key</label><input type="password" class="hermes-connection-key" placeholder="' + (connection.apiKeyConfigured ? 'Configured - leave blank to keep' : 'API_SERVER_KEY') + '">' +
+                '<button type="button" onclick="this.parentNode.remove()" style="padding:6px 12px;font-size:9px;">REMOVE</button>';
+            container.appendChild(row);
+        }
+
+        function setupRenderHermesConnections(connections) {
+            var container = document.getElementById('s-hermes-connections');
+            if (!container) return;
+            container.innerHTML = '';
+            (connections || []).forEach(setupAddHermesConnection);
+            if (!(connections || []).length) setupAddHermesConnection({ id: 'default', name: 'Hermes' });
+        }
+
+        function _setupHermesPayload() {
             var enabled = document.getElementById('s-hermes-enable').checked;
-            var homePath = document.getElementById('s-hermes-home').value.trim();
-            var binary = document.getElementById('s-hermes-bin').value.trim();
-            var apiUrl = document.getElementById('s-hermes-api-url').value.trim();
-            var apiKey = document.getElementById('s-hermes-api-key').value.trim();
+            var connections = [];
+            document.querySelectorAll('#s-hermes-connections .s-hermes-connection').forEach(function(row, index) {
+                var id = (row.querySelector('.hermes-connection-id').value || '').trim() || ('connection-' + (index + 1));
+                var name = (row.querySelector('.hermes-connection-name').value || '').trim();
+                var apiUrl = (row.querySelector('.hermes-connection-url').value || '').trim();
+                var apiKey = (row.querySelector('.hermes-connection-key').value || '').trim();
+                if (!apiUrl) return;
+                var item = { id: id, name: name, apiUrl: apiUrl, enabled: true };
+                if (apiKey) item.apiKey = apiKey;
+                connections.push(item);
+            });
+            return { enabled: enabled, hermes: { enabled: enabled, connections: connections } };
+        }
+
+        function testHermesConnection() {
+            var payload = _setupHermesPayload();
             var statusEl = document.getElementById('hermes-test-status');
-            if (!enabled) {
-                statusEl.innerHTML = '<div class="status-box info">Hermes auto-detect is disabled.</div>';
+            if (!payload.enabled) {
+                statusEl.innerHTML = '<div class="status-box info">Hermes is disabled.</div>';
                 return;
             }
-            statusEl.innerHTML = '<div class="status-box info">Saving and testing Hermes...</div>';
-            var hermesPayload = { enabled: enabled, homePath: homePath || null, binary: binary || null, apiUrl: apiUrl || null, preferApi: true };
-            if (apiKey) hermesPayload.apiKey = apiKey;
+            if (!payload.hermes.connections.length) {
+                statusEl.innerHTML = '<div class="status-box error">Add at least one gateway URL.</div>';
+                return;
+            }
+            statusEl.innerHTML = '<div class="status-box info">Saving and testing native gateways...</div>';
             fetch('/setup/save', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ hermes: hermesPayload })
+                body: JSON.stringify({ hermes: payload.hermes })
             }).then(function() {
                 return fetch('/api/hermes/test', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ homePath: homePath || null, binary: binary || null })
+                    body: JSON.stringify(payload.hermes)
                 });
             }).then(function(r) { return r.json(); }).then(function(d) {
-                if (d.ok) {
-                    var agents = d.agents || [];
-                    var api = d.api || {};
-                    var html = '<div class="status-box success">✅ Hermes connected — found ' + agents.length + ' profile' + (agents.length === 1 ? '' : 's') + '<br>Native API: ' + (api.ok ? 'connected' : 'unavailable') + '</div>';
-                    if (agents.length) {
-                        html += '<div class="agent-list-preview">';
-                        agents.slice(0, 10).forEach(function(a) {
-                            html += '<div class="agent-row"><span class="emoji">' + escapeHtml(a.emoji || '⚕️') + '</span><span class="name">' + escapeHtml(a.name) + '</span><span class="role">' + escapeHtml(a.model || a.providerAgentId || 'Hermes') + '</span></div>';
-                        });
-                        html += '</div>';
-                    }
-                    statusEl.innerHTML = html;
-                } else {
-                    statusEl.innerHTML = '<div class="status-box error">❌ Hermes not reachable: ' + escapeHtml(d.error || 'unknown error') + '</div>';
-                }
+                var lines = (d.connections || []).map(function(c) {
+                    return (c.ok ? '✅ ' : '❌ ') + escapeHtml(c.name || c.id || 'Hermes') +
+                        (c.model ? ' · ' + escapeHtml(c.model) : '') + '<br><span style="color:#9bb;">' + escapeHtml(c.url || '') + '</span>' +
+                        (!c.ok && c.error ? '<br>' + escapeHtml(c.error) : '');
+                }).join('<br>');
+                var count = (d.agents || []).length;
+                statusEl.innerHTML = '<div class="status-box ' + (d.ok ? 'success' : 'error') + '">' +
+                    (d.ok ? 'Native Hermes connected — ' + count + ' agent' + (count === 1 ? '' : 's') : 'Hermes connection failed') +
+                    (lines ? '<br>' + lines : '') + '</div>';
             }).catch(function(e) {
-                statusEl.innerHTML = '<div class="status-box error">Error: ' + escapeHtml(e.message) + '</div>';
+                statusEl.innerHTML = '<div class="status-box error">Error: ' + escapeHtml(e.message || String(e)) + '</div>';
             });
         }
 
@@ -963,18 +980,7 @@
                 pcMetrics: pcMetricsEnabled ? {
                     url: document.getElementById('s-pcmetrics-url').value.trim() || null
                 } : {},
-                hermes: (function() {
-                    var h = {
-                        enabled: hermesEnabled,
-                        homePath: document.getElementById('s-hermes-home').value.trim() || null,
-                        binary: document.getElementById('s-hermes-bin').value.trim() || null,
-                        apiUrl: document.getElementById('s-hermes-api-url').value.trim() || null,
-                        preferApi: true
-                    };
-                    var apiKey = document.getElementById('s-hermes-api-key').value.trim();
-                    if (apiKey) h.apiKey = apiKey;
-                    return h;
-                })(),
+                hermes: _setupHermesPayload().hermes,
                 codex: codexPayloadFromSetup(),
                 claudeCode: claudeCodePayloadFromSetup(),
                 _setupComplete: true

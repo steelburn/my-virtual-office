@@ -3,8 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#070b13">
 <title>Cron Manager — Virtual Office</title>
 <script>fetch('/vo-config').then(r=>r.json()).then(d=>{if(d.office&&d.office.name)document.title='Cron Manager — '+d.office.name;}).catch(()=>{});</script>
+<script>try{document.documentElement.dataset.uiTheme=localStorage.getItem('vo-ui-theme')==='light'?'light':'dark';let p=localStorage.getItem('vo-ui-preset')||'classic';document.documentElement.dataset.uiPreset=/^(classic|retro|cyberpunk|gameboy|custom)$/.test(p)?p:'classic'}catch(e){document.documentElement.dataset.uiTheme='dark';document.documentElement.dataset.uiPreset='classic'}</script>
 <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -106,17 +108,20 @@ a:hover { text-decoration: underline; }
 .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--dim); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.6s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 </style>
+  <link rel="stylesheet" href="ui-standalone.css?v=20260722-3">
+    <link rel="stylesheet" href="ui-themes.css?v=20260722-12">
 </head>
-<body>
+<body class="ui-standalone cron-page">
 
 <div class="header">
   <a href="/" class="back">← Office</a>
   <h1>⏰ CRON MANAGER</h1>
   <span id="ws-status" class="status connecting">Connecting...</span>
+  <button type="button" class="ui-theme-toggle" data-ui-theme-toggle>☀️ Light</button>
 </div>
 
 <div class="toolbar">
-  <button onclick="openCreateModal()">+ New Job</button>
+  <button onclick="openCreateModal()">➕ New Job</button>
   <button onclick="loadJobs()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border)">↻ Refresh</button>
   <div class="filter">
     <label style="font-size:12px;color:var(--dim)">Agent:</label>
@@ -283,6 +288,7 @@ a:hover { text-decoration: underline; }
 
 <script>
 let GATEWAY_TOKEN = '';
+let GATEWAY_PROTOCOL_VERSION = 4;
 let AGENTS = [];
 let _cronWsPort = 0; // 0 = not yet loaded
 
@@ -293,6 +299,7 @@ let _cronWsPort = 0; // 0 = not yet loaded
     const info = await infoRes.json();
     if (info.token) GATEWAY_TOKEN = info.token;
     if (info.wsPort) _cronWsPort = info.wsPort;
+    if (info.gatewayProtocol) GATEWAY_PROTOCOL_VERSION = Number(info.gatewayProtocol) || 4;
   } catch(e) {
     console.warn('Failed to fetch /gateway-info:', e);
   }
@@ -386,7 +393,7 @@ function sendConnect() {
   ws.send(JSON.stringify({
     type:'req', id, method:'connect',
     params: {
-      minProtocol:4, maxProtocol:4,
+      minProtocol:GATEWAY_PROTOCOL_VERSION, maxProtocol:GATEWAY_PROTOCOL_VERSION,
       client:{id:'openclaw-control-ui',version:'2026.5.27',platform:'web',mode:'webchat'},
       role:'operator', scopes:['operator.read','operator.write','operator.admin'],
       caps:[], commands:[], permissions:{},
@@ -796,5 +803,7 @@ try {
 initAgentDropdowns();
 // connectGateway() is called after /gateway-info loads (see async IIFE above)
 </script>
+  <script src="ui-standalone.js?v=20260721-2"></script>
+  <script src="ui-themes.js?v=20260722-5"></script>
 </body>
 </html>

@@ -1,125 +1,85 @@
 # Hermes Provider Adapter
 
-Status: native run streaming implementation
+Status: external native-gateway integration
 
-## Goal
+## Architecture
 
-Add Hermes Agent support without turning My Virtual Office into a pile of platform-specific conditionals.
+Hermes is the agent runtime. Virtual Office is an authenticated client:
 
-OpenClaw remains on the existing, proven code path. Hermes support starts as a separate provider adapter that can later become the template for other agent platforms.
+```text
+Virtual Office → Hermes HTTP/SSE API → native Hermes profile gateway → native tools and sessions
+```
 
-## Current adapter
+Each Hermes profile owns its gateway process and API port in the environment
+where Hermes is installed. Virtual Office does not start Hermes, run the Hermes
+CLI, mount the Hermes home directory, create/delete profiles, or change Hermes
+models and credentials.
 
-Path: `app/providers/hermes.py`
+This follows Hermes' documented API-server and profile model: the API server is
+the real agent runtime, and tool calls execute on the machine that hosts it.
 
-The adapter exposes:
+## Configuration
 
-- `discover_agents()` — returns Hermes profiles as normalized office agents
-- `test()` — checks the configured Hermes CLI/home and returns detected profiles
-- `send_message(profile, message)` — sends a one-shot Hermes message through the public CLI and returns stdout
-- `send_chat_message(profile, message, session_id)` — CLI chat fallback for installs without the native API server
-- `HermesApiClient` — talks to Hermes' native API server for runs, SSE events, approvals, and stops
-- `create_agent(name, role, model, emoji, profile)` — creates a Hermes profile for a Virtual Office agent
-- `delete_agent(profile)` — deletes a Hermes profile through the public CLI
+Add one connection per native Hermes profile in Settings:
 
-It uses safe public Hermes surfaces only:
+```json
+{
+  "hermes": {
+    "enabled": true,
+    "timeoutSec": 600,
+    "connections": [
+      {
+        "id": "research",
+        "name": "Research",
+        "apiUrl": "http://host.docker.internal:8642",
+        "apiKey": "server-key"
+      }
+    ]
+  }
+}
+```
 
-- `hermes profile list`
-- `hermes profile show <profile>`
-- `hermes profile create <profile> --clone --clone-from default --no-alias --description <role>`
-- `hermes profile delete <profile> --yes`
-- `hermes -z <message>`
-- `hermes --profile <profile> -z <message>` for named profiles
+The equivalent environment setting is `VO_HERMES_CONNECTIONS_JSON`. The older
+single `VO_HERMES_API_URL` and `VO_HERMES_API_KEY` values are accepted only as a
+configuration-migration bridge.
+
+Connection IDs are Virtual Office routing identifiers. The native profile and
+model shown in the UI are discovered from `/v1/capabilities` and `/v1/models`.
+API keys remain server-side.
+
+## Supported Hermes API surfaces
+
+- `GET /health`
+- `GET /v1/capabilities`
+- `GET /v1/models`
 - `POST /v1/runs`
 - `GET /v1/runs/{run_id}/events`
 - `POST /v1/runs/{run_id}/approval`
 - `POST /v1/runs/{run_id}/stop`
+- `GET /api/sessions`
+- `GET /api/sessions/{session_id}`
+- `GET /api/sessions/{session_id}/messages`
+- `DELETE /api/sessions/{session_id}`
 
-## Native streaming
+## Virtual Office endpoints
 
-The chat UI uses Hermes' native run flow when `preferApi` is enabled and the API server is available:
+- `POST /api/hermes/test` tests every configured native connection.
+- `POST /api/hermes/runs` starts a run on the selected connection.
+- `GET /api/hermes/runs/{run_id}/events` proxies the native SSE stream.
+- `POST /api/hermes/runs/{run_id}/stop` interrupts the native run.
+- Hermes chat-session endpoints use Hermes' session REST API.
+- Agent create/delete and Hermes model/auth mutation endpoints return `405` and
+  explain that those operations belong in Hermes.
 
-1. `POST /api/hermes/runs` validates the selected office agent, starts a Hermes run through `POST /v1/runs`, stores only the run metadata needed by Virtual Office, and returns `runId`.
-2. The browser opens `EventSource("/api/hermes/runs/{runId}/events")`.
-3. The server proxies Hermes' native SSE lifecycle events to the browser while keeping the Hermes API key server-side.
-4. The browser renders `message.delta`, `tool.started`, `tool.completed`, `tool.failed`, `approval.request`, and terminal run events directly.
-5. History is saved for reloads and transcript views, but `/api/hermes/history` is not the live transport for native API runs.
+## Failure behavior
 
-If the native API server is unavailable, `/api/hermes/chat` remains as a CLI compatibility fallback.
+An unavailable native gateway produces a clear connection error. There is no
+Desktop, CLI, or container-local fallback, because any such fallback would move
+tool execution into the wrong environment and create a second Hermes runtime.
 
-## Configuration
+## References
 
-Hermes integration is product-neutral and configured through `vo-config.json` or environment variables:
-
-- `VO_HERMES_HOME` / `hermes.homePath`
-- `VO_HERMES_BIN` / `hermes.binary`
-- `VO_HERMES_API_URL` / `hermes.apiUrl`
-- `VO_HERMES_API_KEY` / `hermes.apiKey`
-- `VO_HERMES_PREFER_API` / `hermes.preferApi`
-- `VO_HERMES_AUTO_START_PROFILE_APIS` / `hermes.autoStartProfileApis`
-- `VO_HERMES_AUTO_START_DEFAULT_API` / `hermes.autoStartDefaultApi`
-- `VO_HERMES_API_PROFILE_PORT_BASE` / `hermes.apiProfilePortBase`
-- `hermes.apiProfiles.<profile>` for profile-specific API URL/key/auto-start overrides
-
-Virtual Office only auto-starts local Hermes API servers for local URLs such as `127.0.0.1` or `localhost`, and only when an API key is configured. Remote/user-managed API URLs are detected and used, not overwritten.
-
-It does **not** read or expose:
-
-- `.env`
-- `auth.json`
-- raw config
-- raw memories
-- raw logs
-- raw SQLite DB contents
-
-## Normalized Hermes agent shape
-
-Example:
-
-```json
-{
-  "id": "hermes-default",
-  "statusKey": "hermes-default",
-  "providerKind": "hermes",
-  "providerType": "runtime",
-  "providerAgentId": "default",
-  "profile": "default",
-  "name": "Hermes",
-  "emoji": "⚕️",
-  "role": "Hermes Agent",
-  "model": "gpt-5.5",
-  "provider": "openai-codex",
-  "capabilities": ["chat", "status", "sessions"]
-}
-```
-
-## Server integration
-
-`app/server.py` only routes Hermes-specific behavior to the Hermes adapter:
-
-- `/api/hermes/test`
-- `/api/hermes/chat`
-- `/api/hermes/history`
-- `/api/hermes/history/clear`
-- `/api/agent/create` with `platform: "hermes"`
-- `/api/agent/delete` for `hermes-<profile>` agents
-
-OpenClaw discovery, chat, model info, skills, transcripts, and gateway paths are intentionally kept unchanged for now.
-
-## Future provider shape
-
-A future generic provider interface should look roughly like:
-
-```python
-class AgentProvider:
-    provider_kind: str
-    provider_type: str
-
-    def discover_agents(self) -> list[dict]: ...
-    def test(self) -> dict: ...
-    def send_message(self, native_agent_id: str, message: str, **opts) -> dict: ...
-    def get_history(self, native_agent_id: str, **opts) -> dict: ...
-    def get_status(self, native_agent_id: str, **opts) -> dict: ...
-```
-
-For now, only Hermes is implemented this way to avoid breaking existing OpenClaw behavior.
+- https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server
+- https://hermes-agent.nousresearch.com/docs/user-guide/profiles
+- https://hermes-agent.nousresearch.com/docs/user-guide/configuration
+- https://hermes-agent.nousresearch.com/docs/developer-guide/gateway-internals

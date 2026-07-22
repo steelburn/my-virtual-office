@@ -7,6 +7,7 @@
   let pendingCallbacks = {};
   let _chatWsPort = 8091;
   let GATEWAY_CLIENT_VERSION = 'unknown';
+  let GATEWAY_PROTOCOL_VERSION = 4;
   let _modelBarInterval = null;
   let _sessionsListCache = { at: 0, promise: null, payload: null };
   const runOwners = new Map();
@@ -60,6 +61,22 @@
     }
   }
 
+  function formatSessionTimestamp(value) {
+    if (value === null || value === undefined || value === '') return '';
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed || trimmed.toLowerCase() === 'undefined' || trimmed.toLowerCase() === 'null') return '';
+      const parsed = new Date(trimmed);
+      if (Number.isNaN(parsed.getTime())) return trimmed.length > 28 ? trimmed.slice(0, 28) : trimmed;
+      return parsed.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    }
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) return '';
+    const date = new Date(numeric > 1e12 ? numeric : numeric * 1000);
+    if (Number.isNaN(date.getTime())) return '';
+    return date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+
   class ChatWindow {
     constructor(root, options = {}) {
       this.root = root;
@@ -86,6 +103,9 @@
       this.hermesHistoryPollTimer = null;
       this.hermesEventSource = null;
       this.hermesCompletedToolKeys = new Set();
+      this.liveThinkingEl = null;
+      this.liveThinkingPre = null;
+      this.liveThinkingRunId = '';
       this.codexHistoryPollTimer = null;
       this.codexEventSource = null;
       this.codexCompletedToolKeys = new Set();
@@ -103,6 +123,12 @@
       this.isRecording = false;
       this.mediaRecorder = null;
       this.audioChunks = [];
+      this.sessionsRefreshSeq = 0;
+      this.sessionsRefreshTimer = null;
+      this.sessionsPanelOpen = false;
+      this.currentSessions = [];
+      this.historyRefreshSeq = 0;
+      this.historyDirty = true;
 
       this.messages = root.querySelector('.chat-messages');
       this.status = root.querySelector('.chat-status');
@@ -118,6 +144,10 @@
       this.micBtn = root.querySelector('.chat-mic-btn');
       this.newSessionBtn = root.querySelector('.chat-new-session');
       this.closeBtn = root.querySelector('.chat-close, .chat-secondary-close');
+      this.sessionsToggleBtn = root.querySelector('.chat-sessions-toggle');
+      this.sessionsPanel = root.querySelector('.chat-sessions-panel');
+      this.sessionsListEl = root.querySelector('.chat-sessions-list');
+      this.sessionsNewBtn = root.querySelector('.chat-sessions-new');
 
       this.messages.addEventListener('click', (e) => {
         if (e.target.classList.contains('chat-image-clickable') || e.target.classList.contains('chat-image-thumb')) {
@@ -146,6 +176,20 @@
       this.fileInput?.addEventListener('change', () => this.handleFiles());
       this.micBtn?.addEventListener('click', () => this.toggleRecording());
       this.newSessionBtn?.addEventListener('click', () => this.newSession());
+      this.sessionsToggleBtn?.addEventListener('click', () => this.toggleSessionsPanel());
+      this.sessionsNewBtn?.addEventListener('click', () => this.createSessionFromPanel());
+      this.sessionsListEl?.addEventListener('click', (e) => {
+        const item = e.target.closest('.chat-session-item');
+        if (!item || !this.sessionsListEl.contains(item)) return;
+        const session = this.currentSessions.find((candidate) => String(candidate.id) === item.dataset.sessionId);
+        if (!session) return;
+        if (e.target.closest('.chat-session-delete')) {
+          e.stopPropagation();
+          this.deleteSessionFromPanel(session);
+          return;
+        }
+        this.switchToSession(session);
+      });
       this.closeBtn?.addEventListener('click', () => {
         if (this.isPrimary) {
           const chatPanel = document.getElementById('chat-panel');
@@ -163,7 +207,8 @@
           chatBtn.classList.remove('active');
           if (exteriorTabs) exteriorTabs.classList.remove('visible');
           closeAllSecondaryPanels();
-          _chatExitMoveMode();
+          this.suspendWhenHidden();
+          _chatCancelDrag();
         } else if (this.slot) {
           _secExitMoveMode(this.slot);
           setSecondaryPanelOpen(this.slot, false);
@@ -176,6 +221,52 @@
       this.root.addEventListener('focusin', () => {
         if (!this.isPrimary && this.slot) setActiveSecondarySlot(this.slot);
       });
+    }
+
+    markHistoryDirty() {
+      this.historyDirty = true;
+    }
+
+    suspendWhenHidden() {
+      this.historyDirty = true;
+      this.historyRefreshSeq += 1;
+      this.toggleSessionsPanel(false);
+      if (this.streamRenderTimer) { clearTimeout(this.streamRenderTimer); this.streamRenderTimer = null; }
+      if (this.toolFlushTimer) { clearTimeout(this.toolFlushTimer); this.toolFlushTimer = null; }
+      if (this.scrollFrame) { cancelAnimationFrame(this.scrollFrame); this.scrollFrame = null; }
+      this.stopRecoveryWatchdog();
+      this.stopHermesProgressTimers();
+      this.stopHermesHistoryPolling();
+      this.stopCodexHistoryPolling();
+      this.stopClaudeCodeHistoryPolling();
+      this.stopHermesApprovalPolling();
+      this.stopCodexApprovalPolling();
+      this.closeHermesEventSource();
+      this.closeCodexEventSource();
+      this.closeClaudeCodeEventSource();
+      this.streamingMsg = null;
+      this.pendingStreamContent = '';
+      this.pendingToolEvents.clear();
+      this.liveToolCards.clear();
+      this.currentRunId = null;
+      this.liveThinkingEl = null;
+      this.liveThinkingPre = null;
+      this.liveThinkingRunId = '';
+      this.removeTypingIndicator();
+      this.messages?.replaceChildren();
+      this.sessionsListEl?.replaceChildren();
+      this.currentSessions = [];
+      for (const [runId, owner] of runOwners.entries()) {
+        if (owner?.slotId === this.slotId) runOwners.delete(runId);
+      }
+    }
+
+    resumeWhenVisible() {
+      if (!this.isVisibleForPolling()) return;
+      if (connected || this.isHermesSelected() || this.isCodexSelected() || this.isClaudeCodeSelected()) {
+        this.loadHistory();
+        this.fetchSessionInfo();
+      }
     }
 
     resetConversation(systemText) {
@@ -293,7 +384,7 @@
           this.hasExplicitAgentSelection = true;
           this.saveSelection();
         }
-        if (connected || this.isHermesSelected() || this.isCodexSelected() || this.isClaudeCodeSelected()) this.fetchSessionInfo();
+        if (this.isVisibleForPolling() && (connected || this.isHermesSelected() || this.isCodexSelected() || this.isClaudeCodeSelected())) this.fetchSessionInfo();
         return;
       }
       this.selectedAgentKey = newAgentKey;
@@ -304,12 +395,13 @@
       this.streamingMsg = null;
       this.syncAgentSelect();
       this.resetConversation(`${systemPrefix} ${opt.textContent.trim()}`);
+      if (this.sessionsPanelOpen) this.refreshSessionsList({ showLoading: true });
       const isHermes = this.isHermesSelected();
       const isCodex = this.isCodexSelected();
       const isClaudeCode = this.isClaudeCodeSelected();
-      if (isHermes) this.startHermesApprovalPolling();
+      if (isHermes && this.isVisibleForPolling()) this.startHermesApprovalPolling();
       else this.stopHermesApprovalPolling();
-      if (isCodex) this.startCodexApprovalPolling();
+      if (isCodex && this.isVisibleForPolling()) this.startCodexApprovalPolling();
       else this.stopCodexApprovalPolling();
       if (connected || isHermes || isCodex || isClaudeCode) {
         this.loadHistory();
@@ -346,6 +438,7 @@
           this.agentSelect.appendChild(group);
         }
         this.syncAgentSelect();
+        if (this.sessionsPanelOpen) this.refreshSessionsList({ showLoading: true });
         if (connected || this.isHermesSelected() || this.isCodexSelected() || this.isClaudeCodeSelected()) this.fetchSessionInfo();
       } catch (e) {
         console.warn('[chat] Failed to load agent list:', e);
@@ -353,7 +446,7 @@
     }
 
     isVisibleForPolling() {
-      return this.isPrimary ? this.root.classList.contains('open') : this.root.classList.contains('open');
+      return this.root.classList.contains('open');
     }
 
     async fetchContextUsage() {
@@ -395,6 +488,10 @@
 
     isClaudeCodeSelected() {
       return this.getSelectedProviderKind() === 'claude-code' || String(this.sessionKey || '').startsWith('claude-code:');
+    }
+
+    isProviderAgentSelected() {
+      return this.getSelectedProviderKind() !== 'openclaw' || this.isHermesSelected() || this.isCodexSelected() || this.isClaudeCodeSelected();
     }
 
     startHermesApprovalPolling() {
@@ -507,6 +604,7 @@
     }
 
     async fetchSessionInfo() {
+      if (!this.isVisibleForPolling()) return;
       let gatewayContext = 0;
       try {
         // Targeted lookup avoids rebuilding the full sessions.list index.
@@ -541,6 +639,12 @@
     }
 
     async loadHistory(opts = {}) {
+      if (!this.isVisibleForPolling()) {
+        this.markHistoryDirty();
+        return;
+      }
+      const historyRefreshSeq = ++this.historyRefreshSeq;
+      const historyRequestIsStale = () => historyRefreshSeq !== this.historyRefreshSeq || !this.isVisibleForPolling();
       try {
         if (this.isHermesSelected() || this.isCodexSelected() || this.isClaudeCodeSelected()) {
           const isHermes = this.isHermesSelected();
@@ -552,9 +656,13 @@
           if (isCodex) this.startCodexApprovalPolling();
           const res = await fetch('/api/' + providerPath + '/history?agentId=' + encodeURIComponent(this.getSelectedAgentId() || this.selectedAgentKey));
           const data = await res.json();
+          if (historyRequestIsStale()) { this.markHistoryDirty(); return; }
           if (data.ok && Array.isArray(data.messages)) {
             this.applySessionMetrics(data);
             this.messages.innerHTML = '';
+            this.liveThinkingEl = null;
+            this.liveThinkingPre = null;
+            this.liveThinkingRunId = '';
             for (const msg of data.messages) {
               if (msg.text || msg.thinking || msg.approval || (Array.isArray(msg.tools) && msg.tools.length)) {
                 const meta = msg.role === 'assistant'
@@ -573,16 +681,21 @@
               }
             }
             this.scrollBottomAfterLayout();
+            this.historyDirty = false;
           }
           if (isHermes) await this.pollHermesApproval().catch(() => {});
           if (isCodex) await this.pollCodexApproval().catch(() => {});
           return;
         }
         const res = await rpc('chat.history', { sessionKey: this.sessionKey, limit: 500 });
+        if (historyRequestIsStale()) { this.markHistoryDirty(); return; }
         if (res.ok && res.payload?.messages) {
           const messages = res.payload.messages;
           const seenToolKeys = new Set();
           this.messages.innerHTML = '';
+          this.liveThinkingEl = null;
+          this.liveThinkingPre = null;
+          this.liveThinkingRunId = '';
           for (const msg of messages) {
             const t = extractText(msg) || (typeof msg.content === 'string' ? msg.content : '');
             const ts = msg.timestamp || msg.ts || msg.message?.timestamp || null;
@@ -592,6 +705,7 @@
             if (t || media.length || tools.length) this.appendMessage(msg.role, t, ts, media, resolveMessageSender(msg, this), tools);
           }
           await this.loadRecoveredActivity(seenToolKeys);
+          if (historyRequestIsStale()) { this.markHistoryDirty(); return; }
           const lastMeaningful = [...messages].reverse().find(m => {
             const t = extractText(m) || (typeof m.content === 'string' ? m.content : '');
             return t || extractToolItems(m).length;
@@ -608,20 +722,23 @@
             this.stopRecoveryWatchdog();
           }
           this.scrollBottomAfterLayout();
+          this.historyDirty = false;
         }
       } catch (e) {
-        console.warn('Failed to load history:', e);
+        if (!historyRequestIsStale()) console.warn('Failed to load history:', e);
       }
     }
 
     async loadRecoveredActivity(seenToolKeys = new Set()) {
+      if (!this.isVisibleForPolling()) return;
       try {
         const url = '/api/session-activity?sessionKey=' + encodeURIComponent(this.sessionKey) + '&limit=80';
         const res = await fetch(url);
         if (!res.ok) return;
         const data = await res.json();
-        if (!data.ok || !Array.isArray(data.messages)) return;
+        if (!this.isVisibleForPolling() || !data.ok || !Array.isArray(data.messages)) return;
         for (const msg of data.messages) {
+          if (!this.isVisibleForPolling()) return;
           const tools = normalizeHistoricalTools(msg.tools || []).filter((tool) => {
             const key = toolHistoryKey(tool);
             if (seenToolKeys.has(key)) return false;
@@ -640,38 +757,221 @@
     async newSession() {
       const agentName = this.agentSelect.selectedOptions[0]?.textContent.trim() || 'this agent';
       if (!confirm(`Start a new session for ${agentName}? This clears the conversation history.`)) return;
-      if (this.isHermesSelected() || this.isCodexSelected() || this.isClaudeCodeSelected()) {
-        const providerName = this.isClaudeCodeSelected() ? 'Claude Code' : (this.isCodexSelected() ? 'Codex' : 'Hermes');
-        const providerPath = this.isClaudeCodeSelected() ? 'claude-code' : (this.isCodexSelected() ? 'codex' : 'hermes');
-        try {
-          const res = await fetch('/api/' + providerPath + '/history/clear', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ agentId: this.getSelectedAgentId() || this.selectedAgentKey })
-          });
-          const data = await res.json();
-          if (!data.ok) throw new Error(data.error || 'clear failed');
-          this.resetConversation('New ' + providerName + ' session started');
-          await this.fetchSessionInfo();
-        } catch (e) {
-          this.appendSystem('Reset error: ' + e.message);
-        }
-        return;
-      }
-      if (!connected) { this.appendSystem('Not connected'); return; }
       try {
-        const res = await rpc('sessions.reset', { key: this.sessionKey });
-        if (res.ok) {
-          this.messages.innerHTML = '';
-          this.streamingMsg = null;
-          this.currentRunId = null;
-          this.liveToolCards.clear();
-          this.appendSystem('New session started');
-        } else {
-          this.appendSystem('Reset failed: ' + JSON.stringify(res.error || res));
-        }
+        await this.createSessionFromPanel({ skipConfirm: true });
       } catch (e) {
         this.appendSystem('Reset error: ' + e.message);
+      }
+    }
+
+    // ── Sessions panel (hamburger) ────────────────────────────────────────
+    toggleSessionsPanel(force) {
+      const next = typeof force === 'boolean' ? force : !this.sessionsPanelOpen;
+      this.sessionsPanelOpen = next;
+      this.sessionsPanel?.classList.toggle('open', next);
+      this.sessionsToggleBtn?.classList.toggle('active', next);
+      if (next) {
+        this.refreshSessionsList();
+        if (!this.sessionsRefreshTimer) {
+          this.sessionsRefreshTimer = setInterval(() => {
+            if (this.sessionsPanelOpen) this.refreshSessionsList();
+          }, 15000);
+        }
+      } else if (this.sessionsRefreshTimer) {
+        clearInterval(this.sessionsRefreshTimer);
+        this.sessionsRefreshTimer = null;
+      }
+    }
+
+    async refreshSessionsList({ showLoading = false } = {}) {
+      if (!this.sessionsListEl) return;
+      const agentId = this.getSelectedAgentId() || this.selectedAgentKey;
+      if (!agentId) return;
+      const requestSeq = ++this.sessionsRefreshSeq;
+      const requestAgentId = String(agentId);
+      if (showLoading) {
+        this.currentSessions = [];
+        this.sessionsListEl.innerHTML = '';
+        const div = document.createElement('div');
+        div.className = 'chat-sessions-empty';
+        div.textContent = 'Loading sessions...';
+        this.sessionsListEl.appendChild(div);
+      }
+      let data = null;
+      try {
+        const res = await fetch('/api/chat-sessions?agentId=' + encodeURIComponent(agentId) + '&limit=40');
+        data = await res.json();
+      } catch (e) {
+        if (requestSeq !== this.sessionsRefreshSeq) return;
+        this.sessionsListEl.innerHTML = '<div class="chat-sessions-empty">Sessions unavailable</div>';
+        return;
+      }
+      const currentAgentId = String(this.getSelectedAgentId() || this.selectedAgentKey || '');
+      if (requestSeq !== this.sessionsRefreshSeq || requestAgentId !== currentAgentId) return;
+      if (!data?.ok || !Array.isArray(data.sessions)) {
+        const err = (data && data.error) ? String(data.error) : 'Sessions unavailable';
+        this.sessionsListEl.innerHTML = '';
+        const div = document.createElement('div');
+        div.className = 'chat-sessions-empty';
+        div.textContent = err.slice(0, 200);
+        this.sessionsListEl.appendChild(div);
+        return;
+      }
+      this.currentSessions = data.sessions;
+      this.renderSessionsList(data);
+    }
+
+    activeSessionIdForPanel() {
+      if (this.getSelectedProviderKind() === 'openclaw' && !this.isProviderAgentSelected()) return this.sessionKey;
+      const active = this.currentSessions.find(s => s.active);
+      return active ? active.id : '';
+    }
+
+    renderSessionsList(data) {
+      const listEl = this.sessionsListEl;
+      if (!listEl) return;
+      if (!this.currentSessions.length) {
+        const empty = document.createElement('div');
+        empty.className = 'chat-sessions-empty';
+        empty.textContent = 'No sessions yet';
+        listEl.replaceChildren(empty);
+        return;
+      }
+      const selectedId = this.activeSessionIdForPanel();
+      const existingItems = new Map(
+        [...listEl.querySelectorAll('.chat-session-item[data-session-id]')]
+          .map((item) => [item.dataset.sessionId, item])
+      );
+      const orderedItems = [];
+      for (const session of this.currentSessions) {
+        const sessionId = String(session.id);
+        const item = existingItems.get(sessionId) || document.createElement('div');
+        item.className = 'chat-session-item';
+        item.dataset.sessionId = sessionId;
+        if (session.id === selectedId || (session.active && data.providerKind !== 'openclaw')) item.classList.add('selected');
+        const renderKey = JSON.stringify([
+          session.title || session.id,
+          session.preview || '',
+          !!session.liveMode,
+          !!session.active,
+          session.updatedAt || '',
+          !!session.deletable
+        ]);
+        if (item._chatSessionRenderKey !== renderKey) {
+          item._chatSessionRenderKey = renderKey;
+          const content = [];
+          const title = document.createElement('div');
+          title.className = 'cs-title';
+          title.textContent = session.title || session.id;
+          content.push(title);
+
+          if (session.preview) {
+            const preview = document.createElement('div');
+            preview.className = 'cs-preview';
+            preview.textContent = session.preview;
+            content.push(preview);
+          }
+
+          const meta = document.createElement('div');
+          meta.className = 'cs-meta';
+          if (session.liveMode) {
+            const live = document.createElement('span');
+            live.className = 'cs-live-badge';
+            live.textContent = session.active ? 'LIVE' : 'Live Mode';
+            meta.appendChild(live);
+          }
+          if (session.updatedAt) {
+            const when = document.createElement('span');
+            when.textContent = formatSessionTimestamp(session.updatedAt);
+            meta.appendChild(when);
+          }
+          if (meta.childNodes.length) content.push(meta);
+
+          if (session.deletable) {
+            const del = document.createElement('button');
+            del.className = 'chat-session-delete';
+            del.title = 'Delete session';
+            del.textContent = '\u{1F5D1}';
+            content.push(del);
+          }
+          item.replaceChildren(...content);
+        }
+        orderedItems.push(item);
+      }
+      listEl.replaceChildren(...orderedItems);
+    }
+
+    async switchToSession(session) {
+      const agentId = this.getSelectedAgentId() || this.selectedAgentKey;
+      try {
+        if (this.getSelectedProviderKind() === 'openclaw' && !this.isProviderAgentSelected()) {
+          if (session.sessionKey && session.sessionKey !== this.sessionKey) {
+            this.sessionKey = session.sessionKey;
+            saveChatSelection(this.slotId, { selectedAgentKey: this.selectedAgentKey, sessionKey: this.sessionKey });
+            this.resetConversation('Switched to session: ' + (session.title || session.sessionKey));
+            await this.loadHistory();
+            this.fetchSessionInfo();
+          }
+          this.refreshSessionsList();
+          return;
+        }
+        const res = await fetch('/api/chat-sessions/switch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agentId, sessionId: session.id })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || res.statusText);
+        this.resetConversation('Switched to session: ' + (session.title || session.id));
+        await this.loadHistory();
+        this.fetchSessionInfo();
+        this.refreshSessionsList();
+      } catch (e) {
+        this.appendSystem('Session switch failed: ' + e.message);
+      }
+    }
+
+    async createSessionFromPanel({ skipConfirm = false } = {}) {
+      const agentId = this.getSelectedAgentId() || this.selectedAgentKey;
+      const agentName = this.agentSelect?.selectedOptions?.[0]?.textContent.trim() || agentId;
+      if (!skipConfirm && !confirm(`Start a new session for ${agentName}?`)) return;
+      try {
+        const body = { agentId };
+        if (this.getSelectedProviderKind() === 'openclaw' && !this.isProviderAgentSelected()) body.sessionKey = this.sessionKey;
+        const res = await fetch('/api/chat-sessions/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || res.statusText);
+        this.resetConversation('New session started');
+        await this.loadHistory();
+        this.fetchSessionInfo();
+        this.refreshSessionsList();
+      } catch (e) {
+        this.appendSystem('New session failed: ' + e.message);
+      }
+    }
+
+    async deleteSessionFromPanel(session) {
+      const agentId = this.getSelectedAgentId() || this.selectedAgentKey;
+      if (!confirm(`Delete session "${session.title || session.id}"?`)) return;
+      try {
+        const res = await fetch('/api/chat-sessions/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agentId, sessionId: session.id })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || res.statusText);
+        if (session.sessionKey === this.sessionKey || session.active) {
+          this.resetConversation('Session deleted');
+          await this.loadHistory();
+        }
+        this.refreshSessionsList();
+      } catch (e) {
+        this.appendSystem('Delete failed: ' + e.message);
       }
     }
 
@@ -1563,6 +1863,7 @@
       }
 
       if (eventName === 'reasoning.available') {
+        this.updateLiveThinking(runId, data.thinking || data.text || '');
         this.updateTypingIndicator('Hermes is reasoning...');
         return;
       }
@@ -2096,7 +2397,10 @@
           this.updateToolCall(payload);
         }
       });
-      if (progress.thinking) this.updateTypingIndicator('Hermes is reasoning...');
+      if (progress.thinking) {
+        this.updateLiveThinking(runId, progress.thinking);
+        this.updateTypingIndicator('Hermes is reasoning...');
+      }
     }
 
     async recoverHermesFinalFromHistory(startedAt, timeoutMs = 45000) {
@@ -2326,6 +2630,33 @@
       }
     }
 
+    updateLiveThinking(runId, text) {
+      const cleaned = String(text || '').trim();
+      if (!cleaned) return;
+      const shouldStick = this.isNearBottom();
+      const key = runId || this.currentRunId || 'hermes';
+      if (!this.liveThinkingEl || this.liveThinkingRunId !== key || !this.liveThinkingEl.isConnected) {
+        const wrap = document.createElement('div');
+        wrap.className = 'chat-msg assistant chat-thinking-live';
+        wrap.dataset.runId = key;
+        const bubble = document.createElement('div');
+        bubble.className = 'chat-bubble';
+        const card = renderThinkingCard(cleaned);
+        card.open = true;
+        bubble.appendChild(card);
+        wrap.appendChild(bubble);
+        const ind = this.messages.querySelector('.typing-indicator');
+        if (ind) this.messages.insertBefore(wrap, ind);
+        else this.messages.appendChild(wrap);
+        this.liveThinkingEl = wrap;
+        this.liveThinkingPre = card.querySelector('.chat-thinking-body pre');
+        this.liveThinkingRunId = key;
+      } else if (this.liveThinkingPre) {
+        this.liveThinkingPre.textContent = cleaned;
+      }
+      this.scrollBottom(shouldStick);
+    }
+
     appendActivity(text) {
       const shouldStick = this.isNearBottom();
       const existing = this.messages.querySelectorAll('.chat-activity');
@@ -2362,9 +2693,6 @@
       badge.className = 'chat-secondary-badge';
       badge.textContent = `W${slotNum}`;
       header.insertBefore(badge, headerBtns);
-      // Remove the move button — secondary panels are always tiled, not movable
-      const existingMoveBtn = headerBtns.querySelector('.chat-move-btn');
-      if (existingMoveBtn) existingMoveBtn.remove();
     }
     const closeBtn = panel.querySelector('.chat-close');
     if (closeBtn) {
@@ -2404,9 +2732,6 @@
     const GAP = CHAT_STACK_GAP;
     const MIN_W = 160;
 
-    const mainRect = mainPanel.getBoundingClientRect();
-    const mainLeft = mainRect.left;
-
     // Collect open secondary panels in order (1, 2, 3)
     const openSecondaries = [];
     [1, 2, 3].forEach((slotNum) => {
@@ -2415,6 +2740,9 @@
     });
 
     if (openSecondaries.length === 0) return;
+
+    const mainRect = mainPanel.getBoundingClientRect();
+    const mainLeft = mainRect.left;
 
     // Available space to the left of the main panel
     const availableLeft = mainLeft - GAP;
@@ -2458,7 +2786,7 @@
     mainPanel.style.bottom = '';
     mainPanel.style.height = '500px';
     mainPanel.style.transform = '';
-    if (chatMoveBtn) chatMoveBtn.classList.remove('active');
+    _chatCancelDrag();
 
     // Count open panels (main + open secondaries)
     const openSecondaries = [];
@@ -2557,10 +2885,7 @@
     if (shouldOpen) {
       panel.dataset.hiddenByUser = 'false';
       windowInstance?.scrollBottom();
-      if (connected || windowInstance?.isHermesSelected?.() || windowInstance?.isCodexSelected?.()) {
-        windowInstance?.loadHistory();
-        windowInstance?.fetchSessionInfo();
-      }
+      windowInstance?.resumeWhenVisible();
       windowInstance?.input?.focus();
     } else {
       panel.dataset.hiddenByUser = 'true';
@@ -2569,6 +2894,7 @@
         windowInstance.streamingMsg = null;
       }
       windowInstance?.removeTypingIndicator();
+      windowInstance?.suspendWhenHidden();
     }
     syncSecondaryChatControls();
   }
@@ -2608,10 +2934,23 @@
     _modelBarInterval = setInterval(() => {
       if (!connected) return;
       chatWindows.forEach(w => {
+        if (!w.isVisibleForPolling()) return;
         if (w.isHermesSelected?.() || w.isCodexSelected?.()) w.fetchSessionInfo();
         else w.fetchContextUsage();
       });
     }, 60000);
+  }
+
+  function setGatewayDisconnectedStatus(windowInstance, message) {
+    if (windowInstance?.isHermesSelected?.()) {
+      if (windowInstance.currentRunId || windowInstance.hermesEventSource) {
+        windowInstance.setStatus('Hermes stream active...', 'connecting');
+      } else {
+        windowInstance.setStatus('Hermes ready', 'connected');
+      }
+      return;
+    }
+    windowInstance.setStatus(message, 'disconnected');
   }
 
   function connectGateway() {
@@ -2632,10 +2971,10 @@
     ws.onclose = (evt) => {
       connected = false;
       ws = null;
-      chatWindows.forEach(w => w.setStatus(`Disconnected (${evt.code})`, 'disconnected'));
+      chatWindows.forEach(w => setGatewayDisconnectedStatus(w, `Disconnected (${evt.code})`));
       if (chatWindows.some(w => w.root.classList.contains('open') || w.currentRunId || w.streamingMsg)) setTimeout(connectGateway, 3000);
     };
-    ws.onerror = () => chatWindows.forEach(w => w.setStatus('Connection error', 'disconnected'));
+    ws.onerror = () => chatWindows.forEach(w => setGatewayDisconnectedStatus(w, 'Connection error'));
   }
 
   function sendConnect() {
@@ -2643,7 +2982,7 @@
     const msg = {
       type: 'req', id, method: 'connect',
       params: {
-        minProtocol: 4, maxProtocol: 4,
+        minProtocol: GATEWAY_PROTOCOL_VERSION, maxProtocol: GATEWAY_PROTOCOL_VERSION,
         client: { id: 'openclaw-control-ui', version: GATEWAY_CLIENT_VERSION || 'unknown', platform: 'web', mode: 'webchat' },
         role: 'operator', scopes: ['operator.read', 'operator.write', 'operator.admin'], caps: ['tool-events'], commands: [], permissions: {},
         auth: { token: GATEWAY_TOKEN }, locale: 'en-US', userAgent: 'virtual-office-chat/1.0'
@@ -2697,9 +3036,14 @@
 
   function handleEvent(msg) {
     const { event, payload } = msg;
-    if (event === 'chat') chatWindows.forEach(w => w.handleChatEvent(payload));
-    if (event === 'agent') chatWindows.forEach(w => w.handleAgentEvent(payload));
-    if (event === 'session.message') chatWindows.forEach(w => w.handleSessionMessageEvent(payload));
+    const matchingWindows = chatWindows.filter(w => w.ownsPayload(payload));
+    const visibleWindows = matchingWindows.filter(w => w.isVisibleForPolling());
+    matchingWindows.forEach(w => {
+      if (!w.isVisibleForPolling()) w.markHistoryDirty();
+    });
+    if (event === 'chat') visibleWindows.forEach(w => w.handleChatEvent(payload));
+    if (event === 'agent') visibleWindows.forEach(w => w.handleAgentEvent(payload));
+    if (event === 'session.message') visibleWindows.forEach(w => w.handleSessionMessageEvent(payload));
   }
 
   function agentLabelFromId(agentId) {
@@ -3424,17 +3768,20 @@
     if (exteriorTabs) exteriorTabs.classList.toggle('visible', shouldOpen);
     if (shouldOpen) {
       requestAnimationFrame(_positionExteriorTabs);
+      // The panel opens with a transform transition, so the first geometry
+      // read still sees it off-screen. Re-anchor the tabs once that finishes.
+      setTimeout(() => {
+        if (primaryWindow.root.classList.contains('open')) _positionExteriorTabs();
+      }, 320);
     }
     if (shouldOpen && !ws) connectGateway();
     if (shouldOpen) {
       primaryWindow.input.focus();
       primaryWindow.scrollBottom();
-      if (connected || primaryWindow.isHermesSelected() || primaryWindow.isCodexSelected()) {
-        primaryWindow.loadHistory();
-        primaryWindow.fetchSessionInfo();
-      }
+      primaryWindow.resumeWhenVisible();
     } else {
       closeAllSecondaryPanels();
+      primaryWindow.suspendWhenHidden();
     }
   }
 
@@ -3460,16 +3807,20 @@
     if (d.wsPort) _chatWsPort = d.wsPort;
     if (d.token) GATEWAY_TOKEN = d.token;
     if (d.openclawVersion) GATEWAY_CLIENT_VERSION = d.openclawVersion;
+    if (d.gatewayProtocol) GATEWAY_PROTOCOL_VERSION = Number(d.gatewayProtocol) || 4;
   }).catch(() => {});
 
-  // --- MOVE / SNAP SYSTEM (primary window only) ---
+  // --- DIRECT TITLE-BAR MOVE / SNAP SYSTEM (primary window only) ---
   const chatPanel = primaryWindow.root;
-  const chatMoveBtn = document.getElementById('chat-move');
-  let _chatMoveMode = false;
+  let _chatDragPending = false;
   let _chatDragging = false;
   let _chatDragStartX = 0, _chatDragStartY = 0;
   let _chatOrigLeft = 0, _chatOrigTop = 0;
+  let _chatOrigWidth = 0, _chatOrigHeight = 0;
   let _chatSnapZoneL = null, _chatSnapZoneR = null;
+  let _chatDragMoveFrame = 0;
+  let _chatDragPointer = null;
+  let _chatDragSidebarWidth = 0;
 
   function _chatCreateSnapZones() {
     if (_chatSnapZoneL) return;
@@ -3486,24 +3837,34 @@
     if (!sb || sb.classList.contains('collapsed')) return (edge ? edge.offsetWidth : 20);
     return sb.offsetWidth + (edge ? edge.offsetWidth : 20);
   }
-  function _chatEnterMoveMode() {
-    _chatMoveMode = true; chatMoveBtn.classList.add('active'); chatPanel.classList.add('move-active');
-    // Exit move mode for all secondary windows
-    [1, 2, 3].forEach((sn) => _secExitMoveMode(sn));
-    var rect = chatPanel.getBoundingClientRect();
-    chatPanel.classList.remove('snap-left', 'snap-right'); chatPanel.classList.add('floating');
-    chatPanel.style.left = rect.left + 'px'; chatPanel.style.top = rect.top + 'px';
-    chatPanel.style.right = 'auto'; chatPanel.style.bottom = 'auto'; chatPanel.style.width = rect.width + 'px'; chatPanel.style.height = rect.height + 'px';
-  }
-  function _chatExitMoveMode() {
-    _chatMoveMode = false; _chatDragging = false;
-    if (chatMoveBtn) chatMoveBtn.classList.remove('active');
-    chatPanel.classList.remove('floating', 'dragging', 'move-active');
-    chatPanel.style.removeProperty('transform');
+  function _chatCancelDrag() {
+    if (_chatDragMoveFrame) cancelAnimationFrame(_chatDragMoveFrame);
+    _chatDragMoveFrame = 0;
+    _chatDragPointer = null;
+    _chatDragPending = false;
+    _chatDragging = false;
+    chatPanel.classList.remove('dragging');
     _chatRemoveSnapZones();
-    if (!chatPanel.classList.contains('snap-left') && !chatPanel.classList.contains('snap-right')) {
-      chatPanel.style.left = ''; chatPanel.style.top = ''; chatPanel.style.right = ''; chatPanel.style.bottom = ''; chatPanel.style.width = ''; chatPanel.style.height = '';
-    }
+    document.body.style.userSelect = '';
+    document.body.style.webkitUserSelect = '';
+    document.body.style.cursor = '';
+  }
+  function _chatBeginDrag() {
+    _chatDragPending = false;
+    _chatDragging = true;
+    chatPanel.classList.remove('snap-left', 'snap-right', 'move-active');
+    chatPanel.classList.add('floating', 'dragging');
+    chatPanel.style.left = _chatOrigLeft + 'px';
+    chatPanel.style.top = _chatOrigTop + 'px';
+    chatPanel.style.right = 'auto';
+    chatPanel.style.bottom = 'auto';
+    chatPanel.style.width = _chatOrigWidth + 'px';
+    chatPanel.style.height = _chatOrigHeight + 'px';
+    _chatDragSidebarWidth = _getSidebarWidth();
+    _chatCreateSnapZones();
+    document.body.style.userSelect = 'none';
+    document.body.style.webkitUserSelect = 'none';
+    document.body.style.cursor = 'grabbing';
   }
   function _chatSnapTo(side) {
     chatPanel.classList.remove('floating', 'dragging', 'move-active');
@@ -3513,9 +3874,7 @@
     chatPanel.style.top = wRect.top + 'px'; chatPanel.style.height = wRect.height + 'px';
     if (side === 'left') { chatPanel.classList.remove('snap-right'); chatPanel.classList.add('snap-left'); }
     else { chatPanel.classList.remove('snap-left'); chatPanel.classList.add('snap-right'); chatPanel.style.right = _getSidebarWidth() + 'px'; }
-    _chatMoveMode = false; _chatDragging = false;
-    if (chatMoveBtn) chatMoveBtn.classList.remove('active');
-    _chatRemoveSnapZones();
+    _chatCancelDrag();
     setTimeout(() => { _tileSecondaryPanels(); _positionExteriorTabs(); _resolveOverlaps(chatPanel); }, 50);
   }
   function _chatUpdateSnapPosition() {
@@ -3530,35 +3889,62 @@
   var _sidebarEdge = document.getElementById('sidebar-edge');
   if (_sidebarEdge) _sidebarEdge.addEventListener('click', () => setTimeout(() => { updateChatStackLayout(); _chatUpdateSnapPosition(); }, 350));
   window.addEventListener('resize', () => { updateChatStackLayout(); _chatUpdateSnapPosition(); _positionExteriorTabs(); });
-  if (chatMoveBtn) chatMoveBtn.addEventListener('click', (e) => { e.stopPropagation(); _chatMoveMode ? _chatExitMoveMode() : _chatEnterMoveMode(); });
   const chatHeader = chatPanel.querySelector('.chat-header');
   chatHeader.addEventListener('mousedown', (e) => {
-    if (!_chatMoveMode) return;
-    if (e.target.tagName === 'BUTTON' || e.target.tagName === 'SELECT') return;
-    e.preventDefault(); _chatDragging = true; chatPanel.classList.add('dragging');
+    if (window.matchMedia('(max-width: 900px)').matches || e.button !== 0) return;
+    if (e.target.closest('button, select, input, textarea, label, a')) return;
+    e.preventDefault();
+    _chatDragPending = true;
     _chatDragStartX = e.clientX; _chatDragStartY = e.clientY;
-    var rect = chatPanel.getBoundingClientRect(); _chatOrigLeft = rect.left; _chatOrigTop = rect.top; _chatCreateSnapZones();
+    var rect = chatPanel.getBoundingClientRect();
+    _chatOrigLeft = rect.left; _chatOrigTop = rect.top;
+    _chatOrigWidth = rect.width; _chatOrigHeight = rect.height;
   });
-  window.addEventListener('mousemove', (e) => {
-    if (!_chatDragging) return;
+  function _flushChatDragMove() {
+    _chatDragMoveFrame = 0;
+    if (!_chatDragging || !_chatDragPointer) return;
+    const e = _chatDragPointer;
     var dx = e.clientX - _chatDragStartX; var dy = e.clientY - _chatDragStartY;
     chatPanel.style.left = (_chatOrigLeft + dx) + 'px'; chatPanel.style.top = (_chatOrigTop + dy) + 'px';
     _tileSecondaryPanels();
     _positionExteriorTabs();
-    var sbW = _getSidebarWidth(); var rightEdge = window.innerWidth - sbW;
+    var rightEdge = window.innerWidth - _chatDragSidebarWidth;
     if (_chatSnapZoneL) _chatSnapZoneL.classList.toggle('active', e.clientX < 80);
-    if (_chatSnapZoneR) { _chatSnapZoneR.style.right = sbW + 'px'; _chatSnapZoneR.classList.toggle('active', e.clientX > rightEdge - 80); }
+    if (_chatSnapZoneR) { _chatSnapZoneR.style.right = _chatDragSidebarWidth + 'px'; _chatSnapZoneR.classList.toggle('active', e.clientX > rightEdge - 80); }
+  }
+
+  window.addEventListener('mousemove', (e) => {
+    if (_chatDragPending && !_chatDragging) {
+      if (Math.hypot(e.clientX - _chatDragStartX, e.clientY - _chatDragStartY) < 4) return;
+      _chatBeginDrag();
+    }
+    if (!_chatDragging) return;
+    _chatDragPointer = { clientX: e.clientX, clientY: e.clientY };
+    if (!_chatDragMoveFrame) _chatDragMoveFrame = requestAnimationFrame(_flushChatDragMove);
   });
   window.addEventListener('mouseup', (e) => {
+    if (_chatDragPending) {
+      _chatCancelDrag();
+      return;
+    }
     if (!_chatDragging) return;
+    if (_chatDragMoveFrame) {
+      cancelAnimationFrame(_chatDragMoveFrame);
+      _flushChatDragMove();
+    }
     _chatDragging = false; chatPanel.classList.remove('dragging');
-    var sbW = _getSidebarWidth(); var rightEdge = window.innerWidth - sbW;
+    _chatDragPointer = null;
+    document.body.style.userSelect = '';
+    document.body.style.webkitUserSelect = '';
+    document.body.style.cursor = '';
+    var sbW = _chatDragSidebarWidth || _getSidebarWidth(); var rightEdge = window.innerWidth - sbW;
     if (e.clientX < 80) _chatSnapTo('left'); else if (e.clientX > rightEdge - 80) _chatSnapTo('right');
     _chatRemoveSnapZones();
     _tileSecondaryPanels();
     _positionExteriorTabs();
     _resolveOverlaps(chatPanel);
   });
+  window.addEventListener('blur', _chatCancelDrag);
 
   // ─── SHARED CHAT RESIZE SYSTEM (primary + secondary, all directions) ───
   const CHAT_MIN_W = 220;
@@ -3571,6 +3957,8 @@
 
   /** Generic resize state — one per panel, keyed by slotId */
   const _resizeStates = {};
+  let _resizeMoveFrame = 0;
+  let _resizePointer = null;
 
   /** Detect which direction class a handle element has */
   function _getHandleDir(handleEl) {
@@ -3603,8 +3991,8 @@
    * @param {number} dy — mouse delta Y (positive = moved down)
    */
   function _applyResizeDelta(panel, rs, dx, dy) {
-    const maxW = Math.floor(window.innerWidth * CHAT_MAX_W_RATIO);
-    const maxH = Math.floor(window.innerHeight * CHAT_MAX_H_RATIO);
+    const maxW = rs.maxW;
+    const maxH = rs.maxH;
     const dir = rs.dir;
     const rightAnchored = rs.rightAnchored;
     const { startW, startH, startRect } = rs;
@@ -3701,6 +4089,8 @@
       startY: e.type.startsWith('touch') ? e.touches[0].clientY : e.clientY,
       startW: rect.width,
       startH: rect.height,
+      maxW: Math.floor(window.innerWidth * CHAT_MAX_W_RATIO),
+      maxH: Math.floor(window.innerHeight * CHAT_MAX_H_RATIO),
       startRect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom },
     };
     panel.style.transition = 'none';
@@ -3718,21 +4108,40 @@
     document.body.style.cursor = cursorMap[dir] || 'default';
   }
 
-  function _chatResizeMove(e) {
+  function _flushChatResizeMove() {
+    _resizeMoveFrame = 0;
+    if (!_resizePointer) return;
+    let resizedPrimary = false;
     for (const slotId in _resizeStates) {
       const rs = _resizeStates[slotId];
       if (!rs || !rs.active) continue;
-      const clientX = e.type.startsWith('touch') ? e.touches[0].clientX : e.clientX;
-      const clientY = e.type.startsWith('touch') ? e.touches[0].clientY : e.clientY;
-      const dx = clientX - rs.startX;
-      const dy = clientY - rs.startY;
+      const dx = _resizePointer.clientX - rs.startX;
+      const dy = _resizePointer.clientY - rs.startY;
       _applyResizeDelta(rs.panel, rs, dx, dy);
+      if (rs.panel === chatPanel) resizedPrimary = true;
     }
-    _tileSecondaryPanels();
-    _positionExteriorTabs();
+    if (resizedPrimary) {
+      _tileSecondaryPanels();
+      _positionExteriorTabs();
+    }
+  }
+
+  function _chatResizeMove(e) {
+    const resizing = Object.values(_resizeStates).some((rs) => rs?.active);
+    if (!resizing) return;
+    const point = e.type.startsWith('touch') ? e.touches[0] : e;
+    if (!point) return;
+    _resizePointer = { clientX: point.clientX, clientY: point.clientY };
+    if (e.cancelable) e.preventDefault();
+    if (!_resizeMoveFrame) _resizeMoveFrame = requestAnimationFrame(_flushChatResizeMove);
   }
 
   function _chatResizeEnd() {
+    if (_resizeMoveFrame) {
+      cancelAnimationFrame(_resizeMoveFrame);
+      _flushChatResizeMove();
+    }
+    _resizePointer = null;
     let resizedPanels = [];
     for (const slotId in _resizeStates) {
       const rs = _resizeStates[slotId];
@@ -3777,6 +4186,7 @@
   document.addEventListener('touchmove', _chatResizeMove, { passive: false });
   document.addEventListener('mouseup', _chatResizeEnd);
   document.addEventListener('touchend', _chatResizeEnd);
+  document.addEventListener('touchcancel', _chatResizeEnd);
 
   // ─── OVERLAP PREVENTION SYSTEM ───
   // After any move/resize/snap, push overlapping chat windows apart.

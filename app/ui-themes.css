@@ -1,0 +1,1647 @@
+/* Complete UI theme suite for My Virtual Office. */
+
+html[data-ui-preset="retro"],
+html[data-ui-preset="gameboy"] {
+  --theme-font-ui: "Press Start 2P", monospace;
+  --theme-font-display: "Press Start 2P", monospace;
+  --theme-radius-sm: 2px;
+  --theme-radius-md: 4px;
+  --theme-radius-lg: 6px;
+  --theme-control-height: 38px;
+  --theme-space-scale: .9;
+  --theme-shadow: 5px 5px 0 color-mix(in srgb, var(--theme-border-strong) 78%, #000);
+  --theme-shadow-hard: 3px 3px 0 var(--theme-border-strong);
+}
+
+html[data-ui-preset="cyberpunk"] {
+  --theme-font-ui: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --theme-font-display: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --theme-radius-sm: 3px;
+  --theme-radius-md: 5px;
+  --theme-radius-lg: 8px;
+  --theme-control-height: 42px;
+  --theme-space-scale: 1;
+  --theme-shadow: 0 18px 60px color-mix(in srgb, var(--theme-accent) 18%, transparent), 0 0 25px color-mix(in srgb, var(--theme-accent-2) 13%, transparent);
+  --theme-shadow-hard: 0 0 16px color-mix(in srgb, var(--theme-accent) 45%, transparent);
+}
+
+html[data-ui-preset="retro"][data-ui-theme="dark"] {
+  --theme-bg-0:#160d20; --theme-bg-1:#241435; --theme-bg-2:#321b46; --theme-bg-3:#43245a;
+  --theme-text-1:#fff4d6; --theme-text-2:#f5d0fe; --theme-text-3:#c39ad4;
+  --theme-accent:#ffb000; --theme-accent-2:#2de2e6; --theme-border-soft:#69417d;
+  --theme-border-strong:#9864ad; --theme-info:#2de2e6; --theme-success:#63f58a;
+  --theme-danger:#ff5470; --theme-accent-contrast:#211128;
+}
+
+html[data-ui-preset="retro"][data-ui-theme="light"] {
+  --theme-bg-0:#ead8b5; --theme-bg-1:#fff4d8; --theme-bg-2:#fffaf0; --theme-bg-3:#e8cfaa;
+  --theme-text-1:#2b1734; --theme-text-2:#45244c; --theme-text-3:#65406a;
+  --theme-accent:#9a4400; --theme-accent-2:#006e78; --theme-border-soft:#9a7059;
+  --theme-border-strong:#694057; --theme-info:#006e78; --theme-success:#2c6a32;
+  --theme-danger:#a9203e; --theme-accent-contrast:#fff8e8;
+}
+
+html[data-ui-preset="cyberpunk"][data-ui-theme="dark"] {
+  --theme-bg-0:#05020d; --theme-bg-1:#0c0920; --theme-bg-2:#15102c; --theme-bg-3:#21133a;
+  --theme-text-1:#f9f7ff; --theme-text-2:#d9ccff; --theme-text-3:#aa96c8;
+  --theme-accent:#00f5ff; --theme-accent-2:#ff2bd6; --theme-border-soft:#513074;
+  --theme-border-strong:#00bfc8; --theme-info:#00f5ff; --theme-success:#64ff72;
+  --theme-danger:#ff3f7f; --theme-accent-contrast:#031116;
+}
+
+html[data-ui-preset="cyberpunk"][data-ui-theme="light"] {
+  --theme-bg-0:#eae5f5; --theme-bg-1:#faf8ff; --theme-bg-2:#ffffff; --theme-bg-3:#eee8fa;
+  --theme-text-1:#180d2d; --theme-text-2:#2f1748; --theme-text-3:#523c68;
+  --theme-accent:#007c86; --theme-accent-2:#b00091; --theme-border-soft:#a995c2;
+  --theme-border-strong:#59357d; --theme-info:#007c86; --theme-success:#16703b;
+  --theme-danger:#b40c4c; --theme-accent-contrast:#ffffff;
+}
+
+html[data-ui-preset="gameboy"][data-ui-theme="dark"] {
+  --theme-bg-0:#0f1a0f; --theme-bg-1:#172617; --theme-bg-2:#233323; --theme-bg-3:#304530;
+  --theme-text-1:#d2e5a3; --theme-text-2:#b8cf86; --theme-text-3:#91aa67;
+  --theme-accent:#9bbc0f; --theme-accent-2:#6f9a22; --theme-border-soft:#304f2d;
+  --theme-border-strong:#5f7f38; --theme-info:#a8c93a; --theme-success:#b7d84b;
+  --theme-danger:#e07a5f; --theme-accent-contrast:#0f380f;
+}
+
+html[data-ui-preset="gameboy"][data-ui-theme="light"] {
+  --theme-bg-0:#8bac0f; --theme-bg-1:#9bbc0f; --theme-bg-2:#cadc9f; --theme-bg-3:#b6cc7c;
+  --theme-text-1:#0f380f; --theme-text-2:#1f4d1d; --theme-text-3:#306230;
+  --theme-accent:#0f380f; --theme-accent-2:#306230; --theme-border-soft:#4f6d2f;
+  --theme-border-strong:#274f27; --theme-info:#214f27; --theme-success:#1d5b28;
+  --theme-danger:#6b2f24; --theme-accent-contrast:#d8e9ae;
+}
+
+html[data-ui-preset="custom"] {
+  --theme-font-ui: Inter, ui-sans-serif, system-ui, sans-serif;
+  --theme-font-display: "Press Start 2P", monospace;
+  --theme-radius-sm: 10px;
+  --theme-radius-md: 14px;
+  --theme-radius-lg: 20px;
+  --theme-control-height: 42px;
+  --theme-space-scale: 1;
+  --theme-shadow: 0 24px 70px rgba(0,0,0,.45);
+  --theme-shadow-hard: 0 8px 24px rgba(0,0,0,.24);
+}
+
+/* Map theme tokens into the modern main app and the standalone Cron/Models shell. */
+html[data-ui-preset]:not([data-ui-preset="classic"]) {
+  --ui-font: var(--theme-font-ui);
+  --ui-pixel: var(--theme-font-display);
+  --ui-bg-0: var(--theme-bg-0);
+  --ui-bg-1: var(--theme-bg-1);
+  --ui-bg-2: var(--theme-bg-2);
+  --ui-bg-3: var(--theme-bg-3);
+  --ui-border-soft: var(--theme-border-soft);
+  --ui-border-strong: var(--theme-border-strong);
+  --ui-text-1: var(--theme-text-1);
+  --ui-text-2: var(--theme-text-2);
+  --ui-text-3: var(--theme-text-3);
+  --ui-accent: var(--theme-accent);
+  --ui-accent-strong: var(--theme-accent);
+  --ui-info: var(--theme-info);
+  --ui-success: var(--theme-success);
+  --ui-danger: var(--theme-danger);
+  --ui-radius-sm: var(--theme-radius-sm);
+  --ui-radius-md: var(--theme-radius-md);
+  --ui-radius-lg: var(--theme-radius-lg);
+  --ui-shadow-lg: var(--theme-shadow);
+  --ui-radius-control: var(--theme-radius-sm);
+  --ui-radius-card: var(--theme-radius-md);
+  --ui-radius-window: var(--theme-radius-lg);
+  --page-bg: var(--theme-bg-0);
+  --page-surface: var(--theme-bg-1);
+  --page-surface-2: var(--theme-bg-2);
+  --page-surface-3: var(--theme-bg-3);
+  --page-border: var(--theme-border-soft);
+  --page-border-strong: var(--theme-border-strong);
+  --page-text: var(--theme-text-1);
+  --page-text-2: var(--theme-text-2);
+  --page-text-3: var(--theme-text-3);
+  --page-accent: var(--theme-accent);
+  --page-accent-contrast: var(--theme-accent-contrast);
+  --page-green: var(--theme-success);
+  --page-red: var(--theme-danger);
+  --page-blue: var(--theme-info);
+  --page-orange: var(--theme-accent-2);
+  --page-shadow: var(--theme-shadow);
+
+  /* Legacy aliases still consumed by the original dashboard and window code. */
+  --ui-bg: var(--theme-bg-0);
+  --ui-surface: var(--theme-bg-1);
+  --ui-border: var(--theme-border-soft);
+  --ui-text: var(--theme-text-1);
+  --text-primary: var(--theme-text-1);
+  --gold: var(--theme-accent);
+  --gba-cream: var(--theme-text-1);
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"])[data-ui-theme="dark"] { color-scheme: dark; }
+html[data-ui-preset]:not([data-ui-preset="classic"])[data-ui-theme="light"] { color-scheme: light; }
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) body {
+  color: var(--theme-text-1) !important;
+  background-color: var(--theme-bg-0) !important;
+  font-family: var(--theme-font-ui) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(button, input, select, textarea) {
+  font-family: var(--theme-font-ui) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(button, .mm-btn, .option-btn, .ftb-btn) {
+  min-height: var(--theme-control-height);
+  color: var(--theme-text-1) !important;
+  border-color: var(--theme-border-strong) !important;
+  border-radius: var(--theme-radius-sm) !important;
+  background: color-mix(in srgb, var(--theme-bg-3) 88%, var(--theme-accent) 12%) !important;
+  box-shadow: none !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(button, .mm-btn, .option-btn, .ftb-btn):hover {
+  color: var(--theme-text-1) !important;
+  border-color: var(--theme-accent) !important;
+  background: color-mix(in srgb, var(--theme-bg-3) 72%, var(--theme-accent) 28%) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .toolbar-primary > button,
+  .toolbar-primary > a > button,
+  .ui-primary-action,
+  #acp-save-btn,
+  .mm-btn-primary,
+  .theme-preview-primary,
+  .btn-gold,
+  .modal-actions .save
+) {
+  color: var(--theme-accent-contrast) !important;
+  border-color: var(--theme-accent) !important;
+  background: var(--theme-accent) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(input, select, textarea, .mm-input) {
+  min-height: var(--theme-control-height);
+  color: var(--theme-text-1) !important;
+  border-color: var(--theme-border-soft) !important;
+  border-radius: var(--theme-radius-sm) !important;
+  background: var(--theme-bg-2) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(input, textarea)::placeholder {
+  color: var(--theme-text-3) !important;
+  opacity: .9;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(button, a, input, select, textarea, [tabindex]):focus-visible {
+  outline-color: color-mix(in srgb, var(--theme-accent) 55%, transparent) !important;
+  border-color: var(--theme-accent) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) .main-container {
+  background:
+    radial-gradient(circle at 32% 20%, color-mix(in srgb, var(--theme-accent-2) 9%, var(--theme-bg-1)) 0, var(--theme-bg-0) 64%) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(.sidebar, .sidebar-edge) {
+  color: var(--theme-text-1) !important;
+  border-color: var(--theme-border-soft) !important;
+  background: var(--theme-bg-1) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) .toolbar {
+  border-color: var(--theme-border-soft) !important;
+  background: color-mix(in srgb, var(--theme-bg-0) 94%, transparent) !important;
+  box-shadow: var(--theme-shadow-hard) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .main-menu-panel,
+  .agent-panel,
+  .furniture-catalog,
+  .modal-content,
+  .browser-panel,
+  .sms-panel,
+  .chat-panel,
+  .chat-panel-secondary,
+  .agent-workspace-panel,
+  .projects-modal-content
+) {
+  color: var(--theme-text-1) !important;
+  border-color: var(--theme-border-strong) !important;
+  border-radius: var(--theme-radius-lg) !important;
+  background: var(--theme-bg-1) !important;
+  box-shadow: var(--theme-shadow) !important;
+  font-family: var(--theme-font-ui) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .main-menu-header,
+  .agent-panel-header,
+  .catalog-header,
+  .modal-header,
+  .browser-header,
+  .sms-header,
+  .chat-header,
+  .agent-workspace-header,
+  .proj-toolbar,
+  .settings-footer,
+  .agent-edit-bar
+) {
+  color: var(--theme-text-1) !important;
+  border-color: var(--theme-border-soft) !important;
+  background: var(--theme-bg-2) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .main-menu-title,
+  .agent-panel-title,
+  .catalog-title,
+  .modal-header h2,
+  .browser-title,
+  .sms-header-title,
+  .chat-agent-select,
+  .theme-current-name
+) {
+  color: var(--theme-accent) !important;
+  font-family: var(--theme-font-display) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .settings-nav,
+  .agent-panel-body,
+  .ui-agent-filters,
+  #acp-editor,
+  .catalog-body,
+  .sms-sidebar,
+  .chat-sessions-panel,
+  .agent-workspace-tabs
+) {
+  color: var(--theme-text-1) !important;
+  border-color: var(--theme-border-soft) !important;
+  background: var(--theme-bg-0) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .mm-section,
+  .mm-hermes-connection,
+  .agent-edit-section,
+  .agent-preview-wrap,
+  .ui-agent-advanced,
+  .catalog-section,
+  .sms-thread-item,
+  .chat-session-item,
+  .project-card,
+  .meeting-card,
+  .workspace-card
+) {
+  color: var(--theme-text-1) !important;
+  border-color: var(--theme-border-soft) !important;
+  border-radius: var(--theme-radius-md) !important;
+  background: var(--theme-bg-2) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .settings-nav button.active,
+  .catalog-tabs button.active,
+  .agent-editor-tabs button.active,
+  .agent-card.selected,
+  .option-btn.selected,
+  .sms-thread-item.active,
+  .chat-session-item.active
+) {
+  color: var(--theme-accent) !important;
+  border-color: var(--theme-accent) !important;
+  background: color-mix(in srgb, var(--theme-bg-2) 76%, var(--theme-accent) 24%) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .main-menu-subtitle,
+  .theme-studio-copy,
+  .mm-label,
+  .agent-card-role,
+  .agent-preview-role,
+  .agent-preview-branch,
+  .sms-thread-preview,
+  .sms-thread-time,
+  .sms-thread-subtitle,
+  .chat-context-info,
+  .muted
+) {
+  color: var(--theme-text-3) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .sms-layout,
+  .sms-conversation,
+  .sms-messages,
+  .chat-body,
+  .chat-messages,
+  .agent-workspace-body,
+  .browser-frame-container
+) {
+  color: var(--theme-text-1) !important;
+  background: var(--theme-bg-1) !important;
+  border-color: var(--theme-border-soft) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .sms-owner-strip,
+  .sms-thread-header,
+  .sms-input-row,
+  .chat-model-bar,
+  .chat-input-row,
+  .browser-url-bar,
+  .agent-workspace-tabs
+) {
+  color: var(--theme-text-2) !important;
+  border-color: var(--theme-border-soft) !important;
+  background: var(--theme-bg-2) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .sms-send-btn,
+  .chat-send-btn,
+  .chat-toggle-btn,
+  .browser-toggle-btn
+) {
+  color: var(--theme-accent-contrast) !important;
+  border-color: var(--theme-accent) !important;
+  background: var(--theme-accent) !important;
+  box-shadow: var(--theme-shadow-hard) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .chat-message.user,
+  .sms-message.outgoing
+) {
+  color: var(--theme-accent-contrast) !important;
+  background: var(--theme-accent) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .chat-message.assistant,
+  .sms-message.incoming
+) {
+  color: var(--theme-text-1) !important;
+  border-color: var(--theme-border-soft) !important;
+  background: var(--theme-bg-3) !important;
+}
+
+html[data-ui-preset="cyberpunk"] :where(
+  .main-menu-title,
+  .agent-panel-title,
+  .catalog-title,
+  .modal-header h2,
+  .header h1,
+  .models-header h1
+) {
+  text-shadow: 0 0 12px color-mix(in srgb, var(--theme-accent) 65%, transparent);
+  letter-spacing: .08em;
+}
+
+html[data-ui-preset="cyberpunk"] :where(.main-menu-panel, .agent-panel, .modal-content, .chat-panel, .sms-panel, .browser-panel) {
+  clip-path: polygon(0 10px, 10px 0, calc(100% - 28px) 0, 100% 28px, 100% 100%, 0 100%);
+}
+
+html[data-ui-font-style="pixel"] :where(body, button, input, select, textarea) {
+  line-height: 1.65;
+}
+
+html[data-ui-font-style="pixel"] :where(button, input, select, textarea) {
+  font-size: 8px !important;
+}
+
+/* Press Start 2P is substantially wider than the modern UI font. Keep the
+   pixel controls compact, and let long dock labels use two lines instead of
+   painting outside their buttons. */
+html[data-ui-font-style="pixel"] .toolbar-primary > button,
+html[data-ui-font-style="pixel"] .toolbar-primary > a > button {
+  padding: 4px 3px !important;
+  line-height: 1.35 !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere;
+}
+
+/* Fixed-width appearance labels need the same compact pixel scale. */
+html[data-ui-font-style="pixel"] .agent-field-label {
+  font-size: 9px !important;
+}
+
+/* A closed fixed drawer sitting beyond the right edge made the Projects
+   overlay horizontally scrollable in pixel themes. It is restored by .open. */
+html[data-ui-font-style="pixel"] #projectsModal .proj-detail-panel:not(.open) {
+  display: none !important;
+}
+
+/* Label typography and icon typography have different jobs. The compact
+   pixel font keeps words contained, while symbol-only controls retain a
+   readable touch-target icon size. ui-themes.js marks static and dynamic
+   symbol-only buttons with .ui-icon-only. */
+html[data-ui-font-style="pixel"] button.ui-icon-only {
+  font-family: "Segoe UI Symbol", "Segoe UI Emoji", "Noto Color Emoji", system-ui, sans-serif !important;
+  font-size: 13.5px !important;
+  line-height: 1 !important;
+  letter-spacing: 0 !important;
+}
+
+html[data-ui-font-style="pixel"] button.ui-icon-only.chat-toggle-btn {
+  font-size: 16.5px !important;
+}
+
+html[data-ui-font-style="pixel"] :where(.theme-studio-copy, .theme-card-copy small) {
+  font-size: 8px !important;
+  line-height: 1.75 !important;
+}
+
+html[data-ui-font-style="pixel"] :where(.theme-mode-label, .theme-subheading, .theme-card-copy strong) {
+  font-size: 10px !important;
+  line-height: 1.55 !important;
+}
+
+html[data-ui-font-style="pixel"] :where(.main-menu-panel, .agent-panel, .modal-content, .chat-panel, .sms-panel, .browser-panel) {
+  border-width: 2px !important;
+}
+
+/* Standalone page harmonization */
+html[data-ui-preset]:not([data-ui-preset="classic"]) body.ui-standalone {
+  color: var(--theme-text-1) !important;
+  background:
+    radial-gradient(circle at 18% -10%, color-mix(in srgb, var(--theme-accent-2) 11%, transparent), transparent 34rem),
+    var(--theme-bg-0) !important;
+  font-family: var(--theme-font-ui) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) .ui-standalone :where(
+  .header,
+  .models-header,
+  .toolbar,
+  .job-card,
+  .card,
+  .modal,
+  .mvw-confirm-dialog,
+  .model-list,
+  .tab
+) {
+  color: var(--theme-text-1) !important;
+  border-color: var(--theme-border-soft) !important;
+  border-radius: var(--theme-radius-md) !important;
+  background: var(--theme-bg-1) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) .ui-standalone :where(.header, .models-header) {
+  border-bottom-color: var(--theme-accent) !important;
+  border-radius: 0 !important;
+  box-shadow: var(--theme-shadow-hard) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) .ui-standalone :where(.header h1, .models-header h1, h1, h2, h3, .job-name, code) {
+  color: var(--theme-accent) !important;
+  font-family: var(--theme-font-display) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) .ui-standalone :where(.tab.active, .job-card:hover) {
+  color: var(--theme-accent) !important;
+  border-color: var(--theme-accent) !important;
+  background: color-mix(in srgb, var(--theme-bg-2) 78%, var(--theme-accent) 22%) !important;
+}
+
+/* -------------------------------------------------------------------------
+   Complete component coverage
+   Older Virtual Office features predate the token system and still contain
+   fixed colors. These rules make every application surface inherit the active
+   preset while leaving the pixel-art office canvas and branch identity colors
+   alone on purpose.
+   ------------------------------------------------------------------------- */
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) {
+  scrollbar-color: var(--theme-border-strong) var(--theme-bg-1);
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(a, .proj-breadcrumb-link, .sms-media-link) {
+  color: var(--theme-accent) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .brand h2,
+  .brand h3,
+  .sidebar h4:not(.branch-header-row),
+  .pc-monitor-toggle,
+  .api-usage-toggle,
+  .proj-toolbar-title,
+  .proj-breadcrumb-link,
+  .proj-section-title,
+  .proj-chart-title,
+  .proj-report-title,
+  .proj-form-title,
+  .proj-detail-header,
+  .chat-sessions-title,
+  .skill-workshop-heading,
+  .skill-workshop-status,
+  .agent-workspace-panel-heading,
+  .agent-workspace-card h3,
+  .agent-workspace-settings-section h3,
+  #edit-cp-title,
+  #branch-edit-popup > div:first-child,
+  #text-label-editor > div:first-child,
+  #iw-editor > div:first-child
+) {
+  color: var(--theme-accent) !important;
+}
+
+/* Dashboard widgets and sidebar content. */
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .sidebar-bulk-actions,
+  .pc-monitor,
+  .api-usage-monitor,
+  .branch-manager-panel,
+  .status-panel,
+  .sidebar-mtg-item,
+  .sidebar-proj-item,
+  .proj-lb-row,
+  .api-usage-card,
+  .pc-metric,
+  .activity-feed
+) {
+  color: var(--theme-text-1) !important;
+  border-color: var(--theme-border-soft) !important;
+  border-radius: var(--theme-radius-md) !important;
+  background: var(--theme-bg-2) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .pc-bar-track,
+  .api-bar-track,
+  .proj-progress-mini,
+  .proj-checklist-mini-bar
+) {
+  border-color: var(--theme-border-soft) !important;
+  background: var(--theme-bg-3) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .pc-detail,
+  .pc-label,
+  .api-usage-detail,
+  .sidebar-mtg-item-meta,
+  .sidebar-mtg-none,
+  .proj-lb-empty,
+  #log-list li,
+  .branch-unassigned-note
+) {
+  color: var(--theme-text-3) !important;
+}
+
+/* Every modal, editor, menu, popover and toast. */
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .modal,
+  .proj-form-modal,
+  .image-lightbox
+) {
+  background-color: color-mix(in srgb, var(--theme-bg-0) 78%, transparent) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .agent-workspace-menu,
+  .skill-workshop-panel,
+  .skill-workshop-row,
+  .skill-row,
+  .skl-card,
+  .meetings-sidebar,
+  .skills-library-sidebar,
+  .agent-workspace-card,
+  .agent-workspace-item,
+  .agent-workspace-settings-section,
+  .agent-workspace-note-editor,
+  .agent-workspace-notes-folders,
+  .agent-workspace-file-list-pane,
+  .agent-workspace-file-row,
+  .agent-workspace-folder,
+  .agent-workspace-activity-item,
+  #branch-edit-popup,
+  #text-label-editor,
+  #iw-editor,
+  #edit-color-picker,
+  #branch-assign-menu,
+  #desk-assign-menu
+) {
+  color: var(--theme-text-1) !important;
+  border-color: var(--theme-border-soft) !important;
+  border-radius: var(--theme-radius-md) !important;
+  background: var(--theme-bg-2) !important;
+  box-shadow: var(--theme-shadow-hard) !important;
+  font-family: var(--theme-font-ui) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  #branch-edit-popup input,
+  #branch-edit-popup #be-agents,
+  #text-label-editor input,
+  #text-label-editor #tl-preview,
+  #iw-editor label,
+  #iw-editor #iw-preview,
+  #edit-color-picker input:not([type="color"]),
+  .skl-input,
+  .skl-textarea,
+  .skill-workshop-review-textarea
+) {
+  color: var(--theme-text-1) !important;
+  border-color: var(--theme-border-soft) !important;
+  border-radius: var(--theme-radius-sm) !important;
+  background: var(--theme-bg-1) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  #branch-edit-popup label,
+  #branch-edit-popup #be-color-hex,
+  #text-label-editor label,
+  #text-label-editor #tl-color-hex,
+  #text-label-editor #tl-size-val,
+  #iw-editor label div div:last-child,
+  .skill-workshop-meta,
+  .skill-workshop-empty,
+  .skill-workshop-review-head span,
+  .skl-field-label,
+  .agent-workspace-meta,
+  .agent-workspace-empty
+) {
+  color: var(--theme-text-3) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  #be-save,
+  #tl-save,
+  #iw-save,
+  .agent-create-actions button[type="submit"],
+  .skl-apply-dropdown button
+) {
+  color: var(--theme-accent-contrast) !important;
+  border-color: var(--theme-accent) !important;
+  background: var(--theme-accent) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  #be-cancel,
+  #tl-cancel,
+  #iw-cancel,
+  #branch-assign-menu button,
+  #desk-assign-menu button,
+  #edit-cp-save-favorite,
+  #edit-color-picker button:not(.cp-favorite-btn),
+  .skill-row-btns button,
+  .skill-workshop-actions button,
+  .skl-card-actions button
+) {
+  color: var(--theme-text-2) !important;
+  border-color: var(--theme-border-strong) !important;
+  border-radius: var(--theme-radius-sm) !important;
+  background: var(--theme-bg-3) !important;
+}
+
+/* Agent modal, Skills Library, Meetings and Workspace internals. */
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .modal-section,
+  .mtg-section,
+  .skl-card,
+  .skill-row,
+  .agent-workspace-settings-section,
+  .agent-workspace-panel-heading,
+  .agent-workspace-file-tools,
+  .agent-workspace-editor-header,
+  .agent-workspace-settings-footer
+) {
+  color: var(--theme-text-1) !important;
+  border-color: var(--theme-border-soft) !important;
+  border-radius: var(--theme-radius-md) !important;
+  background: var(--theme-bg-2) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .modal-role,
+  .bio-content,
+  .mtg-meta-item,
+  .mtg-section-text,
+  .skl-card-desc,
+  .agent-create-platform-note,
+  .agent-create-codex-note
+) {
+  color: var(--theme-text-3) !important;
+}
+
+/* Chat: messages, session rail, tool cards, thinking, approvals and media. */
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .chat-exterior-tabs,
+  .chat-sessions-head,
+  .chat-tool-call,
+  .chat-thinking-card,
+  .chat-approval-card,
+  .chat-attach-item,
+  .chat-media-item,
+  .chat-media-file,
+  .chat-slot-tab,
+  .chat-session-item
+) {
+  color: var(--theme-text-1) !important;
+  border-color: var(--theme-border-soft) !important;
+  border-radius: var(--theme-radius-sm) !important;
+  background: var(--theme-bg-2) !important;
+}
+
+/* The exterior tab rail is only a positioning wrapper. Leaving a themed
+   surface behind its buttons visually squares off their lower corners. */
+html[data-ui-preset]:not([data-ui-preset="classic"]) .chat-exterior-tabs {
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+}
+
+/* ui-modern originally made these tabs top-rounded only. Keep each theme's
+   own corner size, but apply it consistently to all four corners. */
+.chat-slot-tab {
+  border-radius: var(--ui-radius-sm) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .chat-session-item.selected,
+  .chat-slot-tab.state-open,
+  .chat-slot-tab.state-active,
+  .chat-slot-tab.active
+) {
+  color: var(--theme-accent) !important;
+  border-color: var(--theme-accent) !important;
+  background: color-mix(in srgb, var(--theme-bg-2) 74%, var(--theme-accent) 26%) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) .chat-msg.user .chat-bubble {
+  color: var(--theme-accent-contrast) !important;
+  border-color: var(--theme-accent) !important;
+  background: var(--theme-accent) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) .chat-msg.assistant .chat-bubble {
+  color: var(--theme-text-1) !important;
+  border-color: var(--theme-border-soft) !important;
+  background: var(--theme-bg-3) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) .chat-msg.system .chat-bubble {
+  color: var(--theme-accent-2) !important;
+  border: 1px solid color-mix(in srgb, var(--theme-accent-2) 55%, var(--theme-border-soft)) !important;
+  background: color-mix(in srgb, var(--theme-bg-2) 82%, var(--theme-accent-2) 18%) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .chat-session-item .cs-title,
+  .chat-tool-name,
+  .chat-thinking-title,
+  .chat-approval-title,
+  .chat-msg.assistant .chat-sender-label
+) {
+  color: var(--theme-text-2) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .chat-session-item .cs-preview,
+  .chat-session-item .cs-meta,
+  .chat-tool-preview,
+  .chat-tool-state,
+  .chat-time,
+  .chat-thinking-summary,
+  .chat-approval-desc,
+  .chat-media-file
+) {
+  color: var(--theme-text-3) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .chat-tool-call.running,
+  .chat-tool-call.done,
+  .chat-session-item .cs-live-badge,
+  .chat-status.connected
+) {
+  border-color: var(--theme-success) !important;
+  color: var(--theme-success) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .chat-tool-call.error,
+  .chat-approval-card.denied,
+  .chat-status.disconnected,
+  .chat-close,
+  .chat-secondary-close,
+  .chat-session-delete:hover
+) {
+  border-color: var(--theme-danger) !important;
+  color: var(--theme-danger) !important;
+}
+
+/* SMS: header, threads, message bubbles, ownership controls and media. */
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .sms-thread-picker,
+  .sms-thread-item,
+  .sms-media-item,
+  .sms-media-file,
+  .sms-empty-state
+) {
+  color: var(--theme-text-1) !important;
+  border-color: var(--theme-border-soft) !important;
+  border-radius: var(--theme-radius-sm) !important;
+  background: var(--theme-bg-2) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .sms-thread-name,
+  .sms-thread-title,
+  .sms-mode-label,
+  .sms-recipient,
+  .sms-phone-manual
+) {
+  color: var(--theme-text-1) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .sms-thread-phone,
+  .sms-thread-preview,
+  .sms-thread-time,
+  .sms-thread-subtitle,
+  .sms-empty-state,
+  .sms-msg-meta,
+  .sms-media-item figcaption
+) {
+  color: var(--theme-text-3) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) .sms-msg.outbound {
+  color: var(--theme-accent-contrast) !important;
+  background: var(--theme-accent) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) .sms-msg.inbound {
+  color: var(--theme-text-1) !important;
+  border: 1px solid var(--theme-border-soft) !important;
+  background: var(--theme-bg-3) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) .sms-msg.intervention {
+  color: var(--theme-bg-0) !important;
+  background: var(--theme-success) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) .sms-msg.blocked {
+  color: var(--theme-danger) !important;
+  border: 1px solid var(--theme-danger) !important;
+  background: color-mix(in srgb, var(--theme-bg-2) 82%, var(--theme-danger) 18%) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .sms-thread-item.active,
+  .sms-open-thread,
+  .sms-owner-badge
+) {
+  color: var(--theme-accent) !important;
+  border-color: var(--theme-accent) !important;
+  background: color-mix(in srgb, var(--theme-bg-2) 78%, var(--theme-accent) 22%) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(.sms-slider, .sms-switch input:checked + .sms-slider) {
+  background: var(--theme-accent) !important;
+}
+
+/* Browser chrome; the remote browser iframe itself is intentionally untouched. */
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .browser-controls,
+  .browser-snap-group,
+  .browser-current-url
+) {
+  color: var(--theme-text-2) !important;
+  border-color: var(--theme-border-soft) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .browser-status.ai-active,
+  .browser-status.ai-control,
+  .browser-maximize.is-maximized
+) {
+  color: var(--theme-success) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) .browser-status.user-control {
+  color: var(--theme-accent-2) !important;
+}
+
+/* Projects: list, templates, board, task detail, forms, reports and workflow. */
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .projects-modal-content,
+  .proj-list-body,
+  .proj-board-body,
+  .proj-report-body,
+  .proj-detail-body,
+  .proj-comments-list,
+  .proj-chat-messages
+) {
+  color: var(--theme-text-1) !important;
+  background: var(--theme-bg-1) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  #projectsModal .modal-header,
+  .proj-toolbar,
+  .proj-breadcrumb,
+  .proj-board-header,
+  .proj-report-header,
+  .proj-detail-header
+) {
+  color: var(--theme-text-1) !important;
+  border-color: var(--theme-border-soft) !important;
+  background: var(--theme-bg-2) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .proj-card,
+  .proj-tpl-card,
+  .proj-col,
+  .proj-task-card,
+  .proj-stat-card,
+  .proj-chart-section,
+  .proj-workflow-controls,
+  .proj-chat-col,
+  .proj-activity-item,
+  .proj-checklist-item,
+  .proj-review-item,
+  .proj-comment,
+  .proj-form-box,
+  .proj-detail-panel,
+  .proj-quick-add,
+  .proj-tag-input-wrap,
+  .proj-scoreboard-item
+) {
+  color: var(--theme-text-1) !important;
+  border-color: var(--theme-border-soft) !important;
+  border-radius: var(--theme-radius-md) !important;
+  background: var(--theme-bg-2) !important;
+  box-shadow: none !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .proj-card:hover,
+  .proj-tpl-card:hover,
+  .proj-task-card:hover,
+  .proj-col.drag-over
+) {
+  border-color: var(--theme-accent) !important;
+  box-shadow: var(--theme-shadow-hard) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .proj-card-title,
+  .proj-tpl-title,
+  .proj-board-project-title,
+  .proj-col-title,
+  .proj-task-title,
+  .proj-detail-title-input,
+  .proj-form-title,
+  .proj-report-title,
+  .proj-stat-value,
+  .proj-comment-author,
+  .proj-tl-title,
+  .proj-activity-item b
+) {
+  color: var(--theme-text-1) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .proj-card-desc,
+  .proj-card-meta,
+  .proj-tpl-desc,
+  .proj-board-desc,
+  .proj-task-meta,
+  .proj-task-due,
+  .proj-field-label,
+  .proj-form-label,
+  .proj-stat-label,
+  .proj-comment-time,
+  .proj-tl-meta,
+  .proj-activity-time,
+  .proj-report-subtitle,
+  .proj-empty-text,
+  .proj-chat-msg-time,
+  .proj-chat-empty
+) {
+  color: var(--theme-text-3) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .proj-tag,
+  .proj-tpl-col-chip,
+  .proj-task-assignee,
+  .proj-badge,
+  .proj-desc-tab.active,
+  .proj-review-select.active
+) {
+  color: var(--theme-accent) !important;
+  border-color: color-mix(in srgb, var(--theme-accent) 68%, var(--theme-border-soft)) !important;
+  background: color-mix(in srgb, var(--theme-bg-2) 82%, var(--theme-accent) 18%) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .proj-progress-bar,
+  .proj-checklist-mini-fill,
+  .proj-checklist-progress-fill,
+  .proj-bar-fill,
+  .proj-toggle-switch input:checked + .proj-toggle-slider
+) {
+  background: var(--theme-accent) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .proj-progress-track,
+  .proj-checklist-progress-track,
+  .proj-bar-track,
+  .proj-toggle-slider
+) {
+  border-color: var(--theme-border-soft) !important;
+  background: var(--theme-bg-3) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .proj-btn-primary,
+  .proj-btn-gold,
+  .proj-btn-start
+) {
+  color: var(--theme-accent-contrast) !important;
+  border-color: var(--theme-accent) !important;
+  background: var(--theme-accent) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .proj-btn-danger,
+  .proj-btn-stop,
+  .proj-checklist-delete,
+  .proj-detail-close
+) {
+  color: var(--theme-danger) !important;
+  border-color: var(--theme-danger) !important;
+  background: color-mix(in srgb, var(--theme-bg-2) 84%, var(--theme-danger) 16%) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .badge-active,
+  .badge-completed,
+  .proj-wf-status.wf-active,
+  .proj-auto-toggle.active
+) {
+  color: var(--theme-success) !important;
+  border-color: var(--theme-success) !important;
+  background: color-mix(in srgb, var(--theme-bg-2) 84%, var(--theme-success) 16%) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(
+  .badge-critical,
+  .badge-high,
+  .overdue,
+  .proj-wf-status.wf-error
+) {
+  color: var(--theme-danger) !important;
+  border-color: var(--theme-danger) !important;
+  background: color-mix(in srgb, var(--theme-bg-2) 84%, var(--theme-danger) 16%) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) :where(.proj-score-popup, .proj-toast-xp .xp-label) {
+  color: var(--theme-accent) !important;
+  text-shadow: 0 0 12px color-mix(in srgb, var(--theme-accent) 50%, transparent) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) .proj-toast {
+  color: var(--theme-text-1) !important;
+  border-color: var(--theme-border-strong) !important;
+  border-radius: var(--theme-radius-sm) !important;
+  background: var(--theme-bg-2) !important;
+  box-shadow: var(--theme-shadow-hard) !important;
+}
+
+/* Standalone Cron/Models details and feedback states. */
+html[data-ui-preset]:not([data-ui-preset="classic"]) .ui-standalone :where(
+  .job-agent,
+  .job-status .badge,
+  .tag,
+  .status-msg,
+  .model-item,
+  .auth-help,
+  .form-hint,
+  .provider-current
+) {
+  border-color: var(--theme-border-soft) !important;
+  color: var(--theme-text-3) !important;
+  background: var(--theme-bg-2) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) .ui-standalone :where(
+  .badge.ok,
+  .ok,
+  .toast.success,
+  .btn-green,
+  .job-actions button.run
+) {
+  color: var(--theme-success) !important;
+  border-color: var(--theme-success) !important;
+  background: color-mix(in srgb, var(--theme-bg-2) 82%, var(--theme-success) 18%) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) .ui-standalone :where(
+  .badge.error,
+  .err,
+  .toast.error,
+  .btn-red,
+  .job-actions button.delete
+) {
+  color: var(--theme-danger) !important;
+  border-color: var(--theme-danger) !important;
+  background: color-mix(in srgb, var(--theme-bg-2) 82%, var(--theme-danger) 18%) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) .ui-standalone :where(
+  .btn-blue,
+  .job-agent
+) {
+  color: var(--theme-info) !important;
+  border-color: var(--theme-info) !important;
+  background: color-mix(in srgb, var(--theme-bg-2) 84%, var(--theme-info) 16%) !important;
+}
+
+html[data-ui-preset]:not([data-ui-preset="classic"]) .ui-standalone :where(
+  .btn-purple,
+  .badge.pending,
+  .job-actions button.toggle
+) {
+  color: var(--theme-accent-2) !important;
+  border-color: var(--theme-accent-2) !important;
+  background: color-mix(in srgb, var(--theme-bg-2) 84%, var(--theme-accent-2) 16%) !important;
+}
+
+/* Theme Studio */
+.ui-theme-suite {
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+}
+
+.theme-studio-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 16px;
+  padding: 20px;
+  overflow: hidden;
+  border: 1px solid var(--ui-border-soft);
+  border-radius: var(--ui-radius-md);
+  background:
+    radial-gradient(circle at 92% 0%, color-mix(in srgb, var(--ui-accent) 18%, transparent), transparent 16rem),
+    var(--ui-bg-2);
+}
+
+.theme-studio-hero .mm-section-title {
+  margin-bottom: 7px;
+}
+
+.theme-studio-copy {
+  max-width: 650px;
+  margin: 0;
+  color: var(--ui-text-3);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.theme-current-pill {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 124px;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-border-soft);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-bg-1);
+}
+
+.theme-current-pill span {
+  color: var(--ui-text-3);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+
+.theme-current-pill strong {
+  color: var(--ui-accent);
+  font-size: 12px;
+}
+
+.theme-mode-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-border-soft);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-bg-1);
+}
+
+.theme-mode-label,
+.theme-subheading {
+  color: var(--ui-text-1);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.theme-segmented {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--ui-border-soft);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-bg-0);
+}
+
+.theme-segmented button {
+  min-height: 34px;
+  border-color: transparent !important;
+  background: transparent !important;
+}
+
+.theme-segmented button.active {
+  color: var(--theme-accent-contrast, #172012) !important;
+  border-color: var(--ui-accent) !important;
+  background: var(--ui-accent) !important;
+}
+
+.theme-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 10px 0 22px;
+}
+
+.theme-preset-card {
+  position: relative;
+  min-height: 132px;
+  display: grid;
+  grid-template-columns: 94px minmax(0, 1fr);
+  align-items: center;
+  gap: 13px;
+  padding: 12px;
+  text-align: left;
+  border: 1px solid var(--ui-border-soft);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-bg-2);
+}
+
+.theme-preset-card:hover {
+  transform: translateY(-1px);
+}
+
+.theme-preset-card.active {
+  border-color: var(--ui-accent) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-accent) 14%, transparent) !important;
+}
+
+.theme-card-preview {
+  height: 86px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 10px;
+  border: 1px solid rgba(255,255,255,.24);
+  border-radius: 10px;
+  box-shadow: inset 0 0 0 4px rgba(0,0,0,.12);
+}
+
+.theme-card-preview-classic { color:#f5c84c; background:#0d1422; }
+.theme-card-preview-retro { color:#ffb000; background:#321b46; border-radius:2px; box-shadow:3px 3px 0 #9864ad; }
+.theme-card-preview-cyberpunk { color:#00f5ff; background:#15102c; border-color:#00f5ff; border-radius:3px; box-shadow:0 0 14px rgba(0,245,255,.4); }
+.theme-card-preview-gameboy { color:#0f380f; background:#9bbc0f; border-color:#306230; border-radius:2px; box-shadow:3px 3px 0 #306230; }
+.theme-card-preview-custom { color:#f472b6; background:linear-gradient(135deg,#18102d,#0f2530); }
+
+.theme-card-mini-window {
+  font-size: 24px;
+  line-height: 1;
+}
+
+.theme-card-swatches {
+  display: flex;
+  gap: 5px;
+}
+
+.theme-card-swatches i {
+  width: 17px;
+  height: 17px;
+  display: block;
+  border: 1px solid rgba(255,255,255,.42);
+  border-radius: 50%;
+}
+
+.theme-card-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-right: 54px;
+}
+
+.theme-card-copy strong {
+  color: var(--ui-text-1);
+  font-size: 14px;
+}
+
+.theme-card-copy small {
+  color: var(--ui-text-3);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.theme-card-state {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  padding: 5px 8px;
+  color: var(--ui-text-2);
+  border: 1px solid var(--ui-border-soft);
+  border-radius: 999px;
+  font-size: 10px;
+}
+
+.theme-preset-card.active .theme-card-state {
+  color: var(--theme-accent-contrast, #172012);
+  border-color: var(--ui-accent);
+  background: var(--ui-accent);
+}
+
+.theme-custom-editor {
+  padding: 18px;
+  border: 1px solid var(--ui-border-soft);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-bg-1);
+}
+
+.theme-custom-head,
+.theme-palette-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.theme-save-status {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  color: var(--ui-success);
+  border: 1px solid color-mix(in srgb, var(--ui-success) 45%, var(--ui-border-soft));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ui-success) 10%, var(--ui-bg-2));
+  font-size: 10px;
+  opacity: 0;
+  transition: opacity .2s ease;
+}
+
+.theme-save-status.visible {
+  opacity: 1;
+}
+
+.theme-custom-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 11px;
+  margin-bottom: 18px;
+}
+
+.theme-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.theme-field-wide {
+  grid-column: 1 / -1;
+}
+
+.theme-field-label {
+  color: var(--ui-text-2);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.theme-field input,
+.theme-field select {
+  width: 100%;
+}
+
+.theme-mode-editing {
+  color: var(--ui-accent);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.theme-color-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.theme-color-field {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding: 8px;
+  border: 1px solid var(--ui-border-soft);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-bg-2);
+}
+
+.theme-color-input {
+  width: 42px !important;
+  height: 42px !important;
+  min-height: 42px !important;
+  padding: 3px !important;
+  cursor: pointer;
+}
+
+.theme-color-field > span {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.theme-color-field strong {
+  overflow: hidden;
+  color: var(--ui-text-2);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.theme-color-field small {
+  color: var(--ui-text-3);
+  font-family: var(--ui-mono);
+  font-size: 9px;
+}
+
+.theme-live-preview {
+  margin-top: 18px;
+  overflow: hidden;
+  color: var(--ui-text-1);
+  border: 1px solid var(--ui-border-strong);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-bg-2);
+  box-shadow: var(--ui-shadow-lg);
+}
+
+.theme-preview-title {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 13px;
+  color: var(--ui-accent);
+  border-bottom: 1px solid var(--ui-border-soft);
+  background: var(--ui-bg-3);
+  font-family: var(--ui-pixel);
+  font-size: 9px;
+}
+
+.theme-preview-status {
+  color: var(--ui-success);
+  font-family: var(--ui-font);
+  font-size: 10px;
+}
+
+.theme-preview-body {
+  display: grid;
+  gap: 9px;
+  padding: 15px;
+}
+
+.theme-preview-body p {
+  margin: 0;
+  color: var(--ui-text-3);
+  font-size: 12px;
+}
+
+.theme-preview-actions,
+.theme-custom-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.theme-preview-actions button {
+  min-height: 38px;
+}
+
+.theme-custom-actions {
+  margin-top: 15px;
+  padding-top: 14px;
+  border-top: 1px solid var(--ui-border-soft);
+}
+
+.theme-apply-button {
+  color: var(--theme-accent-contrast, #172012) !important;
+  border-color: var(--ui-accent) !important;
+  background: var(--ui-accent) !important;
+}
+
+@media (max-width: 900px) {
+  html[data-ui-font-style="pixel"] .toolbar-primary > button[data-mobile-label],
+  html[data-ui-font-style="pixel"] .toolbar-primary > a > button[data-mobile-label] {
+    font-size: 0 !important;
+  }
+
+  html[data-ui-font-style="pixel"] .toolbar-primary > button[data-mobile-label]::before,
+  html[data-ui-font-style="pixel"] .toolbar-primary > a > button[data-mobile-label]::before {
+    font-size: 8px !important;
+    line-height: 1.45 !important;
+    white-space: normal !important;
+    overflow-wrap: anywhere;
+  }
+
+  html[data-ui-font-style="pixel"] .toolbar-primary > * {
+    min-width: 0 !important;
+  }
+}
+
+@media (max-width: 720px) {
+
+  .theme-studio-hero {
+    flex-direction: column;
+    padding: 15px;
+  }
+
+  .theme-current-pill {
+    width: 100%;
+  }
+
+  .theme-preset-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .theme-preset-card {
+    min-height: 112px;
+    grid-template-columns: 78px minmax(0, 1fr);
+  }
+
+  .theme-card-preview {
+    width: 78px;
+    height: 76px;
+    padding: 8px;
+  }
+
+  .theme-card-copy { padding-right: 50px; }
+
+  .theme-custom-controls,
+  .theme-color-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 440px) {
+  .theme-mode-bar,
+  .theme-custom-head,
+  .theme-palette-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .theme-segmented {
+    width: 100%;
+  }
+
+  .theme-custom-editor {
+    padding: 13px;
+  }
+
+  .theme-custom-controls,
+  .theme-color-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .theme-field-wide {
+    grid-column: 1;
+  }
+
+  .theme-color-field {
+    min-height: 58px;
+  }
+
+  .theme-preview-actions button,
+  .theme-custom-actions button {
+    flex: 1 1 140px;
+  }
+}

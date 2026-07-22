@@ -701,6 +701,7 @@
 
     function bindBoardEvents() {
         // Quick add key handler
+        document.removeEventListener('keydown', handleGlobalKeys);
         document.addEventListener('keydown', handleGlobalKeys);
     }
 
@@ -708,8 +709,15 @@
     let _dragTaskId = null;
     let _dragSourceColId = null;
     let _dropTarget = null;
+    let _dragOverFrame = 0;
+    let _pendingDropPosition = null;
+    let _dropIndicator = null;
 
     function onDragStart(e, taskId) {
+        if (_dragOverFrame) cancelAnimationFrame(_dragOverFrame);
+        _dragOverFrame = 0;
+        _pendingDropPosition = null;
+        if (_dropIndicator) _dropIndicator.remove();
         _dragTaskId = taskId;
         const card = document.getElementById(`task-${taskId}`);
         const p = state.currentProject;
@@ -723,6 +731,10 @@
     }
 
     function onDragEnd(e) {
+        if (_dragOverFrame) cancelAnimationFrame(_dragOverFrame);
+        _dragOverFrame = 0;
+        _pendingDropPosition = null;
+        if (_dropIndicator) _dropIndicator.remove();
         if (_dragTaskId) {
             const card = document.getElementById(`task-${_dragTaskId}`);
             if (card) card.classList.remove('dragging');
@@ -742,7 +754,8 @@
         // Determine insert position
         const tasksEl = document.getElementById(`tasks-${colId}`);
         if (tasksEl) {
-            insertDropIndicator(tasksEl, e.clientY);
+            _pendingDropPosition = { container: tasksEl, clientY: e.clientY };
+            if (!_dragOverFrame) _dragOverFrame = requestAnimationFrame(flushDropIndicator);
         }
     }
 
@@ -752,13 +765,19 @@
             col.classList.remove('drag-over');
             const tasksEl = document.getElementById(`tasks-${colId}`);
             if (tasksEl) {
-                tasksEl.querySelectorAll('.proj-drop-line').forEach(l => l.remove());
+                if (_pendingDropPosition?.container === tasksEl) _pendingDropPosition = null;
+                if (_dropIndicator?.parentElement === tasksEl) _dropIndicator.remove();
             }
         }
     }
 
+    function flushDropIndicator() {
+        _dragOverFrame = 0;
+        if (!_pendingDropPosition) return;
+        insertDropIndicator(_pendingDropPosition.container, _pendingDropPosition.clientY);
+    }
+
     function insertDropIndicator(container, clientY) {
-        container.querySelectorAll('.proj-drop-line').forEach(l => l.remove());
         const cards = Array.from(container.querySelectorAll('.proj-task-card'));
         let insertBefore = null;
         for (const card of cards) {
@@ -769,14 +788,27 @@
                 break;
             }
         }
-        const line = document.createElement('div');
-        line.className = 'proj-drop-line visible';
-        if (insertBefore) container.insertBefore(line, insertBefore);
-        else container.appendChild(line);
+        if (!_dropIndicator) {
+            _dropIndicator = document.createElement('div');
+            _dropIndicator.className = 'proj-drop-line visible';
+        }
+        _dropIndicator.classList.add('visible');
+        if (insertBefore) {
+            if (_dropIndicator.parentElement !== container || _dropIndicator.nextSibling !== insertBefore) {
+                container.insertBefore(_dropIndicator, insertBefore);
+            }
+        } else if (_dropIndicator.parentElement !== container || _dropIndicator !== container.lastElementChild) {
+            container.appendChild(_dropIndicator);
+        }
     }
 
     function onDrop(e, colId) {
         e.preventDefault();
+        if (_dragOverFrame) {
+            cancelAnimationFrame(_dragOverFrame);
+            flushDropIndicator();
+        }
+        _pendingDropPosition = null;
         const taskId = e.dataTransfer.getData('text/plain') || _dragTaskId;
         if (!taskId) return;
         const col = document.getElementById(`col-${colId}`);

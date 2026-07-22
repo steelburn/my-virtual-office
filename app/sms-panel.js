@@ -3,7 +3,6 @@
     const panel = document.getElementById('sms-panel');
     const toggle = document.getElementById('sms-toggle');
     const closeBtn = document.getElementById('sms-close');
-    const moveBtn = document.getElementById('sms-move');
     const header = panel ? panel.querySelector('.sms-header') : null;
     const resizeHandles = panel ? panel.querySelectorAll('.sms-resize-handle') : [];
     const messagesDiv = document.getElementById('sms-messages');
@@ -36,7 +35,7 @@
     let threadMap = new Map();
     let contactsMap = {};
     let ownerAgent = null;
-    let moveMode = false;
+    let dragPending = false;
     let dragging = false;
     let dragStartX = 0;
     let dragStartY = 0;
@@ -45,6 +44,11 @@
     let resizeState = null;
     let snapZoneLeft = null;
     let snapZoneRight = null;
+    let pointerMoveFrame = 0;
+    let pendingPointer = null;
+    let dragBounds = null;
+    let dragWidth = 0;
+    let dragHeight = 0;
 
     (async function checkSmsStatus() {
         try {
@@ -157,15 +161,6 @@
     syncResponsiveState();
     updateWindowLayoutState();
 
-    if (moveBtn) {
-        moveBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            if (isMobileLayout()) return;
-            if (moveMode) exitMoveMode({ dock: panel.classList.contains('floating') });
-            else enterMoveMode();
-        });
-    }
-
     if (header) {
         header.addEventListener('mousedown', startDrag);
     }
@@ -176,6 +171,7 @@
 
     window.addEventListener('mousemove', onPointerMove);
     window.addEventListener('mouseup', onPointerUp);
+    window.addEventListener('blur', cancelDrag);
     window.addEventListener('resize', onViewportChange);
     const sidebarEdge = document.getElementById('sidebar-edge');
     if (sidebarEdge) sidebarEdge.addEventListener('click', () => setTimeout(onViewportChange, 350));
@@ -643,7 +639,11 @@
     }
 
     function resetWindowState() {
-        moveMode = false;
+        if (pointerMoveFrame) cancelAnimationFrame(pointerMoveFrame);
+        pointerMoveFrame = 0;
+        pendingPointer = null;
+        dragBounds = null;
+        dragPending = false;
         dragging = false;
         resizeState = null;
         removeSnapZones();
@@ -654,42 +654,9 @@
         panel.style.removeProperty('bottom');
         panel.style.removeProperty('width');
         panel.style.removeProperty('height');
-        if (moveBtn) moveBtn.classList.remove('active');
         document.body.style.userSelect = '';
         document.body.style.webkitUserSelect = '';
         document.body.style.cursor = '';
-    }
-
-    function enterMoveMode() {
-        if (isMobileLayout()) return;
-        moveMode = true;
-        if (moveBtn) moveBtn.classList.add('active');
-        panel.classList.add('move-active');
-        const rect = panel.getBoundingClientRect();
-        panel.classList.remove('snap-left', 'snap-right');
-        panel.classList.add('floating');
-        panel.style.left = `${rect.left}px`;
-        panel.style.top = `${rect.top}px`;
-        panel.style.right = 'auto';
-        panel.style.bottom = 'auto';
-        panel.style.width = `${rect.width}px`;
-        panel.style.height = `${rect.height}px`;
-        clampFloatingPosition();
-    }
-
-    function exitMoveMode({ dock = false } = {}) {
-        moveMode = false;
-        dragging = false;
-        if (moveBtn) moveBtn.classList.remove('active');
-        panel.classList.remove('dragging', 'move-active');
-        removeSnapZones();
-        if (dock && !panel.classList.contains('snap-left') && !panel.classList.contains('snap-right')) {
-            panel.classList.remove('floating');
-            panel.style.removeProperty('left');
-            panel.style.removeProperty('top');
-            panel.style.removeProperty('right');
-            panel.style.removeProperty('bottom');
-        }
     }
 
     function updateSnapPosition() {
@@ -714,9 +681,8 @@
         panel.classList.remove(side === 'left' ? 'snap-right' : 'snap-left');
         panel.classList.add(side === 'left' ? 'snap-left' : 'snap-right');
         updateSnapPosition();
-        moveMode = false;
+        dragPending = false;
         dragging = false;
-        if (moveBtn) moveBtn.classList.remove('active');
         removeSnapZones();
     }
 
@@ -734,17 +700,55 @@
     }
 
     function startDrag(e) {
-        if (!moveMode || isMobileLayout() || resizeState) return;
-        if (e.target.closest('button, select, textarea, input, label')) return;
+        if (isMobileLayout() || resizeState || e.button !== 0) return;
+        if (e.target.closest('button, select, textarea, input, label, a')) return;
         e.preventDefault();
-        dragging = true;
-        panel.classList.add('dragging');
+        dragPending = true;
         dragStartX = e.clientX;
         dragStartY = e.clientY;
         const rect = panel.getBoundingClientRect();
         dragOriginLeft = rect.left;
         dragOriginTop = rect.top;
+        panel.dataset.dragWidth = String(rect.width);
+        panel.dataset.dragHeight = String(rect.height);
+    }
+
+    function beginDrag() {
+        dragPending = false;
+        dragging = true;
+        panel.classList.remove('snap-left', 'snap-right', 'move-active');
+        panel.classList.add('floating', 'dragging');
+        panel.style.left = `${dragOriginLeft}px`;
+        panel.style.top = `${dragOriginTop}px`;
+        panel.style.right = 'auto';
+        panel.style.bottom = 'auto';
+        dragWidth = parseFloat(panel.dataset.dragWidth) || 720;
+        dragHeight = parseFloat(panel.dataset.dragHeight) || 560;
+        dragBounds = getBounds();
+        panel.style.width = `${dragWidth}px`;
+        panel.style.height = `${dragHeight}px`;
+        delete panel.dataset.dragWidth;
+        delete panel.dataset.dragHeight;
         createSnapZones();
+        document.body.style.userSelect = 'none';
+        document.body.style.webkitUserSelect = 'none';
+        document.body.style.cursor = 'grabbing';
+    }
+
+    function cancelDrag() {
+        if (pointerMoveFrame) cancelAnimationFrame(pointerMoveFrame);
+        pointerMoveFrame = 0;
+        pendingPointer = null;
+        dragBounds = null;
+        dragPending = false;
+        dragging = false;
+        delete panel.dataset.dragWidth;
+        delete panel.dataset.dragHeight;
+        panel.classList.remove('dragging');
+        removeSnapZones();
+        document.body.style.userSelect = '';
+        document.body.style.webkitUserSelect = '';
+        document.body.style.cursor = '';
     }
 
     function getHandleDirection(handle) {
@@ -779,6 +783,7 @@
             startY: e.clientY,
             startW: rect.width,
             startH: rect.height,
+            bounds: getBounds(),
             startRect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
         };
         panel.style.transition = 'none';
@@ -788,35 +793,60 @@
         document.body.style.cursor = getCursorForDirection(dir);
     }
 
-    function onPointerMove(e) {
+    function flushPointerMove() {
+        pointerMoveFrame = 0;
+        if (!pendingPointer) return;
+        const clientX = pendingPointer.clientX;
+        const clientY = pendingPointer.clientY;
         if (resizeState) {
-            applyResize(e.clientX - resizeState.startX, e.clientY - resizeState.startY);
+            applyResize(clientX - resizeState.startX, clientY - resizeState.startY);
             return;
         }
+        if (dragPending && !dragging) {
+            if (Math.hypot(clientX - dragStartX, clientY - dragStartY) < 4) return;
+            beginDrag();
+        }
         if (!dragging) return;
-        const bounds = getBounds();
-        const width = parseFloat(panel.style.width) || panel.offsetWidth || 720;
-        const height = parseFloat(panel.style.height) || panel.offsetHeight || 560;
-        const left = clamp(dragOriginLeft + (e.clientX - dragStartX), bounds.left, Math.max(bounds.left, bounds.right - width));
-        const top = clamp(dragOriginTop + (e.clientY - dragStartY), bounds.top, Math.max(bounds.top, bounds.bottom - height));
+        const bounds = dragBounds || getBounds();
+        const left = clamp(dragOriginLeft + (clientX - dragStartX), bounds.left, Math.max(bounds.left, bounds.right - dragWidth));
+        const top = clamp(dragOriginTop + (clientY - dragStartY), bounds.top, Math.max(bounds.top, bounds.bottom - dragHeight));
         panel.style.left = `${left}px`;
         panel.style.top = `${top}px`;
-        if (snapZoneLeft) snapZoneLeft.classList.toggle('active', e.clientX < 80);
+        if (snapZoneLeft) snapZoneLeft.classList.toggle('active', clientX < 80);
         if (snapZoneRight) {
-            snapZoneRight.style.right = `${getSidebarWidth()}px`;
-            snapZoneRight.classList.toggle('active', e.clientX > bounds.right - 80);
+            snapZoneRight.style.right = `${Math.max(0, window.innerWidth - bounds.right)}px`;
+            snapZoneRight.classList.toggle('active', clientX > bounds.right - 80);
         }
     }
 
+    function onPointerMove(e) {
+        if (!resizeState && !dragPending && !dragging) return;
+        pendingPointer = { clientX: e.clientX, clientY: e.clientY };
+        if (!pointerMoveFrame) pointerMoveFrame = requestAnimationFrame(flushPointerMove);
+    }
+
     function onPointerUp(e) {
+        if (pointerMoveFrame) {
+            cancelAnimationFrame(pointerMoveFrame);
+            flushPointerMove();
+        }
+        pendingPointer = null;
         if (resizeState) {
             endResize();
+            return;
+        }
+        if (dragPending) {
+            cancelDrag();
             return;
         }
         if (!dragging) return;
         dragging = false;
         panel.classList.remove('dragging');
-        const bounds = getBounds();
+        document.body.style.userSelect = '';
+        document.body.style.webkitUserSelect = '';
+        document.body.style.cursor = '';
+        const bounds = dragBounds || getBounds();
+        dragBounds = null;
         if (e.clientX < 80) snapTo('left');
         else if (e.clientX > bounds.right - 80) snapTo('right');
         else {
@@ -827,7 +857,7 @@
 
     function applyResize(dx, dy) {
         if (!resizeState) return;
-        const bounds = getBounds();
+        const bounds = resizeState.bounds;
         const dir = resizeState.dir;
         const movesLeft = dir === 'left' || dir === 'topLeft' || dir === 'bottomLeft';
         const movesRight = dir === 'right' || dir === 'topRight' || dir === 'bottomRight';

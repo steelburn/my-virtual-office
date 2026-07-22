@@ -1,0 +1,680 @@
+/* Shared modern shell for the standalone Models and Cron pages. */
+:root {
+  --ui-font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --ui-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --ui-pixel: "Press Start 2P", monospace;
+  --ui-radius-control: 10px;
+  --ui-radius-card: 14px;
+  --ui-radius-window: 18px;
+}
+
+html[data-ui-theme="dark"] {
+  color-scheme: dark;
+  --page-bg: #070b13;
+  --page-surface: #0d1524;
+  --page-surface-2: #121d2f;
+  --page-surface-3: #18253a;
+  --page-border: #2a3a52;
+  --page-border-strong: #40536f;
+  --page-text: #f5f7fb;
+  --page-text-2: #b9c4d5;
+  --page-text-3: #7f8da4;
+  --page-accent: #f5c84c;
+  --page-accent-contrast: #172012;
+  --page-green: #4ade80;
+  --page-red: #fb7185;
+  --page-blue: #60a5fa;
+  --page-orange: #fbbf24;
+  --page-shadow: 0 22px 70px rgba(0, 0, 0, .48);
+}
+
+html[data-ui-theme="light"] {
+  color-scheme: light;
+  --page-bg: #e8edf4;
+  --page-surface: #f8fafc;
+  --page-surface-2: #ffffff;
+  --page-surface-3: #eef3f8;
+  --page-border: #94a3b8;
+  --page-border-strong: #64748b;
+  --page-text: #0f172a;
+  --page-text-2: #111827;
+  --page-text-3: #1f2937;
+  --page-accent: #a96c00;
+  --page-accent-contrast: #111827;
+  --page-green: #15803d;
+  --page-red: #be123c;
+  --page-blue: #2563eb;
+  --page-orange: #b45309;
+  --page-shadow: 0 22px 60px rgba(45, 61, 80, .18);
+}
+
+html[data-ui-theme] {
+  --bg: var(--page-bg);
+  --surface: var(--page-surface);
+  --surface2: var(--page-surface-3);
+  --border: var(--page-border);
+  --text: var(--page-text);
+  --dim: var(--page-text-3);
+  --accent: var(--page-accent);
+  --gold: var(--page-accent);
+  --text-dim: var(--page-text-3);
+  --green: var(--page-green);
+  --red: var(--page-red);
+  --blue: var(--page-blue);
+  --orange: var(--page-orange);
+}
+
+body.ui-standalone {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  color: var(--page-text);
+  background:
+    radial-gradient(circle at 18% -10%, color-mix(in srgb, var(--page-blue) 11%, transparent), transparent 36rem),
+    var(--page-bg);
+  font-family: var(--ui-font);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.ui-standalone *,
+.ui-standalone *::before,
+.ui-standalone *::after {
+  box-sizing: border-box;
+}
+
+.ui-standalone :where(button, input, select, textarea) {
+  font-family: var(--ui-font);
+  font-size: 13px;
+}
+
+.ui-standalone button,
+.ui-standalone .btn,
+.ui-standalone .back-btn {
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 1px solid var(--page-border-strong);
+  border-radius: var(--ui-radius-control);
+  color: var(--page-text);
+  background: var(--page-surface-3);
+  box-shadow: none;
+  font-weight: 700;
+  line-height: 1.2;
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color .16s ease, background .16s ease, color .16s ease, transform .16s ease;
+}
+
+.ui-standalone button:hover,
+.ui-standalone .btn:hover,
+.ui-standalone .back-btn:hover {
+  color: var(--page-text);
+  border-color: var(--page-blue);
+  background: color-mix(in srgb, var(--page-surface-3) 82%, var(--page-blue));
+  text-decoration: none;
+}
+
+.ui-standalone button:active,
+.ui-standalone .btn:active,
+.ui-standalone .back-btn:active {
+  transform: translateY(1px);
+}
+
+.ui-standalone button:disabled {
+  cursor: not-allowed;
+  opacity: .46;
+}
+
+.ui-standalone :where(button, a, input, select, textarea, [tabindex]):focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--page-accent) 38%, transparent);
+  outline-offset: 2px;
+  border-color: var(--page-accent) !important;
+}
+
+.ui-standalone :where(input, select, textarea) {
+  min-height: 42px;
+  padding: 9px 11px;
+  border: 1px solid var(--page-border);
+  border-radius: var(--ui-radius-control);
+  color: var(--page-text);
+  background: var(--page-surface-2);
+}
+
+.ui-standalone :where(input, select, textarea):focus {
+  outline: none;
+  border-color: var(--page-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--page-accent) 13%, transparent);
+}
+
+.ui-standalone :where(input, textarea)::placeholder {
+  color: var(--page-text-3);
+}
+
+.ui-standalone a {
+  color: var(--page-accent);
+}
+
+.ui-standalone :where(.header, .models-header) {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  min-height: 68px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 18px;
+  color: var(--page-text);
+  border: 0;
+  border-bottom: 1px solid var(--page-border);
+  background: color-mix(in srgb, var(--page-surface) 94%, transparent);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--page-bg) 68%, transparent);
+  backdrop-filter: blur(18px);
+}
+
+.ui-standalone :where(.header h1, .models-header h1) {
+  margin: 0;
+  color: var(--page-accent);
+  font-family: var(--ui-pixel);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.ui-standalone .header .back,
+.ui-standalone .models-header .back-btn {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 8px 11px;
+  color: var(--page-text-2);
+  border: 1px solid var(--page-border);
+  border-radius: var(--ui-radius-control);
+  background: var(--page-surface-3);
+  font-family: var(--ui-font);
+  font-size: 12px;
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.ui-standalone .header .status {
+  margin-left: auto;
+  padding: 5px 10px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: transparent;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.ui-theme-toggle {
+  min-width: 96px;
+  margin-left: auto;
+  color: var(--page-accent) !important;
+}
+
+.cron-page .header .ui-theme-toggle {
+  margin-left: 0;
+}
+
+/* Cron manager */
+.cron-page .toolbar {
+  position: sticky;
+  top: 68px;
+  z-index: 40;
+  min-height: 62px;
+  padding: 10px 18px;
+  border: 0;
+  border-bottom: 1px solid var(--page-border);
+  background: color-mix(in srgb, var(--page-surface) 94%, transparent);
+  backdrop-filter: blur(16px);
+}
+
+.cron-page .toolbar button {
+  padding: 8px 14px;
+  border: 1px solid var(--page-border-strong);
+  border-radius: var(--ui-radius-control);
+  color: var(--page-text);
+  background: var(--page-surface-3);
+}
+
+.cron-page .toolbar button:first-child {
+  color: var(--page-accent-contrast);
+  border-color: var(--page-accent);
+  background: var(--page-accent);
+}
+
+.cron-page .toolbar .filter {
+  gap: 10px;
+}
+
+.cron-page .toolbar label {
+  color: var(--page-text-2) !important;
+  font-size: 12px !important;
+  font-weight: 700;
+}
+
+.cron-page .toolbar input[type="checkbox"] {
+  min-height: 0;
+  accent-color: var(--page-accent);
+}
+
+.cron-page .toolbar select {
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid var(--page-border);
+  border-radius: var(--ui-radius-control);
+  color: var(--page-text);
+  background: var(--page-surface-2);
+}
+
+.cron-page .jobs {
+  width: min(1460px, 100%);
+  margin: 0 auto;
+  padding: 18px;
+  gap: 12px;
+}
+
+.cron-page .job-card {
+  padding: 16px;
+  border: 1px solid var(--page-border);
+  border-radius: var(--ui-radius-card);
+  background: var(--page-surface);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--page-bg) 55%, transparent);
+}
+
+.cron-page .job-card:hover {
+  border-color: var(--page-border-strong);
+}
+
+.cron-page .job-name {
+  color: var(--page-text);
+  font-size: 16px;
+}
+
+.cron-page .job-agent,
+.cron-page .job-status .badge {
+  border-radius: 999px;
+  font-weight: 750;
+}
+
+.cron-page .job-agent {
+  color: var(--page-blue);
+  background: color-mix(in srgb, var(--page-blue) 11%, var(--page-surface-3));
+}
+
+.cron-page :where(.job-schedule, .job-meta) {
+  color: var(--page-text-3);
+}
+
+.cron-page .job-actions {
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.cron-page .job-actions button {
+  min-height: 38px;
+  padding: 7px 11px;
+  border-radius: var(--ui-radius-control);
+  color: var(--page-text-2);
+  border-color: var(--page-border);
+  background: var(--page-surface-3);
+  font-size: 12px;
+}
+
+.cron-page .job-actions button.run { color: var(--page-green); border-color: color-mix(in srgb, var(--page-green) 55%, var(--page-border)); }
+.cron-page .job-actions button.toggle { color: var(--page-orange); border-color: color-mix(in srgb, var(--page-orange) 55%, var(--page-border)); }
+.cron-page .job-actions button.delete { color: var(--page-red); border-color: color-mix(in srgb, var(--page-red) 55%, var(--page-border)); }
+
+.cron-page .modal-overlay {
+  align-items: center;
+  padding: 24px;
+  background: rgba(3, 7, 15, .64);
+  backdrop-filter: blur(5px);
+}
+
+.cron-page .modal {
+  width: min(680px, 100%);
+  max-width: none;
+  max-height: min(88dvh, 920px);
+  padding: 22px;
+  color: var(--page-text);
+  border: 1px solid var(--page-border-strong);
+  border-radius: var(--ui-radius-window);
+  background: var(--page-surface);
+  box-shadow: var(--page-shadow);
+}
+
+.cron-page .modal h2 {
+  margin: 0 0 20px;
+  color: var(--page-accent);
+  font-family: var(--ui-pixel);
+  font-size: 12px;
+}
+
+.cron-page .form-group label {
+  color: var(--page-text-2);
+  font-size: 12px;
+  letter-spacing: .02em;
+  text-transform: none;
+}
+
+.cron-page .form-hint {
+  color: var(--page-text-3);
+  font-size: 11px;
+}
+
+.cron-page .modal-actions button {
+  min-height: 42px;
+  border-radius: var(--ui-radius-control);
+}
+
+.cron-page .modal-actions .save {
+  color: var(--page-accent-contrast);
+  background: var(--page-accent);
+}
+
+.cron-page .modal-actions .cancel {
+  color: var(--page-text-2);
+  border: 1px solid var(--page-border);
+  background: var(--page-surface-3);
+}
+
+.cron-page .empty {
+  padding: 64px 20px;
+  color: var(--page-text-3);
+}
+
+/* Model and provider settings */
+.models-page .models-header {
+  margin-bottom: 0;
+}
+
+.models-page .tabs {
+  position: sticky;
+  top: 68px;
+  z-index: 40;
+  display: flex;
+  gap: 7px;
+  margin: 0;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--page-border);
+  background: color-mix(in srgb, var(--page-surface) 94%, transparent);
+  overflow-x: auto;
+  scrollbar-width: none;
+  backdrop-filter: blur(16px);
+}
+
+.models-page .tabs::-webkit-scrollbar { display: none; }
+
+.models-page .tab {
+  flex: 0 0 auto;
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 12px;
+  color: var(--page-text-2);
+  border: 1px solid transparent;
+  border-radius: var(--ui-radius-control);
+  background: transparent;
+  font-family: var(--ui-font);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.models-page .tab:hover {
+  color: var(--page-text);
+  background: var(--page-surface-3);
+}
+
+.models-page .tab.active {
+  color: var(--page-accent);
+  border-color: color-mix(in srgb, var(--page-accent) 36%, var(--page-border));
+  background: color-mix(in srgb, var(--page-accent) 11%, var(--page-surface));
+}
+
+.models-page .panel {
+  width: min(1500px, calc(100% - 36px));
+  margin: 18px auto;
+}
+
+.models-page .grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr));
+  gap: 14px;
+}
+
+.models-page .card {
+  margin-bottom: 14px;
+  padding: 16px;
+  color: var(--page-text);
+  border: 1px solid var(--page-border);
+  border-radius: var(--ui-radius-card);
+  background: var(--page-surface);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--page-bg) 55%, transparent);
+  overflow-x: auto;
+}
+
+.models-page :where(h2, h3, .provider-name, .mvw-confirm-title) {
+  color: var(--page-accent);
+}
+
+.models-page h2 {
+  margin: 0 0 12px;
+  font-family: var(--ui-font);
+  font-size: 17px;
+  font-weight: 800;
+}
+
+.models-page h3,
+.models-page .provider-name {
+  font-family: var(--ui-font);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.models-page :where(p, .muted, .provider-current, .checkbox-row) {
+  color: var(--page-text-3);
+  font-size: 12px;
+}
+
+.models-page .tag {
+  padding: 4px 7px;
+  color: var(--page-text-2);
+  border-color: var(--page-border);
+  border-radius: 8px;
+  background: var(--page-surface-3);
+  font-family: var(--ui-mono);
+  font-size: 11px;
+}
+
+.models-page .row {
+  gap: 9px;
+  margin: 9px 0;
+}
+
+.models-page .row label {
+  min-width: 150px;
+  color: var(--page-text-2);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.models-page .row :where(input, select, textarea) {
+  min-width: 220px;
+}
+
+.models-page .btn {
+  min-height: 38px;
+  padding: 8px 11px;
+  border: 1px solid var(--page-border-strong);
+  border-radius: var(--ui-radius-control);
+  color: var(--page-text);
+  background: var(--page-surface-3);
+  font-family: var(--ui-font);
+  font-size: 12px;
+}
+
+.models-page .btn-gold { color: var(--page-accent-contrast); border-color: var(--page-accent); background: var(--page-accent); }
+.models-page .btn-green { color: #fff; border-color: var(--page-green); background: var(--page-green); }
+.models-page .btn-red { color: #fff; border-color: var(--page-red); background: var(--page-red); }
+.models-page .btn-blue { color: #fff; border-color: var(--page-blue); background: var(--page-blue); }
+.models-page .btn-purple { color: #fff; border-color: #7c3aed; background: #7c3aed; }
+
+.models-page .model-list {
+  max-height: 340px;
+  border-color: var(--page-border);
+  border-radius: var(--ui-radius-control);
+  background: var(--page-surface-2);
+}
+
+.models-page .model-item {
+  min-height: 38px;
+  padding: 7px 9px;
+  color: var(--page-text-2);
+  border-color: var(--page-border);
+  font-family: var(--ui-mono);
+  font-size: 11px;
+}
+
+.models-page .status-msg {
+  min-height: 18px;
+  color: var(--page-text-3);
+  font-size: 12px;
+}
+
+.models-page .mvw-confirm-overlay {
+  background: rgba(3, 7, 15, .64);
+  backdrop-filter: blur(5px);
+}
+
+.models-page .mvw-confirm-dialog {
+  padding: 20px;
+  color: var(--page-text);
+  border: 1px solid var(--page-border-strong);
+  border-radius: var(--ui-radius-window);
+  background: var(--page-surface);
+  box-shadow: var(--page-shadow);
+}
+
+.models-page .mvw-confirm-title {
+  font-family: var(--ui-font);
+  font-size: 16px;
+  font-weight: 800;
+}
+
+@media (max-width: 700px) {
+  .ui-standalone :where(.header, .models-header) {
+    position: relative;
+    min-height: 60px;
+    flex-wrap: wrap;
+    padding: 9px 10px;
+  }
+
+  .ui-standalone :where(.header h1, .models-header h1) {
+    flex: 1 1 180px;
+    font-size: 11px;
+  }
+
+  .ui-theme-toggle {
+    min-width: 86px;
+    padding-inline: 9px !important;
+  }
+
+  .cron-page .header .status {
+    order: 4;
+    margin-left: 0;
+  }
+
+  .cron-page .toolbar,
+  .models-page .tabs {
+    position: relative;
+    top: auto;
+  }
+
+  .cron-page .toolbar {
+    padding: 9px 10px;
+  }
+
+  .cron-page .toolbar .filter {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .cron-page .toolbar .filter select {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .cron-page .jobs {
+    padding: 10px;
+  }
+
+  .cron-page .job-card {
+    padding: 13px;
+  }
+
+  .cron-page .job-status {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .cron-page .job-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .cron-page .job-actions button {
+    width: 100%;
+    min-height: 42px;
+  }
+
+  .cron-page .modal-overlay {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .cron-page .modal {
+    width: 100%;
+    max-height: 92dvh;
+    padding: 18px 14px calc(18px + env(safe-area-inset-bottom));
+    border-width: 1px 0 0;
+    border-radius: var(--ui-radius-window) var(--ui-radius-window) 0 0;
+  }
+
+  .models-page .tabs {
+    padding: 8px 10px;
+  }
+
+  .models-page .panel {
+    width: calc(100% - 20px);
+    margin: 10px auto;
+  }
+
+  .models-page .card {
+    padding: 13px;
+  }
+
+  .models-page .row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .models-page .row label,
+  .models-page .row :where(input, select, textarea) {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .models-page .provider-tools {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-standalone *,
+  .ui-standalone *::before,
+  .ui-standalone *::after {
+    scroll-behavior: auto !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}

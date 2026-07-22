@@ -1203,6 +1203,12 @@
 
 /* ── RESPONSIVE ─────────────────────────────────────────────── */
 @media (max-width: 768px) {
+    /* The closed task drawer lives one viewport to the right. Keep it inside
+       the modal's clipping context so it cannot create a page-level
+       horizontal scrollbar while remaining ready to slide in. */
+    #projectsModal {
+        overflow: hidden;
+    }
     .projects-modal-content {
         width: 100vw;
         height: 100vh;

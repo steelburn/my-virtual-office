@@ -7935,6 +7935,8 @@ function _initAgentWorkspaceUI() {
     var header = document.getElementById('agent-workspace-drag-handle');
     var body = document.getElementById('agent-workspace-body');
     var resizeHandle = panel ? panel.querySelector('.agent-workspace-resize-handle') : null;
+    var pointerMoveFrame = 0;
+    var pendingPointer = null;
 
     if (menuBtn) menuBtn.addEventListener('click', function(e) {
         e.stopPropagation();
@@ -8131,7 +8133,15 @@ function _initAgentWorkspaceUI() {
             panel.style.left = rect.left + 'px';
             panel.style.top = rect.top + 'px';
             panel.style.right = 'auto';
-            _agentWorkspace.drag = { id: e.pointerId, x: e.clientX, y: e.clientY, left: rect.left, top: rect.top };
+            _agentWorkspace.drag = {
+                id: e.pointerId,
+                x: e.clientX,
+                y: e.clientY,
+                left: rect.left,
+                top: rect.top,
+                maxLeft: window.innerWidth - Math.min(80, rect.width),
+                maxTop: window.innerHeight - Math.min(80, rect.height)
+            };
             header.setPointerCapture(e.pointerId);
         });
     }
@@ -8140,24 +8150,43 @@ function _initAgentWorkspaceUI() {
             if (!panel || panel.classList.contains('maximized')) return;
             e.preventDefault();
             var rect = panel.getBoundingClientRect();
-            _agentWorkspace.resize = { id: e.pointerId, x: e.clientX, y: e.clientY, w: rect.width, h: rect.height };
+            _agentWorkspace.resize = {
+                id: e.pointerId,
+                x: e.clientX,
+                y: e.clientY,
+                w: rect.width,
+                h: rect.height,
+                maxW: window.innerWidth - 16,
+                maxH: window.innerHeight - 16
+            };
             resizeHandle.setPointerCapture(e.pointerId);
         });
     }
-    document.addEventListener('pointermove', function(e) {
+    function flushPointerMove() {
+        pointerMoveFrame = 0;
+        if (!pendingPointer) return;
         if (_agentWorkspace.drag && panel) {
             var d = _agentWorkspace.drag;
-            panel.style.left = (d.left + e.clientX - d.x) + 'px';
-            panel.style.top = (d.top + e.clientY - d.y) + 'px';
-            _clampAgentWorkspacePanel();
+            panel.style.left = Math.max(0, Math.min(d.maxLeft, d.left + pendingPointer.clientX - d.x)) + 'px';
+            panel.style.top = Math.max(0, Math.min(d.maxTop, d.top + pendingPointer.clientY - d.y)) + 'px';
         }
         if (_agentWorkspace.resize && panel) {
             var r = _agentWorkspace.resize;
-            panel.style.width = Math.max(360, Math.min(window.innerWidth - 16, r.w + e.clientX - r.x)) + 'px';
-            panel.style.height = Math.max(320, Math.min(window.innerHeight - 16, r.h + e.clientY - r.y)) + 'px';
+            panel.style.width = Math.max(360, Math.min(r.maxW, r.w + pendingPointer.clientX - r.x)) + 'px';
+            panel.style.height = Math.max(320, Math.min(r.maxH, r.h + pendingPointer.clientY - r.y)) + 'px';
         }
+    }
+    document.addEventListener('pointermove', function(e) {
+        if (!_agentWorkspace.drag && !_agentWorkspace.resize) return;
+        pendingPointer = { clientX: e.clientX, clientY: e.clientY };
+        if (!pointerMoveFrame) pointerMoveFrame = requestAnimationFrame(flushPointerMove);
     });
     document.addEventListener('pointerup', function() {
+        if (pointerMoveFrame) {
+            cancelAnimationFrame(pointerMoveFrame);
+            flushPointerMove();
+        }
+        pendingPointer = null;
         _agentWorkspace.drag = null;
         _agentWorkspace.resize = null;
     });
@@ -8459,6 +8488,27 @@ function getAgentChatActivitySignature(msg) {
     return tools.map(function(t) { return (t && (t.status || '') + ':' + (t.name || t.toolName || t.tool_name || 'tool')); }).join('|') + '|' + (msg.thinking || '') + '|' + (msg.reasoningTokens || 0) + '|' + approval;
 }
 
+function getAgentChatSessionMeta(messages) {
+    if (!Array.isArray(messages)) return null;
+    for (var i = messages.length - 1; i >= 0; i--) {
+        var msg = messages[i];
+        if (!msg || typeof msg !== 'object') continue;
+        var title = String(msg.sessionTitle || '').trim();
+        var sessionId = String(msg.sessionId || msg.sessionKey || '').trim();
+        var sessionKind = String(msg.sessionKind || '').trim();
+        if (title || sessionId || sessionKind || msg.liveMode || msg.activeSession) {
+            return {
+                title: title || (msg.liveMode ? 'Live Agent Mode' : (sessionKind || 'Session')),
+                sessionId: sessionId,
+                sessionKind: sessionKind,
+                liveMode: Boolean(msg.liveMode),
+                activeSession: Boolean(msg.activeSession)
+            };
+        }
+    }
+    return null;
+}
+
 function pollAgentChat() {
     var now = Date.now();
     if (now - lastChatPoll < 3000) return;
@@ -8474,7 +8524,9 @@ function pollAgentChat() {
         for (var key in data) {
             var msgs = data[key];
             var lastMsg = msgs[msgs.length - 1];
-            var lastText = lastMsg ? ((lastMsg.text || '') + (getAgentChatActivitySignature(lastMsg) ? ' [activity]' : '') + (getAgentChatFirstImage(lastMsg) ? ' [image]' : '')) : '';
+            var sessionMeta = getAgentChatSessionMeta(msgs);
+            var sessionSig = sessionMeta ? (sessionMeta.title + ':' + sessionMeta.sessionId + ':' + (sessionMeta.liveMode ? 'live' : '')) : '';
+            var lastText = lastMsg ? ((lastMsg.text || '') + (getAgentChatActivitySignature(lastMsg) ? ' [activity]' : '') + (getAgentChatFirstImage(lastMsg) ? ' [image]' : '') + (sessionSig ? ' [session:' + sessionSig + ']' : '')) : '';
             if (lastText !== chatLastMsg[key]) {
                 chatTypewriterState[key] = { charIdx: 0, targetText: lastText, done: false, msgIdx: msgs.length - 1 };
                 // On first load, keep minimized. After that, auto-expand on new messages.
@@ -8673,8 +8725,10 @@ function drawChatBubbles() {
         var canScrollUp = startIdx > 0;
         var canScrollDown = scrollOff > 0;
         var mediaLineCount = visLines.filter(function(l) { return l.image; }).length;
-        var bubbleH = Math.min(220, 26 + (visLines.length - mediaLineCount) * 12 + mediaLineCount * 58);
-        chatBubbles.push({ agent: agent, agentKey: agent.statusKey, lines: visLines, canScrollUp: canScrollUp, canScrollDown: canScrollDown, x: headX + 25, y: headY - bubbleH - 10, w: 155, h: bubbleH, anchorX: headX, anchorY: headY, });
+        var sessionMeta = getAgentChatSessionMeta(msgs);
+        var headerExtra = sessionMeta ? 11 : 0;
+        var bubbleH = Math.min(232, 26 + headerExtra + (visLines.length - mediaLineCount) * 12 + mediaLineCount * 58);
+        chatBubbles.push({ agent: agent, agentKey: agent.statusKey, lines: visLines, sessionMeta: sessionMeta, canScrollUp: canScrollUp, canScrollDown: canScrollDown, x: headX + 25, y: headY - bubbleH - 10, w: 155, h: bubbleH, anchorX: headX, anchorY: headY, });
     }
 
     // Compute visible world bounds so bubbles (especially headers with indicators)
@@ -8746,8 +8800,9 @@ function drawChatBubbles() {
         // Header banner
         ctx.fillStyle = b.agent.color + 'dd';
         ctx.save();
-        ctx.beginPath(); ctx.rect(b.x, b.y, b.w, 15); ctx.clip();
-        drawRoundRect(b.x, b.y, b.w, 18, r); ctx.fill();
+        var headerH = b.sessionMeta ? 26 : 15;
+        ctx.beginPath(); ctx.rect(b.x, b.y, b.w, headerH); ctx.clip();
+        drawRoundRect(b.x, b.y, b.w, headerH + 3, r); ctx.fill();
         ctx.restore();
 
         // Header text
@@ -8755,6 +8810,12 @@ function drawChatBubbles() {
         ctx.fillStyle = '#fff';
         ctx.textAlign = 'left';
         ctx.fillText(b.agent.name, b.x + 8, b.y + 11);
+        if (b.sessionMeta) {
+            var sessionText = (b.sessionMeta.liveMode ? '● ' : '') + truncateAgentChatActivity(b.sessionMeta.title || 'Session', 26);
+            ctx.font = '7px Arial, sans-serif';
+            ctx.fillStyle = b.sessionMeta.liveMode ? '#b8ffc8' : 'rgba(255,255,255,0.84)';
+            ctx.fillText(sessionText, b.x + 8, b.y + 22);
+        }
 
         // Live pulsing dot
         var pulse = 0.5 + Math.sin(Date.now() * 0.005) * 0.5;
@@ -8788,7 +8849,7 @@ function drawChatBubbles() {
         renderedChatBubbles.push({ agentKey: b.agentKey, closeRect: { x: closeX, y: closeY, w: 10, h: 10 }, fullRect: { x: b.x, y: b.y, w: b.w, h: b.h }, canScrollUp: b.canScrollUp, canScrollDown: b.canScrollDown, projIndicator: projWork ? { x: b.x + b.w - 33, y: b.y + 4, w: 6, h: 6, info: projWork } : null });
 
         // Message lines
-        var lineY = b.y + 26;
+        var lineY = b.y + (b.sessionMeta ? 37 : 26);
         ctx.font = '9px Arial, sans-serif';
         ctx.textAlign = 'left';
         for (var li = 0; li < b.lines.length; li++) {
@@ -8830,7 +8891,7 @@ function drawChatBubbles() {
             ctx.fillStyle = 'rgba(180,150,50,0.6)';
             ctx.font = '8px sans-serif';
             ctx.textAlign = 'center';
-            ctx.fillText('▲', b.x + b.w / 2, b.y + 24);
+            ctx.fillText('▲', b.x + b.w / 2, b.y + (b.sessionMeta ? 35 : 24));
         }
         if (b.canScrollDown) {
             ctx.fillStyle = 'rgba(180,150,50,0.6)';
@@ -12683,10 +12744,6 @@ function _mmLoadCurrentSettings() {
         var tokenInput = document.getElementById('mm-gateway-token');
         var hermesCb = document.getElementById('mm-hermes-enable');
         var hermesFields = document.getElementById('mm-hermes-fields');
-        var hermesHome = document.getElementById('mm-hermes-home');
-        var hermesBin = document.getElementById('mm-hermes-bin');
-        var hermesApiUrl = document.getElementById('mm-hermes-api-url');
-        var hermesApiKey = document.getElementById('mm-hermes-api-key');
         if (gwInput) gwInput.value = (cfg.openclaw || {}).gatewayUrl || '';
         if (nameInput) nameInput.value = (cfg.office || {}).name || '';
         // Parse "City,State" or "City+Name,State" back into separate fields
@@ -12699,10 +12756,7 @@ function _mmLoadCurrentSettings() {
         var hermesEnabled = hermesCfg.enabled !== false;
         if (hermesCb) hermesCb.checked = hermesEnabled;
         if (hermesFields) hermesFields.style.display = hermesEnabled ? 'block' : 'none';
-        if (hermesHome) hermesHome.value = hermesCfg.homePath || '';
-        if (hermesBin) hermesBin.value = hermesCfg.binary || '';
-        if (hermesApiUrl) hermesApiUrl.value = hermesCfg.apiUrl || '';
-        if (hermesApiKey && hermesCfg.apiKeyConfigured) hermesApiKey.placeholder = 'Configured - leave blank to keep';
+        _mmRenderHermesConnections(hermesCfg.connections || []);
         // Auto-populate token from /gateway-info (shows current effective token)
         if (tokenInput) {
             fetch('/gateway-info').then(function(r) { return r.json(); }).then(function(gi) {
@@ -12773,42 +12827,84 @@ function _mmLoadCurrentSettings() {
     });
 })();
 
+function mmAddHermesConnection(connection) {
+    var container = document.getElementById('mm-hermes-connections');
+    if (!container) return;
+    connection = connection || {};
+    var row = document.createElement('div');
+    row.className = 'mm-hermes-connection';
+    row.style.cssText = 'border:1px solid #333;padding:8px;margin:0 0 8px;border-radius:4px;';
+    row.innerHTML = '<label class="mm-label">Connection ID</label>' +
+        '<input class="mm-input hermes-connection-id" value="' + escHtml(connection.id || '') + '" placeholder="aster">' +
+        '<label class="mm-label">Display Name</label>' +
+        '<input class="mm-input hermes-connection-name" value="' + escHtml(connection.name || '') + '" placeholder="Aster">' +
+        '<label class="mm-label">Native Gateway URL</label>' +
+        '<input class="mm-input hermes-connection-url" value="' + escHtml(connection.apiUrl || '') + '" placeholder="http://host.docker.internal:8642">' +
+        '<label class="mm-label">API Server Key</label>' +
+        '<input type="password" class="mm-input hermes-connection-key" placeholder="' + (connection.apiKeyConfigured ? 'Configured - leave blank to keep' : 'API_SERVER_KEY') + '">' +
+        '<button type="button" class="mm-btn" onclick="this.parentNode.remove()">Remove</button>';
+    container.appendChild(row);
+}
+
+function _mmRenderHermesConnections(connections) {
+    var container = document.getElementById('mm-hermes-connections');
+    if (!container) return;
+    container.innerHTML = '';
+    (connections || []).forEach(mmAddHermesConnection);
+    if (!(connections || []).length) mmAddHermesConnection({ id: 'default', name: 'Hermes' });
+}
+
+function _mmHermesPayload() {
+    var enabled = !!(document.getElementById('mm-hermes-enable') || {}).checked;
+    var connections = [];
+    document.querySelectorAll('#mm-hermes-connections .mm-hermes-connection').forEach(function(row, index) {
+        var id = (row.querySelector('.hermes-connection-id').value || '').trim() || ('connection-' + (index + 1));
+        var name = (row.querySelector('.hermes-connection-name').value || '').trim();
+        var apiUrl = (row.querySelector('.hermes-connection-url').value || '').trim();
+        var apiKey = (row.querySelector('.hermes-connection-key').value || '').trim();
+        if (!apiUrl) return;
+        var item = { id: id, name: name, apiUrl: apiUrl, enabled: true };
+        if (apiKey) item.apiKey = apiKey;
+        connections.push(item);
+    });
+    return { enabled: enabled, hermes: { enabled: enabled, connections: connections } };
+}
+
 function mmTestHermes() {
     var statusEl = document.getElementById('mm-hermes-status');
-    var enabled = !!(document.getElementById('mm-hermes-enable') || {}).checked;
-    var homePath = (document.getElementById('mm-hermes-home') || {}).value || '';
-    var binary = (document.getElementById('mm-hermes-bin') || {}).value || '';
-    var apiUrl = (document.getElementById('mm-hermes-api-url') || {}).value || '';
-    var apiKey = ((document.getElementById('mm-hermes-api-key') || {}).value || '').trim();
-    if (!enabled) {
-        statusEl.innerHTML = '<div class="mm-status info">Hermes auto-detect is disabled.</div>';
+    var payload = _mmHermesPayload();
+    if (!payload.enabled) {
+        statusEl.innerHTML = '<div class="mm-status info">Hermes is disabled.</div>';
         return;
     }
-    statusEl.innerHTML = '<div class="mm-status info">Saving and testing Hermes...</div>';
-    var hermesPayload = { enabled: enabled, homePath: homePath || null, binary: binary || null, apiUrl: apiUrl || null, preferApi: true };
-    if (apiKey) hermesPayload.apiKey = apiKey;
+    if (!payload.hermes.connections.length) {
+        statusEl.innerHTML = '<div class="mm-status err">Add at least one gateway URL.</div>';
+        return;
+    }
+    statusEl.innerHTML = '<div class="mm-status info">Saving and testing native gateways...</div>';
     fetch('/setup/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ hermes: hermesPayload })
+        body: JSON.stringify({ hermes: payload.hermes })
     }).then(function() {
         return fetch('/api/hermes/test', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ homePath: homePath || null, binary: binary || null })
+            body: JSON.stringify(payload.hermes)
         });
-    }).then(function(r) { return r.json().then(function(d){ d._httpOk = r.ok; return d; }); }).then(function(d) {
-        if (d.ok) {
-            var count = (d.agents || []).length;
-            var names = (d.agents || []).slice(0, 5).map(function(a){ return (a.emoji || '⚕️') + ' ' + a.name + (a.model ? ' · ' + a.model : ''); }).join('<br>');
-            var api = d.api || {};
-            var apiLine = api.ok ? '<br>Native API: connected' : '<br>Native API: unavailable' + (api.error ? ' — ' + api.error : '');
-            statusEl.innerHTML = '<div class="mm-status ok">✅ Hermes connected — ' + count + ' profile' + (count === 1 ? '' : 's') + ' found' + apiLine + (names ? '<br>' + names : '') + '</div>';
-        } else {
-            statusEl.innerHTML = '<div class="mm-status err">❌ Hermes not reachable: ' + (d.error || 'unknown error') + '</div>';
-        }
+    }).then(function(r) { return r.json(); }).then(function(d) {
+        var lines = (d.connections || []).map(function(c) {
+            return (c.ok ? '✅ ' : '❌ ') + escHtml(c.name || c.id || 'Hermes') +
+                (c.model ? ' · ' + escHtml(c.model) : '') + '<br><span style="color:#9bb;">' + escHtml(c.url || '') + '</span>' +
+                (!c.ok && c.error ? '<br>' + escHtml(c.error) : '');
+        }).join('<br>');
+        var count = (d.agents || []).length;
+        statusEl.innerHTML = '<div class="mm-status ' + (d.ok ? 'ok' : 'err') + '">' +
+            (d.ok ? 'Native Hermes connected — ' + count + ' agent' + (count === 1 ? '' : 's') : 'Hermes connection failed') +
+            (lines ? '<br>' + lines : '') + '</div>';
+        if (d.ok) _mmLoadCurrentSettings();
     }).catch(function(e) {
-        statusEl.innerHTML = '<div class="mm-status err">❌ Hermes test failed: ' + e.message + '</div>';
+        statusEl.innerHTML = '<div class="mm-status err">Hermes test failed: ' + escHtml(e.message || String(e)) + '</div>';
     });
 }
 
@@ -12975,21 +13071,8 @@ function mmSaveSettings() {
     if (ocPath) config.openclaw.homePath = ocPath;
     if (gwToken) config.openclaw.gatewayToken = gwToken;
     var _hCb = document.getElementById('mm-hermes-enable');
-    var _hHome = document.getElementById('mm-hermes-home');
-    var _hBin = document.getElementById('mm-hermes-bin');
-    var _hApiUrl = document.getElementById('mm-hermes-api-url');
-    var _hApiKey = document.getElementById('mm-hermes-api-key');
     if (_hCb) {
-        var hermesSettings = {
-            enabled: _hCb.checked,
-            homePath: (_hHome ? _hHome.value.trim() : '') || null,
-            binary: (_hBin ? _hBin.value.trim() : '') || null,
-            apiUrl: (_hApiUrl ? _hApiUrl.value.trim() : '') || null,
-            preferApi: true
-        };
-        var hermesApiKey = (_hApiKey ? _hApiKey.value.trim() : '');
-        if (hermesApiKey) hermesSettings.apiKey = hermesApiKey;
-        config.hermes = hermesSettings;
+        config.hermes = _mmHermesPayload().hermes;
     }
     config.office = { name: officeName || 'Virtual Office' };
     config.weather = { location: weather || null };
