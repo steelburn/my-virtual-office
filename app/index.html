@@ -67,6 +67,14 @@
                             <div id="mm-hermes-fields" style="margin-top:8px;">
                                 <div id="mm-hermes-connections"></div>
                                 <button class="mm-btn" type="button" onclick="mmAddHermesConnection()">＋ Add Connection</button>
+                                <label class="mm-label" style="display:flex;align-items:center;gap:6px;margin-top:8px;">
+                                    <input type="checkbox" id="mm-hermes-platform-enable"> Hermes Messaging Gateway Platform
+                                </label>
+                                <label class="mm-label">Gateway Platform Token <span style="color:#666;font-size:9px">shared with MY_VIRTUAL_OFFICE_TOKEN</span></label>
+                                <input type="password" id="mm-hermes-platform-token" class="mm-input" placeholder="long shared token">
+                                <label class="mm-label">Gateway Platform Agent ID</label>
+                                <input type="text" id="mm-hermes-platform-agent" class="mm-input" placeholder="hermes-gateway">
+                                <div style="font-size:9px;color:#666;margin:4px 0 8px;">Optional separate bridge for a Hermes Messaging Gateway plugin.</div>
                                 <button class="mm-btn mm-btn-primary" onclick="mmTestHermes()">🔍 Test Hermes</button>
                                 <div id="mm-hermes-status"></div>
                             </div>

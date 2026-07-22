@@ -12744,6 +12744,9 @@ function _mmLoadCurrentSettings() {
         var tokenInput = document.getElementById('mm-gateway-token');
         var hermesCb = document.getElementById('mm-hermes-enable');
         var hermesFields = document.getElementById('mm-hermes-fields');
+        var hermesPlatformEnable = document.getElementById('mm-hermes-platform-enable');
+        var hermesPlatformToken = document.getElementById('mm-hermes-platform-token');
+        var hermesPlatformAgent = document.getElementById('mm-hermes-platform-agent');
         if (gwInput) gwInput.value = (cfg.openclaw || {}).gatewayUrl || '';
         if (nameInput) nameInput.value = (cfg.office || {}).name || '';
         // Parse "City,State" or "City+Name,State" back into separate fields
@@ -12757,6 +12760,9 @@ function _mmLoadCurrentSettings() {
         if (hermesCb) hermesCb.checked = hermesEnabled;
         if (hermesFields) hermesFields.style.display = hermesEnabled ? 'block' : 'none';
         _mmRenderHermesConnections(hermesCfg.connections || []);
+        if (hermesPlatformEnable) hermesPlatformEnable.checked = !!hermesCfg.platformEnabled;
+        if (hermesPlatformToken && hermesCfg.platformTokenConfigured) hermesPlatformToken.placeholder = 'Configured - leave blank to keep';
+        if (hermesPlatformAgent) hermesPlatformAgent.value = hermesCfg.platformAgentId || 'hermes-gateway';
         // Auto-populate token from /gateway-info (shows current effective token)
         if (tokenInput) {
             fetch('/gateway-info').then(function(r) { return r.json(); }).then(function(gi) {
@@ -12867,7 +12873,16 @@ function _mmHermesPayload() {
         if (apiKey) item.apiKey = apiKey;
         connections.push(item);
     });
-    return { enabled: enabled, hermes: { enabled: enabled, connections: connections } };
+    var platformToken = ((document.getElementById('mm-hermes-platform-token') || {}).value || '').trim();
+    var platformAgent = ((document.getElementById('mm-hermes-platform-agent') || {}).value || '').trim();
+    var hermesPayload = {
+        enabled: enabled,
+        connections: connections,
+        platformEnabled: !!(document.getElementById('mm-hermes-platform-enable') || {}).checked,
+        platformAgentId: platformAgent || 'hermes-gateway'
+    };
+    if (platformToken) hermesPayload.platformToken = platformToken;
+    return { enabled: enabled, hermes: hermesPayload };
 }
 
 function mmTestHermes() {
@@ -12901,7 +12916,8 @@ function mmTestHermes() {
         var count = (d.agents || []).length;
         statusEl.innerHTML = '<div class="mm-status ' + (d.ok ? 'ok' : 'err') + '">' +
             (d.ok ? 'Native Hermes connected — ' + count + ' agent' + (count === 1 ? '' : 's') : 'Hermes connection failed') +
-            (lines ? '<br>' + lines : '') + '</div>';
+            (lines ? '<br>' + lines : '') +
+            (d.platform && d.platform.enabled ? '<br>Gateway Platform: ' + (d.platform.configured ? 'configured' : 'missing token') : '') + '</div>';
         if (d.ok) _mmLoadCurrentSettings();
     }).catch(function(e) {
         statusEl.innerHTML = '<div class="mm-status err">Hermes test failed: ' + escHtml(e.message || String(e)) + '</div>';

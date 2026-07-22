@@ -18,6 +18,17 @@ models and credentials.
 This follows Hermes' documented API-server and profile model: the API server is
 the real agent runtime, and tool calls execute on the machine that hosts it.
 
+## Messaging Gateway platform mode
+
+Virtual Office also includes a Hermes Messaging Gateway platform plugin at:
+
+`integrations/hermes-platform/my_virtual_office/`
+
+This is intentionally separate from native API Server connections. In this mode,
+Hermes gateway polls Virtual Office as a messaging platform and posts replies
+back into the office communication log. See
+`docs/HERMES_PLATFORM_ADAPTER.md`.
+
 ## Configuration
 
 Add one connection per native Hermes profile in Settings:
@@ -42,6 +53,10 @@ Add one connection per native Hermes profile in Settings:
 The equivalent environment setting is `VO_HERMES_CONNECTIONS_JSON`. The older
 single `VO_HERMES_API_URL` and `VO_HERMES_API_KEY` values are accepted only as a
 configuration-migration bridge.
+
+The separate Messaging Gateway platform bridge uses
+`VO_HERMES_PLATFORM_ENABLED`, `VO_HERMES_PLATFORM_TOKEN`, and
+`VO_HERMES_PLATFORM_AGENT_ID` (or the matching `hermes.platform*` settings).
 
 Connection IDs are Virtual Office routing identifiers. The native profile and
 model shown in the UI are discovered from `/v1/capabilities` and `/v1/models`.

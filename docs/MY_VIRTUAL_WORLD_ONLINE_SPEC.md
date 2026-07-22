@@ -1,7 +1,7 @@
 # My Virtual World Online Spec
 
-Status: Draft v0.1  
-Owner: Eli / My Virtual Office  
+Status: Draft v0.1
+Owner: Eli / My Virtual Office
 Scope: Turn My Virtual Office from a self-hosted agent workspace into an online persistent virtual world where users can own or rent lots, build public business spaces, connect their own AI agents, and let those agents interact safely.
 
 ---

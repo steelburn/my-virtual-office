@@ -181,6 +181,14 @@
                 <div id="hermes-fields" style="margin-top:10px;">
                     <div id="s-hermes-connections"></div>
                     <button type="button" onclick="setupAddHermesConnection()" style="margin:0 8px 12px 0;padding:8px 16px;font-size:9px;">＋ ADD CONNECTION</button>
+                    <label style="display:flex;align-items:center;gap:8px;margin-top:10px;">
+                        <input type="checkbox" id="s-hermes-platform-enable"> Hermes Messaging Gateway Platform
+                    </label>
+                    <label>Gateway Platform Token <span style="color:#666;font-size:12px">(shared with MY_VIRTUAL_OFFICE_TOKEN)</span></label>
+                    <input type="password" id="s-hermes-platform-token" placeholder="long shared token">
+                    <label>Gateway Platform Agent ID</label>
+                    <input type="text" id="s-hermes-platform-agent" placeholder="hermes-gateway">
+                    <div style="font-size:12px;color:#666;margin:6px 0 12px;line-height:1.5;">Optional separate bridge for a Hermes Messaging Gateway plugin.</div>
                     <button onclick="testHermesConnection()" style="margin:0 0 12px;padding:8px 16px;font-size:9px;">🔍 TEST HERMES</button>
                     <div id="hermes-test-status"></div>
                 </div>
@@ -527,6 +535,12 @@
             var hEnable = document.getElementById('s-hermes-enable');
             if (hEnable) hEnable.checked = h.enabled !== false;
             setupRenderHermesConnections(h.connections || []);
+            var hPlatformEnable = document.getElementById('s-hermes-platform-enable');
+            var hPlatformToken = document.getElementById('s-hermes-platform-token');
+            var hPlatformAgent = document.getElementById('s-hermes-platform-agent');
+            if (hPlatformEnable) hPlatformEnable.checked = !!h.platformEnabled;
+            if (hPlatformToken && h.platformTokenConfigured) hPlatformToken.placeholder = 'Configured - leave blank to keep';
+            if (hPlatformAgent) hPlatformAgent.value = h.platformAgentId || 'hermes-gateway';
             var hFields = document.getElementById('hermes-fields');
             if (hFields && hEnable) hFields.style.display = hEnable.checked ? 'block' : 'none';
             var c = cfg.codex || {};
@@ -643,7 +657,16 @@
                 if (apiKey) item.apiKey = apiKey;
                 connections.push(item);
             });
-            return { enabled: enabled, hermes: { enabled: enabled, connections: connections } };
+            var platformToken = (document.getElementById('s-hermes-platform-token') || {}).value || '';
+            var platformAgent = (document.getElementById('s-hermes-platform-agent') || {}).value || '';
+            var hermesPayload = {
+                enabled: enabled,
+                connections: connections,
+                platformEnabled: !!(document.getElementById('s-hermes-platform-enable') || {}).checked,
+                platformAgentId: platformAgent.trim() || 'hermes-gateway'
+            };
+            if (platformToken.trim()) hermesPayload.platformToken = platformToken.trim();
+            return { enabled: enabled, hermes: hermesPayload };
         }
 
         function testHermesConnection() {
@@ -677,7 +700,8 @@
                 var count = (d.agents || []).length;
                 statusEl.innerHTML = '<div class="status-box ' + (d.ok ? 'success' : 'error') + '">' +
                     (d.ok ? 'Native Hermes connected — ' + count + ' agent' + (count === 1 ? '' : 's') : 'Hermes connection failed') +
-                    (lines ? '<br>' + lines : '') + '</div>';
+                    (lines ? '<br>' + lines : '') +
+                    (d.platform && d.platform.enabled ? '<br>Gateway Platform: ' + (d.platform.configured ? 'configured' : 'missing token') : '') + '</div>';
             }).catch(function(e) {
                 statusEl.innerHTML = '<div class="status-box error">Error: ' + escapeHtml(e.message || String(e)) + '</div>';
             });
