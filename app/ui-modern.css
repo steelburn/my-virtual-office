@@ -1217,6 +1217,14 @@ body.ui-office-editing .ui-edit-toolbar {
   font-size: 16px;
 }
 
+.ftb-selection-count {
+  padding: 0 7px;
+  color: var(--ui-text-2);
+  font-family: var(--ui-font);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .mobile-view-switcher {
   display: none !important;
 }

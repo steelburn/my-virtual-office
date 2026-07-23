@@ -197,6 +197,7 @@ var _floorEditMode = false; // separate mode for floor tile editing
 
 // --- MULTI-SELECT (marquee) ---
 var _multiSelected = []; // array of furniture ids
+var _multiSelectedWalls = []; // array of indexes in officeConfig.walls.interior
 var _marqueeStart = null; // {x, y} world coords
 var _marqueeEnd = null;
 var _multiDragging = false;
@@ -238,7 +239,20 @@ function undoEdit() {
     getInteractionSpots();
     if (!officeConfig.walls.interior) officeConfig.walls.interior = [];
     buildCollisionGrid();
+    _syncAllDeskAssignments();
     if (typeof _refreshWallSectionButtons === 'function') _refreshWallSectionButtons();
+    selectedItemId = null;
+    selectedWallIdx = null;
+    _multiSelected = [];
+    _multiSelectedWalls = [];
+    _marqueeStart = null;
+    _marqueeEnd = null;
+    _marqueeMode = false;
+    if (_floatingToolbar) _floatingToolbar.style.display = 'none';
+    if (window.OfficeLayouts) {
+        window.OfficeLayouts.refreshSelection();
+        if (window.OfficeLayouts.notifyUndo) window.OfficeLayouts.notifyUndo();
+    }
     _hasUnsavedChanges = _undoStack.length > 0;
     _updateSaveUndoButtons();
 }
@@ -11603,7 +11617,12 @@ function loop() {
 
 const EDIT_BTN_SIZE = 30;
 const EDIT_BTN_MARGIN = 8;
+const EDIT_RESIZE_HANDLE_LENGTH = 96;
+const EDIT_RESIZE_HANDLE_THICKNESS = 14;
 var _editButtons = []; // computed each frame for hit testing
+var _editResizeHandles = []; // right/bottom edge drag handles
+var _editResizeHoverEdge = null;
+var _canvasResizeDrag = null;
 
 function drawEditOverlay() {
     // Dim everything slightly
@@ -11656,7 +11675,9 @@ function drawEditOverlay() {
     }
 
     // --- WALL PLACEMENT GHOST PREVIEW ---
-    if (placingType === 'wall') {
+    if (window.OfficeLayouts && window.OfficeLayouts.isPlacing()) {
+        hudText = '🧩 LAYOUT — Click a tile to place (Esc cancel)';
+    } else if (placingType === 'wall') {
         // Show start tile highlight when in phase 1
         if (wallPlacingPhase === 1 && wallPlacingStart) {
             ctx.fillStyle = 'rgba(100, 180, 255, 0.4)';
@@ -11704,9 +11725,14 @@ function drawEditOverlay() {
         ctx.setLineDash([]);
     }
 
-    // --- EXPAND/SHRINK BUTTONS (drawn in world space at edges) ---
+    // --- EXPAND/SHRINK CONTROLS (drawn in world space at edges) ---
     _editButtons = [];
+    _editResizeHandles = [];
     var bS = EDIT_BTN_SIZE;
+
+    // Drag handles sit directly on the two resizable boundaries.
+    _drawCanvasResizeHandle('right');
+    _drawCanvasResizeHandle('bottom');
 
     // RIGHT edge: + to expand right, - to shrink
     _drawEditBtn(W + EDIT_BTN_MARGIN, H / 2 - bS - 4, bS, '+', 'right', 'expand');
@@ -11831,6 +11857,19 @@ function drawEditOverlay() {
         ctx.setLineDash([]);
     });
 
+    _multiSelectedWalls.forEach(function(wallIdx) {
+        var wall = (officeConfig.walls.interior || [])[wallIdx];
+        if (!wall) return;
+        ctx.setLineDash([4, 3]);
+        ctx.strokeStyle = '#00e5ff';
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.moveTo(wall.x1 * TILE, wall.y1 * TILE);
+        ctx.lineTo(wall.x2 * TILE, wall.y2 * TILE);
+        ctx.stroke();
+        ctx.setLineDash([]);
+    });
+
     // --- MARQUEE RECT ---
     if (_marqueeStart && _marqueeEnd) {
         var mx = Math.min(_marqueeStart.x, _marqueeEnd.x);
@@ -11875,6 +11914,7 @@ function drawEditOverlay() {
             ctx.strokeRect(dth.x, dth.y, dth.w, dth.h);
         }
     }
+    if (window.OfficeLayouts) window.OfficeLayouts.drawPlacementPreview(ctx);
 }
 
 function _drawEditBtn(x, y, size, label, edge, action) {
@@ -11909,6 +11949,53 @@ function _drawEditBtn(x, y, size, label, edge, action) {
 
     // Store for hit testing
     _editButtons.push({ x: x, y: y, w: size, h: size, edge: edge, action: action });
+}
+
+function _drawCanvasResizeHandle(edge) {
+    var length = EDIT_RESIZE_HANDLE_LENGTH;
+    var thickness = EDIT_RESIZE_HANDLE_THICKNESS;
+    var isRight = edge === 'right';
+    var x = isRight ? W - thickness / 2 : W / 2 - length / 2;
+    var y = isRight ? H / 2 - length / 2 : H - thickness / 2;
+    var width = isRight ? thickness : length;
+    var height = isRight ? length : thickness;
+    var isActive = (_canvasResizeDrag && _canvasResizeDrag.edge === edge) || _editResizeHoverEdge === edge;
+
+    ctx.fillStyle = isActive ? 'rgba(0, 229, 255, 0.95)' : 'rgba(15, 23, 42, 0.92)';
+    ctx.fillRect(x, y, width, height);
+    ctx.strokeStyle = isActive ? '#ffffff' : '#ffd600';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, width, height);
+
+    // Three grip marks show the direction this boundary can move.
+    ctx.strokeStyle = isActive ? '#07111f' : '#ffd600';
+    ctx.lineWidth = 2;
+    for (var grip = -1; grip <= 1; grip++) {
+        ctx.beginPath();
+        if (isRight) {
+            var gy = H / 2 + grip * 11;
+            ctx.moveTo(W - 4, gy);
+            ctx.lineTo(W + 4, gy);
+        } else {
+            var gx = W / 2 + grip * 11;
+            ctx.moveTo(gx, H - 4);
+            ctx.lineTo(gx, H + 4);
+        }
+        ctx.stroke();
+    }
+
+    _editResizeHandles.push({ x: x, y: y, w: width, h: height, edge: edge });
+}
+
+function _getCanvasResizeHandleAt(worldX, worldY) {
+    for (var i = 0; i < _editResizeHandles.length; i++) {
+        var handle = _editResizeHandles[i];
+        if (worldX >= handle.x && worldX <= handle.x + handle.w &&
+            worldY >= handle.y && worldY <= handle.y + handle.h) {
+            return handle;
+        }
+    }
+    return null;
 }
 
 function drawEditHUD() {
@@ -11972,6 +12059,102 @@ function shrinkCanvas(edge) {
         H -= TILE;
     }
     saveOfficeConfig();
+}
+
+function _beginCanvasResizeDrag(edge, clientX, clientY) {
+    if (edge !== 'right' && edge !== 'bottom') return;
+    var rect = canvas.getBoundingClientRect();
+    var baseScale = getBaseScale();
+    var totalZoom = baseScale * camera.zoom;
+    if (!rect.width || !rect.height || !totalZoom) return;
+
+    // Keep the config dimensions synchronized so the first Undo snapshot is exact.
+    officeConfig.canvasWidth = W;
+    officeConfig.canvasHeight = H;
+    _canvasResizeDrag = {
+        edge: edge,
+        startClientX: clientX,
+        startClientY: clientY,
+        startW: W,
+        startH: H,
+        startCameraX: camera.x,
+        startCameraY: camera.y,
+        startCameraZoom: camera.zoom,
+        totalZoom: totalZoom,
+        logicalPerClientX: displayW / rect.width,
+        logicalPerClientY: displayH / rect.height,
+        undoDepth: _undoStack.length,
+        wasUnsaved: _hasUnsavedChanges,
+        changed: false
+    };
+    _editResizeHoverEdge = edge;
+    _isPanning = false;
+    canvas.style.cursor = edge === 'right' ? 'ew-resize' : 'ns-resize';
+}
+
+function _updateCanvasResizeDrag(clientX, clientY) {
+    var drag = _canvasResizeDrag;
+    if (!drag) return;
+
+    var worldDelta;
+    var nextW = drag.startW;
+    var nextH = drag.startH;
+    if (drag.edge === 'right') {
+        worldDelta = (clientX - drag.startClientX) * drag.logicalPerClientX / drag.totalZoom;
+        nextW = Math.max(MIN_TILES_X * TILE, drag.startW + Math.round(worldDelta / TILE) * TILE);
+    } else {
+        worldDelta = (clientY - drag.startClientY) * drag.logicalPerClientY / drag.totalZoom;
+        nextH = Math.max(MIN_TILES_Y * TILE, drag.startH + Math.round(worldDelta / TILE) * TILE);
+    }
+    if (nextW === W && nextH === H) return;
+
+    if (!drag.changed) {
+        _pushUndo();
+        drag.changed = true;
+    }
+
+    W = nextW;
+    H = nextH;
+    officeConfig.canvasWidth = W;
+    officeConfig.canvasHeight = H;
+
+    // Preserve the apparent zoom and anchor the fixed top/left edges while dragging.
+    var nextBaseScale = getBaseScale();
+    camera.zoom = Math.max(CAM_ZOOM_MIN, Math.min(CAM_ZOOM_MAX, drag.totalZoom / nextBaseScale));
+    if (drag.edge === 'right') {
+        camera.x = drag.startCameraX - (W - drag.startW) / 2;
+        camera.y = drag.startCameraY;
+    } else {
+        camera.x = drag.startCameraX;
+        camera.y = drag.startCameraY - (H - drag.startH) / 2;
+    }
+}
+
+function _finishCanvasResizeDrag() {
+    var drag = _canvasResizeDrag;
+    if (!drag) return;
+    _canvasResizeDrag = null;
+
+    var endedAtStartSize = W === drag.startW && H === drag.startH;
+    if (drag.changed && endedAtStartSize) {
+        _undoStack.length = drag.undoDepth;
+        _hasUnsavedChanges = drag.wasUnsaved;
+        camera.x = drag.startCameraX;
+        camera.y = drag.startCameraY;
+        camera.zoom = drag.startCameraZoom;
+        _updateSaveUndoButtons();
+    } else if (drag.changed) {
+        clampCamera();
+        saveOfficeConfig();
+    }
+
+    _editResizeHoverEdge = null;
+    canvas.style.cursor = '';
+    // A normal browser click follows mouseup and consumes this guard. If the
+    // pointer was released outside the canvas, clear it before the next action.
+    if (_skipNextEditClick) {
+        setTimeout(function() { _skipNextEditClick = false; }, 0);
+    }
 }
 
 function _shiftAllPositions(dx, dy) {
@@ -12176,6 +12359,9 @@ var _placementValid = true; // updated each frame for ghost preview color
 
 // --- EDIT MODE CLICK HANDLING ---
 function handleEditClick(worldX, worldY, screenX, screenY, event) {
+    if (window.OfficeLayouts && window.OfficeLayouts.isPlacing()) {
+        return window.OfficeLayouts.placeAt(worldX, worldY);
+    }
     // 1. If in placement mode → place item
     if (placingType === 'wall') {
         var _clickTx = Math.floor(worldX / TILE);
@@ -12319,7 +12505,9 @@ function handleEditClick(worldX, worldY, screenX, screenY, event) {
         selectedWallIdx = _hitWallIdx;
         selectedItemId = null;
         _multiSelected = [];
+        _multiSelectedWalls = [];
         _hideColorPicker();
+        if (window.OfficeLayouts) window.OfficeLayouts.refreshSelection();
         return true;
     }
 
@@ -12423,6 +12611,63 @@ function _generateFurnitureId() {
 
 function _updateFloatingToolbarPosition() {
     if (!_floatingToolbar) return;
+
+    var multiCount = _multiSelected.length + _multiSelectedWalls.length;
+    var selectionCount = document.getElementById('ftb-selection-count');
+    var toolbarDeleteBtn = _floatingToolbar.querySelector('.delete-btn');
+    if (multiCount > 0) {
+        var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        _multiSelected.forEach(function(itemId) {
+            var item = officeConfig.furniture.find(function(furniture) { return furniture.id === itemId; });
+            if (!item) return;
+            var itemRect = _getItemWorldRect(item);
+            minX = Math.min(minX, itemRect.x);
+            minY = Math.min(minY, itemRect.y);
+            maxX = Math.max(maxX, itemRect.x + itemRect.w);
+            maxY = Math.max(maxY, itemRect.y + itemRect.h);
+        });
+        _multiSelectedWalls.forEach(function(wallIndex) {
+            var wall = (officeConfig.walls.interior || [])[wallIndex];
+            if (!wall) return;
+            minX = Math.min(minX, wall.x1 * TILE, wall.x2 * TILE);
+            minY = Math.min(minY, wall.y1 * TILE, wall.y2 * TILE);
+            maxX = Math.max(maxX, wall.x1 * TILE, wall.x2 * TILE);
+            maxY = Math.max(maxY, wall.y1 * TILE, wall.y2 * TILE);
+        });
+        if (isFinite(minX)) {
+            var multiBase = getBaseScale();
+            var multiZoom = multiBase * camera.zoom;
+            var canvasRect = canvas.getBoundingClientRect();
+            var multiWorldX = (minX + maxX) / 2;
+            var multiWorldY = minY;
+            var multiDisplayX = (multiWorldX - W / 2 - camera.x) * multiZoom + displayW / 2;
+            var multiDisplayY = (multiWorldY - H / 2 - camera.y) * multiZoom + displayH / 2;
+            var multiScreenX = multiDisplayX * (canvasRect.width / displayW) + canvasRect.left;
+            var multiScreenY = multiDisplayY * (canvasRect.height / displayH) + canvasRect.top;
+
+            _floatingToolbar.style.display = 'flex';
+            if (selectionCount) {
+                selectionCount.style.display = '';
+                selectionCount.textContent = multiCount + ' selected';
+            }
+            if (toolbarDeleteBtn) toolbarDeleteBtn.title = 'Delete ' + multiCount + ' selected (Del)';
+            ['ftb-color-btn', 'ftb-assign-btn', 'ftb-branch-btn', 'ftb-label-edit-btn',
+                'ftb-iw-settings-btn', 'ftb-couch-color-btn', 'ftb-rotate-btn'].forEach(function(id) {
+                var control = document.getElementById(id);
+                if (control) control.style.display = 'none';
+            });
+
+            var toolbarWidth = _floatingToolbar.offsetWidth || 150;
+            var toolbarHeight = _floatingToolbar.offsetHeight || 54;
+            var toolbarLeft = Math.max(8, Math.min(window.innerWidth - toolbarWidth - 8, multiScreenX - toolbarWidth / 2));
+            var toolbarTop = Math.max(8, Math.min(window.innerHeight - toolbarHeight - 8, multiScreenY - toolbarHeight - 8));
+            _floatingToolbar.style.left = toolbarLeft + 'px';
+            _floatingToolbar.style.top = toolbarTop + 'px';
+            return;
+        }
+    }
+    if (selectionCount) selectionCount.style.display = 'none';
+    if (toolbarDeleteBtn) toolbarDeleteBtn.title = 'Delete (Del)';
 
     // Show toolbar for selected wall
     if (selectedWallIdx !== null && officeConfig.walls.interior && officeConfig.walls.interior[selectedWallIdx]) {
@@ -12594,6 +12839,18 @@ function _updateFloatingToolbarPosition() {
 canvas.addEventListener('mousemove', function(e) {
     if (!editMode) { editHoverTile = null; _ghostPos = null; return; }
     var world = screenToWorld(e.clientX, e.clientY);
+    var resizeHandle = _getCanvasResizeHandleAt(world.x, world.y);
+    _editResizeHoverEdge = resizeHandle ? resizeHandle.edge : null;
+    if (_canvasResizeDrag) {
+        canvas.style.cursor = _canvasResizeDrag.edge === 'right' ? 'ew-resize' : 'ns-resize';
+    } else if (resizeHandle) {
+        canvas.style.cursor = resizeHandle.edge === 'right' ? 'ew-resize' : 'ns-resize';
+        editHoverTile = null;
+        _ghostPos = null;
+        return;
+    } else if (!_marqueeMode) {
+        canvas.style.cursor = '';
+    }
     if (world.x >= 0 && world.x < W && world.y >= 0 && world.y < H) {
         editHoverTile = { tx: Math.floor(world.x / TILE), ty: Math.floor(world.y / TILE) };
         // Snap ghost to active zone center within the hovered tile
@@ -12615,12 +12872,21 @@ canvas.addEventListener('mousemove', function(e) {
         }
         // Multi-drag
         if (_multiDragging && _multiDragStart && _multiSelected.length > 0) {
-            var mdx = Math.round((world.x - _multiDragStart.x) / HALF_TILE) * HALF_TILE;
-            var mdy = Math.round((world.y - _multiDragStart.y) / HALF_TILE) * HALF_TILE;
+            var multiSnap = _multiSelectedWalls.length > 0 ? TILE : HALF_TILE;
+            var mdx = Math.round((world.x - _multiDragStart.x) / multiSnap) * multiSnap;
+            var mdy = Math.round((world.y - _multiDragStart.y) / multiSnap) * multiSnap;
             if (mdx !== 0 || mdy !== 0) {
                 _multiSelected.forEach(function(fid) {
                     var fi = officeConfig.furniture.find(function(f){ return f.id === fid; });
                     if (fi) { fi.x += mdx; fi.y += mdy; }
+                });
+                _multiSelectedWalls.forEach(function(wallIdx) {
+                    var wall = (officeConfig.walls.interior || [])[wallIdx];
+                    if (!wall) return;
+                    wall.x1 += mdx / TILE;
+                    wall.x2 += mdx / TILE;
+                    wall.y1 += mdy / TILE;
+                    wall.y2 += mdy / TILE;
                 });
                 _multiDragStart = { x: _multiDragStart.x + mdx, y: _multiDragStart.y + mdy };
             }
@@ -12694,11 +12960,15 @@ function toggleEditMode() {
         _hasUnsavedChanges = false;
         _updateSaveUndoButtons();
     } else {
+        if (window.OfficeLayouts) window.OfficeLayouts.cancelPlacement();
         btn.textContent = '✏️ Edit Office';
         btn.classList.remove('active-edit');
         if (saveBtn) saveBtn.style.display = 'none';
         if (undoBtn) undoBtn.style.display = 'none';
         editHoverTile = null;
+        _finishCanvasResizeDrag();
+        _editResizeHoverEdge = null;
+        canvas.style.cursor = '';
         _floorEditMode = false;
         _hideCatalogPanel();
         if (_hasUnsavedChanges) {
@@ -14186,28 +14456,74 @@ var _editMouseDownPos = null; // track start position to detect drag vs click
 var _editMouseMoved = false;
 var _editDragTileHighlight = null; // {tx, ty} for glowing tile during drag
 
+function _toggleFurnitureMultiSelection(itemId) {
+    // Preserve a normal single selection when Ctrl/Cmd-click adds a second item.
+    if (selectedItemId && selectedItemId !== itemId && _multiSelected.indexOf(selectedItemId) < 0) {
+        _multiSelected.push(selectedItemId);
+    }
+    if (selectedWallIdx !== null && _multiSelectedWalls.indexOf(selectedWallIdx) < 0) {
+        _multiSelectedWalls.push(selectedWallIdx);
+    }
+
+    var alreadySelected = selectedItemId === itemId || _multiSelected.indexOf(itemId) >= 0;
+    _multiSelected = _multiSelected.filter(function(id) { return id !== itemId; });
+    if (!alreadySelected) _multiSelected.push(itemId);
+    selectedItemId = null;
+    selectedWallIdx = null;
+}
+
+function _toggleWallMultiSelection(wallIndex) {
+    // Preserve a normal single selection when Ctrl/Cmd-click adds a wall.
+    if (selectedItemId && _multiSelected.indexOf(selectedItemId) < 0) {
+        _multiSelected.push(selectedItemId);
+    }
+    if (selectedWallIdx !== null && selectedWallIdx !== wallIndex && _multiSelectedWalls.indexOf(selectedWallIdx) < 0) {
+        _multiSelectedWalls.push(selectedWallIdx);
+    }
+
+    var alreadySelected = selectedWallIdx === wallIndex || _multiSelectedWalls.indexOf(wallIndex) >= 0;
+    _multiSelectedWalls = _multiSelectedWalls.filter(function(index) { return index !== wallIndex; });
+    if (!alreadySelected) _multiSelectedWalls.push(wallIndex);
+    selectedItemId = null;
+    selectedWallIdx = null;
+}
+
 canvas.addEventListener('mousedown', function(e) {
-    if (!editMode || e.button !== 0 || placingType) return;
+    if (!editMode || e.button !== 0 || placingType || (window.OfficeLayouts && window.OfficeLayouts.isPlacing())) return;
     var world = screenToWorld(e.clientX, e.clientY);
+    var resizeHandle = _getCanvasResizeHandleAt(world.x, world.y);
+    if (resizeHandle) {
+        _beginCanvasResizeDrag(resizeHandle.edge, e.clientX, e.clientY);
+        _skipNextEditClick = true;
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+    }
     var hit = _findFurnitureAt(world.x, world.y);
     var isCtrl = e.ctrlKey || e.metaKey;
     _editMouseDownPos = { x: world.x, y: world.y, sx: e.clientX, sy: e.clientY };
     _editMouseMoved = false;
     _editDragTileHighlight = null;
 
+    // Area-selection mode must win over object hit-testing so the user can
+    // begin the marquee on top of any object or wall in the group.
+    if (_marqueeMode) {
+        _marqueeStart = { x: world.x, y: world.y };
+        _marqueeEnd = null;
+        _isPanning = false;
+        e.stopPropagation();
+        return;
+    }
+
     if (hit) {
         _isPanning = false;
         e.stopPropagation();
 
         if (isCtrl) {
-            // Ctrl+click: toggle item in multi-selection
-            var _mIdx = _multiSelected.indexOf(hit.id);
-            if (_mIdx >= 0) {
-                _multiSelected.splice(_mIdx, 1);
-            } else {
-                _multiSelected.push(hit.id);
-            }
-            selectedItemId = null;
+            // Ctrl/Cmd+click: add/remove an item without dropping prior selections.
+            _toggleFurnitureMultiSelection(hit.id);
+            _skipNextEditClick = true;
+            if (window.OfficeLayouts) window.OfficeLayouts.refreshSelection();
             return;
         }
 
@@ -14221,30 +14537,70 @@ canvas.addEventListener('mousedown', function(e) {
 
         // Hit is NOT in multi-selection → clear multi, single-select + start drag
         _multiSelected = [];
+        _multiSelectedWalls = [];
         selectedItemId = hit.id;
+        selectedWallIdx = null;
         isDragging = true;
         _pushUndo();
         dragOffset = { x: world.x - hit.x, y: world.y - hit.y };
     } else {
-        // Click on empty space
-        if (_marqueeMode) {
-            // In marquee mode: start drawing the selection box
-            _marqueeStart = { x: world.x, y: world.y };
-            _marqueeEnd = null;
+        var wallHit = _findWallAt(world.x, world.y);
+        if (wallHit >= 0) {
             _isPanning = false;
             e.stopPropagation();
+            if (isCtrl) {
+                _toggleWallMultiSelection(wallHit);
+                _skipNextEditClick = true;
+            } else {
+                _multiSelected = [];
+                _multiSelectedWalls = [];
+                selectedWallIdx = wallHit;
+            }
+            selectedItemId = null;
+            if (window.OfficeLayouts) window.OfficeLayouts.refreshSelection();
             return;
         }
+        // Click on empty space
         if (!isCtrl) {
             // Normal click on empty: clear selections
             selectedItemId = null;
             selectedWallIdx = null;
             _multiSelected = [];
+            _multiSelectedWalls = [];
             if (_floatingToolbar) _floatingToolbar.style.display = 'none';
             _hideColorPicker();
+            if (window.OfficeLayouts) window.OfficeLayouts.refreshSelection();
         }
     }
 });
+
+window.addEventListener('mousemove', function(e) {
+    if (!_canvasResizeDrag) return;
+    e.preventDefault();
+    _updateCanvasResizeDrag(e.clientX, e.clientY);
+});
+
+canvas.addEventListener('touchstart', function(e) {
+    if (!editMode || e.touches.length !== 1 || placingType ||
+        (window.OfficeLayouts && window.OfficeLayouts.isPlacing())) return;
+    var touch = e.touches[0];
+    var world = screenToWorld(touch.clientX, touch.clientY);
+    var resizeHandle = _getCanvasResizeHandleAt(world.x, world.y);
+    if (!resizeHandle) return;
+    _beginCanvasResizeDrag(resizeHandle.edge, touch.clientX, touch.clientY);
+    e.preventDefault();
+    e.stopPropagation();
+}, { passive: false });
+
+canvas.addEventListener('touchmove', function(e) {
+    if (!_canvasResizeDrag || e.touches.length !== 1) return;
+    var touch = e.touches[0];
+    _updateCanvasResizeDrag(touch.clientX, touch.clientY);
+    e.preventDefault();
+}, { passive: false });
+
+window.addEventListener('touchend', _finishCanvasResizeDrag, { passive: true });
+window.addEventListener('touchcancel', _finishCanvasResizeDrag, { passive: true });
 
 // Double-click on empty space → activate marquee mode (click+drag to select area)
 var _marqueeMode = false; // true = next mousedown starts marquee drawing
@@ -14258,6 +14614,7 @@ canvas.addEventListener('dblclick', function(e) {
         selectedItemId = null;
         selectedWallIdx = null;
         _multiSelected = [];
+        _multiSelectedWalls = [];
         // Show visual hint
         canvas.style.cursor = 'crosshair';
     }
@@ -14265,6 +14622,7 @@ canvas.addEventListener('dblclick', function(e) {
 
 // Stop dragging on mouseup (window-level to catch releases outside canvas)
 window.addEventListener('mouseup', function() {
+    _finishCanvasResizeDrag();
     _editDragTileHighlight = null;
     if (isDragging) {
         isDragging = false;
@@ -14275,6 +14633,9 @@ window.addEventListener('mouseup', function() {
     }
     // Finalize marquee selection
     if (_marqueeStart) {
+        // A click event follows mouseup. Do not let it replace the completed
+        // marquee selection with the single object under the release point.
+        _skipNextEditClick = true;
         if (_marqueeEnd) {
             var mx1 = Math.min(_marqueeStart.x, _marqueeEnd.x);
             var my1 = Math.min(_marqueeStart.y, _marqueeEnd.y);
@@ -14283,6 +14644,7 @@ window.addEventListener('mouseup', function() {
             // Only select if marquee is bigger than 10px world (not just a click)
             if (mx2 - mx1 > 10 && my2 - my1 > 10) {
                 _multiSelected = [];
+                _multiSelectedWalls = [];
                 officeConfig.furniture.forEach(function(f) {
                     var fb = FURNITURE_BOUNDS[f.type] || { w: TILE, h: TILE, ox: 0, oy: 0 };
                     var fox = fb.ox || 0, foy = fb.oy || 0;
@@ -14292,12 +14654,22 @@ window.addEventListener('mouseup', function() {
                         _multiSelected.push(f.id);
                     }
                 });
+                (officeConfig.walls.interior || []).forEach(function(wall, wallIdx) {
+                    var wx1 = Math.min(wall.x1, wall.x2) * TILE;
+                    var wy1 = Math.min(wall.y1, wall.y2) * TILE;
+                    var wx2 = Math.max(wall.x1, wall.x2) * TILE;
+                    var wy2 = Math.max(wall.y1, wall.y2) * TILE;
+                    if (wx1 <= mx2 && wx2 >= mx1 && wy1 <= my2 && wy2 >= my1) {
+                        _multiSelectedWalls.push(wallIdx);
+                    }
+                });
             }
         }
         _marqueeStart = null;
         _marqueeEnd = null;
         _marqueeMode = false;
         canvas.style.cursor = '';
+        if (window.OfficeLayouts) window.OfficeLayouts.refreshSelection();
     }
     // End multi-drag
     if (_multiDragging) {
@@ -14315,6 +14687,10 @@ window.addEventListener('mouseup', function() {
 canvas.addEventListener('contextmenu', function(e) {
     e.preventDefault();
     if (editMode) {
+        if (window.OfficeLayouts && window.OfficeLayouts.isPlacing()) {
+            window.OfficeLayouts.cancelPlacement();
+            return;
+        }
         _cancelPlacement();
         return;
     }
@@ -14345,7 +14721,9 @@ canvas.addEventListener('touchend', function() {
 document.addEventListener('keydown', function(e) {
     if (!editMode) return;
     if (e.key === 'Escape') {
-        if (_marqueeMode) {
+        if (window.OfficeLayouts && window.OfficeLayouts.isPlacing()) {
+            window.OfficeLayouts.cancelPlacement();
+        } else if (_marqueeMode) {
             _marqueeMode = false;
             _marqueeStart = null;
             _marqueeEnd = null;
@@ -14360,7 +14738,8 @@ document.addEventListener('keydown', function(e) {
     }
     if (e.key === 'Delete' || e.key === 'Backspace') {
         if (document.activeElement === document.body || document.activeElement === canvas) {
-            if (selectedItemId) _deleteSelectedItem();
+            if (_multiSelected.length || _multiSelectedWalls.length) _deleteMultiSelected();
+            else if (selectedItemId) _deleteSelectedItem();
             else if (selectedWallIdx !== null) _deleteSelectedWall();
         }
     }
@@ -14379,7 +14758,7 @@ function _createCatalogPanel() {
     var header = document.createElement('div');
     header.className = 'catalog-header';
     var titleSpan = document.createElement('span');
-    titleSpan.textContent = '🪑 FURNITURE';
+    titleSpan.textContent = '✏️ EDIT OFFICE';
     var closeBtn = document.createElement('button');
     closeBtn.className = 'catalog-close-btn';
     closeBtn.textContent = '✕';
@@ -14388,6 +14767,13 @@ function _createCatalogPanel() {
     header.appendChild(titleSpan);
     header.appendChild(closeBtn);
     panel.appendChild(header);
+
+    var objectsView = document.createElement('div');
+    objectsView.className = 'office-editor-view active';
+    objectsView.id = 'office-editor-objects-view';
+    var layoutsView = document.createElement('div');
+    layoutsView.className = 'office-editor-view';
+    layoutsView.id = 'office-editor-layouts-view';
 
     // Body
     var body = document.createElement('div');
@@ -14438,7 +14824,7 @@ function _createCatalogPanel() {
         body.appendChild(section);
     });
 
-    panel.appendChild(body);
+    objectsView.appendChild(body);
 
     // Snap zone selector
     var snapSection = document.createElement('div');
@@ -14459,7 +14845,7 @@ function _createCatalogPanel() {
     }
     snapSelect.addEventListener('change', function() { activeSnapZone = this.value; });
     snapSection.appendChild(snapSelect);
-    panel.appendChild(snapSection);
+    objectsView.appendChild(snapSection);
 
     // Floor edit toggle
     var floorSection = document.createElement('div');
@@ -14475,7 +14861,7 @@ function _createCatalogPanel() {
         floorBtn.textContent = _floorEditMode ? '✅ Done Floor Edit' : '🎨 Edit Floor Tiles';
     });
     floorSection.appendChild(floorBtn);
-    panel.appendChild(floorSection);
+    objectsView.appendChild(floorSection);
 
     // === PET SECTION ===
     var petSection = document.createElement('div');
@@ -14552,14 +14938,22 @@ function _createCatalogPanel() {
     petSpeciesSelect.addEventListener('change', _applyPetConfig);
     petNameInput.addEventListener('change', _applyPetConfig);
 
-    panel.appendChild(petSection);
+    objectsView.appendChild(petSection);
 
     // Instructions
     var instr = document.createElement('div');
     instr.className = 'catalog-instructions';
     instr.id = 'catalog-instr';
-    instr.innerHTML = 'Click item to place<br>Right-click / Esc to cancel';
-    panel.appendChild(instr);
+    instr.innerHTML = '<b>Select multiple:</b> Double-click empty space, then drag over objects.<br>' +
+        'Or hold <b>Ctrl</b> (<b>Cmd</b> on Mac) and click objects one by one.<br>' +
+        'Drag any selected object to move the group · <b>Del</b> deletes selected.<br>' +
+        '<b>Resize office:</b> Drag the yellow grip on the right or bottom edge.<br>' +
+        'Click a library item to place it · Right-click / Esc to cancel.';
+    objectsView.appendChild(instr);
+
+    panel.appendChild(objectsView);
+    panel.appendChild(layoutsView);
+    if (window.OfficeLayouts) window.OfficeLayouts.mount(layoutsView);
 
     var wrapper = document.querySelector('.game-wrapper');
     wrapper.appendChild(panel);
@@ -14581,9 +14975,16 @@ function _createFloatingToolbar() {
     delBtn.title = 'Delete (Del)';
     delBtn.textContent = '🗑️';
     delBtn.addEventListener('click', function() {
-        if (selectedWallIdx !== null) _deleteSelectedWall();
+        if (_multiSelected.length || _multiSelectedWalls.length) _deleteMultiSelected();
+        else if (selectedWallIdx !== null) _deleteSelectedWall();
         else _deleteSelectedItem();
     });
+
+    var selectionCount = document.createElement('span');
+    selectionCount.id = 'ftb-selection-count';
+    selectionCount.className = 'ftb-selection-count';
+    selectionCount.setAttribute('aria-live', 'polite');
+    selectionCount.style.display = 'none';
 
     var deselectBtn = document.createElement('button');
     deselectBtn.className = 'ftb-btn';
@@ -14619,6 +15020,7 @@ function _createFloatingToolbar() {
     branchBtn.addEventListener('click', function() { _showBranchAssignMenu(); });
 
     tb.appendChild(delBtn);
+    tb.appendChild(selectionCount);
     tb.appendChild(colorBtn);
     tb.appendChild(assignBtn);
     tb.appendChild(branchBtn);
@@ -14637,9 +15039,13 @@ function _hideCatalogPanel() {
     if (_floatingToolbar) _floatingToolbar.style.display = 'none';
     placingType = null;
     selectedItemId = null;
+    selectedWallIdx = null;
+    _multiSelected = [];
+    _multiSelectedWalls = [];
     isDragging = false;
     _ghostPos = null;
     _updateCatalogSelection();
+    if (window.OfficeLayouts) window.OfficeLayouts.refreshSelection();
 }
 
 function _selectCatalogItem(type) {
@@ -14662,13 +15068,23 @@ function _cancelPlacement() {
     _ghostPos = null;
     _updateCatalogSelection();
     var instr = document.getElementById('catalog-instr');
-    if (instr) instr.innerHTML = 'Click item to place<br>Right-click / Esc to cancel';
+    if (instr) {
+        instr.innerHTML = '<b>Select multiple:</b> Double-click empty space, then drag over objects.<br>' +
+            'Or hold <b>Ctrl</b> (<b>Cmd</b> on Mac) and click objects one by one.<br>' +
+            'Drag any selected object to move the group · <b>Del</b> deletes selected.<br>' +
+            '<b>Resize office:</b> Drag the yellow grip on the right or bottom edge.<br>' +
+            'Click a library item to place it · Right-click / Esc to cancel.';
+    }
 }
 
 function _deselectItem() {
     selectedItemId = null;
+    selectedWallIdx = null;
+    _multiSelected = [];
+    _multiSelectedWalls = [];
     isDragging = false;
     if (_floatingToolbar) _floatingToolbar.style.display = 'none';
+    if (window.OfficeLayouts) window.OfficeLayouts.refreshSelection();
 }
 
 function _showBranchAssignMenu() {
@@ -14841,6 +15257,54 @@ function _deleteSelectedItem() {
     if (_floatingToolbar) _floatingToolbar.style.display = 'none';
     getInteractionSpots();
     saveOfficeConfig(); // persist deletion + re-derive meeting slots
+}
+
+function _deleteMultiSelected() {
+    var selectedIds = _multiSelected.slice();
+    var selectedWallIndexes = _multiSelectedWalls.slice();
+    var selectedCount = selectedIds.length + selectedWallIndexes.length;
+    if (!selectedCount) return;
+
+    _pushUndo();
+    var selectedIdSet = new Set(selectedIds);
+    var assignedAgents = new Set();
+    officeConfig.furniture.forEach(function(item) {
+        if (selectedIdSet.has(item.id) &&
+            (item.type === 'desk' || item.type === 'bossDesk') &&
+            item.assignedTo) {
+            assignedAgents.add(item.assignedTo);
+        }
+    });
+    agents.forEach(function(agent) {
+        if (!assignedAgents.has(agent.name)) return;
+        agent.desk = { x: Math.floor(W / 2), y: Math.floor(H / 2) };
+        agent.targetX = agent.desk.x;
+        agent.targetY = agent.desk.y;
+    });
+
+    officeConfig.furniture = officeConfig.furniture.filter(function(item) {
+        return !selectedIdSet.has(item.id);
+    });
+    var selectedWallSet = new Set(selectedWallIndexes);
+    officeConfig.walls.interior = (officeConfig.walls.interior || []).filter(function(_, index) {
+        return !selectedWallSet.has(index);
+    });
+
+    selectedItemId = null;
+    selectedWallIdx = null;
+    _multiSelected = [];
+    _multiSelectedWalls = [];
+    isDragging = false;
+    _multiDragging = false;
+    _multiDragStart = null;
+    if (_floatingToolbar) _floatingToolbar.style.display = 'none';
+    _hideColorPicker();
+    getInteractionSpots();
+    buildCollisionGrid();
+    _syncAllDeskAssignments();
+    saveOfficeConfig();
+    if (window.OfficeLayouts) window.OfficeLayouts.refreshSelection();
+    _acpShowToast('🗑️ Deleted ' + selectedCount + ' selected item' + (selectedCount === 1 ? '' : 's') + '.');
 }
 
 function _updateCatalogSelection() {

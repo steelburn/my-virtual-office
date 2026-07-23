@@ -4311,6 +4311,15 @@ button:active { transform: translateY(3px); box-shadow: none; }
 }
 .ftb-btn:hover { background: #3a3a6e; }
 .ftb-btn.delete-btn:hover { background: rgba(244, 67, 54, 0.4); border-color: #f44336; }
+.ftb-selection-count {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 5px;
+  color: #d7f7ff;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
 
 /* ─── AGENT CREATOR PANEL ─────────────────────────────────── */
 .agent-panel {

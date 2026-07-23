@@ -30,6 +30,7 @@ import sqlite3
 import subprocess
 import time
 import gateway_presence
+from layout_library import LayoutLibrary, LayoutValidationError
 from zoneinfo import ZoneInfo
 try:
     import yaml
@@ -12716,6 +12717,7 @@ def _auto_configure_gateway_origin():
 GATEWAY_HTTP = VO_CONFIG["openclaw"]["gatewayHttp"]
 CONFIG_PATH = os.path.join(WORKSPACE_BASE, "openclaw.json")
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
+LAYOUT_LIBRARY = LayoutLibrary(STATUS_DIR, os.path.join(APP_DIR, "default-office-config.json"))
 
 
 def _reload_gateway_globals():
@@ -13836,6 +13838,35 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(json.dumps({"ok": True, "history": history}).encode())
+        elif request_path == "/api/layouts":
+            result = {"ok": True, "layouts": LAYOUT_LIBRARY.list()}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode("utf-8"))
+        elif request_path.startswith("/api/layouts/"):
+            layout_id = urllib.parse.unquote(request_path[len("/api/layouts/"):].strip("/"))
+            try:
+                asset = LAYOUT_LIBRARY.get(layout_id)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                if query_params.get("download") == ["1"]:
+                    filename = re.sub(r"[^a-zA-Z0-9_.-]+", "-", asset.get("name") or layout_id).strip("-") or "office-layout"
+                    self.send_header("Content-Disposition", f'attachment; filename="{filename}.mvo-layout.json"')
+                self.end_headers()
+                self.wfile.write(json.dumps(asset, indent=2, ensure_ascii=False).encode("utf-8"))
+            except FileNotFoundError:
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok":false,"error":"Layout not found"}')
+            except LayoutValidationError as exc:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"ok": False, "error": str(exc)}).encode("utf-8"))
         elif self.path == "/api/presence" or self.path.startswith("/api/presence/"):
             # Presence API — read from gateway_presence in-memory state
             if self.path == "/api/presence":
@@ -15122,6 +15153,26 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             result.pop("_status", None)
             self.wfile.write(json.dumps(result).encode())
             return
+        elif self.path.startswith("/api/layouts/"):
+            layout_id = urllib.parse.unquote(urllib.parse.urlparse(self.path).path[len("/api/layouts/"):].strip("/"))
+            try:
+                LAYOUT_LIBRARY.delete(layout_id)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+            except FileNotFoundError:
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok":false,"error":"Layout not found"}')
+            except LayoutValidationError as exc:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"ok": False, "error": str(exc)}).encode("utf-8"))
+            return
         elif self.path.startswith("/api/meetings/history/"):
             # DELETE /api/meetings/history/<id>
             meet_id = self.path.split("/api/meetings/history/")[1].strip("/")
@@ -15293,6 +15344,33 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(json.dumps({"ok": False, "error": str(e)}).encode())
+            return
+        # --- LAYOUT MARKETPLACE / LIBRARY ---
+        elif request_path == "/api/layouts":
+            try:
+                try:
+                    length = int(self.headers.get("Content-Length", 0))
+                except (TypeError, ValueError) as exc:
+                    raise LayoutValidationError("Invalid Content-Length header") from exc
+                if length <= 0 or length > 1_500_000:
+                    raise LayoutValidationError("Layout file must be between 1 byte and 1.5 MB")
+                body = json.loads(self.rfile.read(length))
+                asset = LAYOUT_LIBRARY.save(body)
+                self.send_response(201)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({"ok": True, "layout": asset}).encode("utf-8"))
+            except json.JSONDecodeError:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok":false,"error":"Invalid JSON"}')
+            except LayoutValidationError as exc:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"ok": False, "error": str(exc)}).encode("utf-8"))
             return
         # --- OFFICE CONFIG PERSISTENCE ---
         elif self.path == "/api/office-config":

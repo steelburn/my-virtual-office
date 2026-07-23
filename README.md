@@ -61,6 +61,10 @@ For Docker deployments, install Claude Code inside the container image or set `V
 - Floor tile color customization
 - Rotation support for select furniture (couch)
 - Text labels for naming rooms and areas
+- **Layout Marketplace** tab with the bundled Default Office and a persistent personal layout library
+- Select furniture, text labels, and walls as one group, save their exact arrangement, then place the group elsewhere
+- Place layouts without replacing the current office, agents, branches, floor, or canvas settings
+- Upload and download portable `.mvo-layout.json` files to share layouts between Virtual Office installations
 
 ### 👤 Agent Customization
 - Full character appearance editor: skin tone, hair style/color, eye color, eyebrows

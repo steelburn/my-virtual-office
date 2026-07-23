@@ -592,6 +592,11 @@
         panel.querySelectorAll('[data-catalog-pane]').forEach(function (pane) {
             pane.hidden = pane.dataset.catalogPane !== name;
         });
+        var objectsView = document.getElementById('office-editor-objects-view');
+        var layoutsView = document.getElementById('office-editor-layouts-view');
+        if (objectsView) objectsView.classList.toggle('active', name !== 'layouts');
+        if (layoutsView) layoutsView.classList.toggle('active', name === 'layouts');
+        if (name === 'layouts' && window.OfficeLayouts) window.OfficeLayouts.open();
     }
 
     function enhanceCatalog() {
@@ -614,6 +619,7 @@
         var tabs = make('div', 'catalog-tabs');
         [
             { id: 'objects', label: 'Objects' },
+            { id: 'layouts', label: 'Layouts' },
             { id: 'floor', label: 'Floor' },
             { id: 'zones', label: 'Snap' },
             { id: 'pet', label: 'Pet' }
@@ -629,11 +635,13 @@
         header.parentNode.insertBefore(tools, header.nextSibling);
 
         var body = panel.querySelector('.catalog-body');
-        var supplemental = Array.prototype.slice.call(panel.querySelectorAll(':scope > .catalog-snap-section'));
+        var supplemental = Array.prototype.slice.call(panel.querySelectorAll('#office-editor-objects-view > .catalog-snap-section'));
+        var layoutsPane = panel.querySelector('#office-editor-layouts-view');
         if (body) body.dataset.catalogPane = 'objects';
         if (supplemental[0]) supplemental[0].dataset.catalogPane = 'zones';
         if (supplemental[1]) supplemental[1].dataset.catalogPane = 'floor';
         if (supplemental[2]) supplemental[2].dataset.catalogPane = 'pet';
+        if (layoutsPane) layoutsPane.dataset.catalogPane = 'layouts';
 
         search.addEventListener('input', function () {
             var query = search.value.trim().toLowerCase();
