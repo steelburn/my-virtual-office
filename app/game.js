@@ -387,10 +387,69 @@ const COLLISION_ENABLED = true;
 const COLLISION_RADIUS = 22;       // personal space radius (px)
 const COLLISION_PUSH = 1.4;        // steering strength when walking
 const COLLISION_SPOT_RADIUS = 24;  // min distance between agents at interaction spots
+const AGENT_WALL_CLEARANCE = 14;   // keep standing agents visually clear of wall faces
+const WALL_HALF_THICKNESS = 3;     // interior walls render with a 6px body
 
 // ============================================================
 // COLLISION HELPERS (only active when COLLISION_ENABLED = true)
 // ============================================================
+function _distanceFromPointToSegment(px, py, x1, y1, x2, y2) {
+    const segmentX = x2 - x1;
+    const segmentY = y2 - y1;
+    const lengthSquared = segmentX * segmentX + segmentY * segmentY;
+    if (lengthSquared === 0) {
+        const dx = px - x1;
+        const dy = py - y1;
+        return Math.sqrt(dx * dx + dy * dy);
+    }
+    const projection = Math.max(0, Math.min(1,
+        ((px - x1) * segmentX + (py - y1) * segmentY) / lengthSquared));
+    const closestX = x1 + projection * segmentX;
+    const closestY = y1 + projection * segmentY;
+    const dx = px - closestX;
+    const dy = py - closestY;
+    return Math.sqrt(dx * dx + dy * dy);
+}
+
+function _isPointClearOfInteriorWalls(x, y, clearance) {
+    const interior = (officeConfig.walls && officeConfig.walls.interior) || [];
+    const requiredDistance = Math.max(0, clearance || 0) + WALL_HALF_THICKNESS;
+    for (let i = 0; i < interior.length; i++) {
+        const wall = interior[i];
+        const distance = _distanceFromPointToSegment(
+            x, y,
+            wall.x1 * TILE, wall.y1 * TILE,
+            wall.x2 * TILE, wall.y2 * TILE
+        );
+        if (distance < requiredDistance) return false;
+    }
+    return true;
+}
+
+function _applyWallSafeAgentOffset(agent, offsetX, offsetY) {
+    if (!offsetX && !offsetY) return false;
+    const startX = agent.x;
+    const startY = agent.y;
+    const nextX = startX + offsetX;
+    const nextY = startY + offsetY;
+
+    if (_isPointClearOfInteriorWalls(nextX, nextY, AGENT_WALL_CLEARANCE)) {
+        agent.x = nextX;
+        agent.y = nextY;
+        return true;
+    }
+    // Preserve the safe component so separation can slide along a wall.
+    if (offsetX && _isPointClearOfInteriorWalls(nextX, startY, AGENT_WALL_CLEARANCE)) {
+        agent.x = nextX;
+        return true;
+    }
+    if (offsetY && _isPointClearOfInteriorWalls(startX, nextY, AGENT_WALL_CLEARANCE)) {
+        agent.y = nextY;
+        return true;
+    }
+    return false;
+}
+
 function isSpotOccupied(x, y, excludeId) {
     if (!COLLISION_ENABLED) return false;
     for (let i = 0; i < agents.length; i++) {
@@ -2824,13 +2883,19 @@ class Agent {
                 if (oDist < COLLISION_RADIUS && oDist > 0.1) {
                     // Strong push — guaranteed separation
                     const push = 1.2 * (1 - oDist / COLLISION_RADIUS);
-                    this.x += (ox / oDist) * push;
-                    this.y += (oy / oDist) * push;
+                    _applyWallSafeAgentOffset(
+                        this,
+                        (ox / oDist) * push,
+                        (oy / oDist) * push
+                    );
                 } else if (oDist < COLLISION_RADIUS * 1.5 && oDist > 0.1) {
                     // Gentle nudge in buffer zone to prevent clumping
                     const nudge = 0.3 * (1 - oDist / (COLLISION_RADIUS * 1.5));
-                    this.x += (ox / oDist) * nudge;
-                    this.y += (oy / oDist) * nudge;
+                    _applyWallSafeAgentOffset(
+                        this,
+                        (ox / oDist) * nudge,
+                        (oy / oDist) * nudge
+                    );
                 }
             }
         }
@@ -9335,52 +9400,128 @@ function maybeStartSocial(agent) {
 // GROUP GATHERINGS — idle agents form social circles
 // ============================================================
 const groupGatherings = [];
+const GATHERING_WALL_CLEARANCE = 14;
+const GATHERING_WALL_BOTTOM_OFFSET = TILE;
+
+function _gatheringRadius(memberCount) {
+    const count = Math.max(2, memberCount || 2);
+    return 21 + count * 5;
+}
+
+function _isGatheringSpotClear(spot, memberCount) {
+    if (!spot) return false;
+    const radius = _gatheringRadius(memberCount);
+    const sidePadding = radius + GATHERING_WALL_CLEARANCE + WALL_HALF_THICKNESS;
+    const configuredTopWallHeight = Number(officeConfig.walls && officeConfig.walls.height);
+    const topWallBottom = Number.isFinite(configuredTopWallHeight)
+        ? Math.max(0, configuredTopWallHeight)
+        : 0;
+    // The standing circle itself must begin a full tile below the north wall.
+    const topPadding = topWallBottom + GATHERING_WALL_BOTTOM_OFFSET + radius;
+    if (spot.x < sidePadding || spot.x > W - sidePadding ||
+        spot.y < topPadding || spot.y > H - sidePadding) {
+        return false;
+    }
+    // Checking the whole circle, rather than only its center, prevents members
+    // from being assigned to opposite sides of a wall.
+    if (!_isPointClearOfInteriorWalls(
+        spot.x,
+        spot.y,
+        radius + GATHERING_WALL_CLEARANCE
+    )) {
+        return false;
+    }
+
+    // Horizontal walls render upward from their floor line. When the gathering
+    // is on the lower side, keep the full standing circle one tile beyond the
+    // wall's bottom edge so agent sprites never appear to climb the wall face.
+    const interior = (officeConfig.walls && officeConfig.walls.interior) || [];
+    const bottomClearance = radius + GATHERING_WALL_BOTTOM_OFFSET + WALL_HALF_THICKNESS;
+    for (let i = 0; i < interior.length; i++) {
+        const wall = interior[i];
+        if (wall.y1 !== wall.y2) continue;
+        const wallY = wall.y1 * TILE;
+        if (spot.y < wallY) continue;
+        const distance = _distanceFromPointToSegment(
+            spot.x, spot.y,
+            wall.x1 * TILE, wallY,
+            wall.x2 * TILE, wallY
+        );
+        if (distance < bottomClearance) return false;
+    }
+    return true;
+}
+
+function _positionGatheringMembers(gathering) {
+    const memberCount = gathering.members.length;
+    const radius = _gatheringRadius(memberCount);
+    gathering.members.forEach((id, index) => {
+        const agent = agentMap[id];
+        if (!agent) return;
+        const angle = (index / memberCount) * Math.PI * 2 - Math.PI / 2;
+        agent.targetX = gathering.spot.x + Math.cos(angle) * radius;
+        agent.targetY = gathering.spot.y + Math.sin(angle) * radius;
+    });
+}
+
 // Dynamic gathering spots — picks open floor areas near furniture or between agents
-function _pickGatheringSpot() {
+function _pickGatheringSpot(memberCount) {
     // Option 1: near a random piece of social furniture
     var socialTypes = ['couch', 'coffeeTable', 'waterCooler', 'coffeeMaker', 'bookshelf', 'tv', 'vendingMachine', 'plant', 'tallPlant', 'endTable'];
-    var socialItems = officeConfig.furniture.filter(function(f) { return socialTypes.indexOf(f.type) >= 0; });
+    var socialItems = (officeConfig.furniture || []).filter(function(f) { return socialTypes.indexOf(f.type) >= 0; });
     // Option 2: midpoint between two random idle agents
     var idleAgents = agents.filter(function(a) { return a.state === 'idle' && !a.idleAction; });
 
-    var spot = null;
-    var roll = Math.random();
+    for (var attempt = 0; attempt < 32; attempt++) {
+        var spot = null;
+        var roll = Math.random();
 
-    if (roll < 0.5 && socialItems.length > 0) {
-        // Near furniture — offset so they don't stand on it
-        var item = socialItems[Math.floor(Math.random() * socialItems.length)];
-        var angle = Math.random() * Math.PI * 2;
-        spot = {
-            x: Math.round(item.x + Math.cos(angle) * 40),
-            y: Math.round(item.y + Math.sin(angle) * 40),
-            label: 'by the ' + item.type
-        };
-    } else if (idleAgents.length >= 2) {
-        // Between two agents
-        var a1 = idleAgents[Math.floor(Math.random() * idleAgents.length)];
-        var a2 = idleAgents.filter(function(a) { return a.id !== a1.id; })[Math.floor(Math.random() * (idleAgents.length - 1))];
-        if (a2) {
+        if (roll < 0.5 && socialItems.length > 0) {
+            // Near furniture — offset so they don't stand on it
+            var item = socialItems[Math.floor(Math.random() * socialItems.length)];
+            var angle = Math.random() * Math.PI * 2;
             spot = {
-                x: Math.round((a1.x + a2.x) / 2),
-                y: Math.round((a1.y + a2.y) / 2),
-                label: 'in the hall'
+                x: Math.round(item.x + Math.cos(angle) * 40),
+                y: Math.round(item.y + Math.sin(angle) * 40),
+                label: 'by the ' + item.type
+            };
+        } else if (idleAgents.length >= 2) {
+            // Between two agents
+            var a1 = idleAgents[Math.floor(Math.random() * idleAgents.length)];
+            var otherAgents = idleAgents.filter(function(a) { return a.id !== a1.id; });
+            var a2 = otherAgents[Math.floor(Math.random() * otherAgents.length)];
+            if (a2) {
+                spot = {
+                    x: Math.round((a1.x + a2.x) / 2),
+                    y: Math.round((a1.y + a2.y) / 2),
+                    label: 'in the hall'
+                };
+            }
+        }
+
+        if (!spot) {
+            // Fallback: random open area
+            spot = {
+                x: 80 + Math.floor(Math.random() * Math.max(1, W - 160)),
+                y: 80 + Math.floor(Math.random() * Math.max(1, H - 160)),
+                label: 'in the office'
             };
         }
+
+        if (_isGatheringSpotClear(spot, memberCount)) return spot;
     }
 
-    if (!spot) {
-        // Fallback: random open area
-        spot = {
-            x: 80 + Math.floor(Math.random() * (W - 160)),
-            y: 80 + Math.floor(Math.random() * (H - 160)),
-            label: 'in the office'
-        };
+    // Dense custom layouts can defeat random sampling. Scan the remaining
+    // floor deterministically and choose among every wall-safe option.
+    var safeSpots = [];
+    for (var y = 80; y <= H - 60; y += HALF_TILE) {
+        for (var x = 60; x <= W - 60; x += HALF_TILE) {
+            var fallback = { x: x, y: y, label: 'in the office' };
+            if (_isGatheringSpotClear(fallback, memberCount)) safeSpots.push(fallback);
+        }
     }
-
-    // Clamp to world bounds
-    spot.x = Math.max(60, Math.min(W - 60, spot.x));
-    spot.y = Math.max(80, Math.min(H - 60, spot.y));
-    return spot;
+    if (safeSpots.length === 0) return null;
+    return safeSpots[Math.floor(Math.random() * safeSpots.length)];
 }
 
 function startGathering() {
@@ -9393,7 +9534,8 @@ function startGathering() {
     const shuffled = idleAgents.sort(() => Math.random() - 0.5);
     const members = shuffled.slice(0, count).map(a => a.id);
     // Pick a dynamic spot
-    const spot = _pickGatheringSpot();
+    const spot = _pickGatheringSpot(count);
+    if (!spot) return;
     const gathering = {
         id: Math.random().toString(36).substr(2, 8),
         spot: spot,
@@ -9406,18 +9548,15 @@ function startGathering() {
     };
     groupGatherings.push(gathering);
     // Assign positions in a circle around the spot
-    members.forEach((id, i) => {
+    members.forEach((id) => {
         const agent = agentMap[id];
         if (!agent) return;
-        const angle = (i / members.length) * Math.PI * 2 - Math.PI / 2;
-        const radius = 21 + members.length * 5;
-        agent.targetX = spot.x + Math.cos(angle) * radius;
-        agent.targetY = spot.y + Math.sin(angle) * radius;
         agent.idleAction = 'gathering';
         agent.idleReturnTimer = 0; // managed by gathering system
         agent._gatheringId = gathering.id;
         agent.addIntent('Heading to ' + spot.label + ' to hang out');
     });
+    _positionGatheringMembers(gathering);
 }
 
 function updateGatherings() {
@@ -9464,6 +9603,7 @@ function updateGatherings() {
             }
             // Allow new idle agents to join during socializing
             _maybeJoinGathering(g);
+            if (g.phase !== 'socializing') continue;
             // End socializing after duration
             if (g.timer >= g.socializeDuration) {
                 g.phase = 'dispersing';
@@ -9487,7 +9627,6 @@ function updateGatherings() {
 }
 
 function _maybeJoinGathering(g) {
-    if (g.members.length >= g.spot.capacity) return;
     if (Math.random() > 0.003) return; // ~0.3% per frame
     const joinable = agents.filter(a =>
         a.state === 'idle' && !a.idleAction && a.isSitting && !a.meetingId &&
@@ -9495,25 +9634,25 @@ function _maybeJoinGathering(g) {
     );
     if (joinable.length === 0) return;
     const joiner = joinable[Math.floor(Math.random() * joinable.length)];
+
+    // Gatherings have no fixed member cap. Grow in place while the enlarged
+    // circle fits; otherwise relocate everyone to a spot that fits the group.
+    const expandedMemberCount = g.members.length + 1;
+    if (!_isGatheringSpotClear(g.spot, expandedMemberCount)) {
+        const relocatedSpot = _pickGatheringSpot(expandedMemberCount);
+        if (!relocatedSpot) return;
+        g.spot = relocatedSpot;
+        g.phase = 'walking';
+        g.timer = 0;
+    }
+
     g.members.push(joiner.id);
-    // Assign position in the circle
-    const angle = ((g.members.length - 1) / g.members.length) * Math.PI * 2 - Math.PI / 2;
-    const radius = 21 + g.members.length * 5;
-    joiner.targetX = g.spot.x + Math.cos(angle) * radius;
-    joiner.targetY = g.spot.y + Math.sin(angle) * radius;
     joiner.idleAction = 'gathering';
     joiner.idleReturnTimer = 0;
     joiner._gatheringId = g.id;
     joiner.addIntent('Joining the group at ' + g.spot.label);
     // Reposition everyone in a proper circle
-    g.members.forEach((id, idx) => {
-        const a = agentMap[id];
-        if (!a) return;
-        const ang = (idx / g.members.length) * Math.PI * 2 - Math.PI / 2;
-        const r = 21 + g.members.length * 5;
-        a.targetX = g.spot.x + Math.cos(ang) * r;
-        a.targetY = g.spot.y + Math.sin(ang) * r;
-    });
+    _positionGatheringMembers(g);
 }
 
 function drawGatherings() {
