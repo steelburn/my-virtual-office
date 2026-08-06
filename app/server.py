@@ -4,6 +4,7 @@ Serves static files, status JSON, and proxies WebSocket to the OpenClaw gateway.
 """
 import asyncio
 import base64
+import copy
 import http.server
 import json
 import os
@@ -29,6 +30,7 @@ import signal
 import sqlite3
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import gateway_presence
 from layout_library import LayoutLibrary, LayoutValidationError
 from zoneinfo import ZoneInfo
@@ -538,31 +540,212 @@ def _parse_model_entries(value):
         if isinstance(item, dict):
             model_id = str(item.get("id") or item.get("model") or item.get("name") or "").strip()
             name = str(item.get("name") or model_id).strip()
-            context = item.get("contextWindow") or item.get("context") or 100000
-            max_tokens = item.get("maxTokens") or 8192
+            context = item.get("contextWindow") if item.get("contextWindow") is not None else item.get("context")
+            max_tokens = item.get("maxTokens")
+            context_mode = str(item.get("contextMode") or "").strip().lower()
+            params = copy.deepcopy(item.get("params")) if isinstance(item.get("params"), dict) else None
         else:
             model_id = str(item or "").strip()
             name = model_id
-            context = 100000
-            max_tokens = 8192
+            context = None
+            max_tokens = None
+            context_mode = ""
+            params = None
         if not model_id or model_id in seen:
             continue
         seen.add(model_id)
-        try:
-            context = int(context)
-        except Exception:
-            context = 100000
-        try:
-            max_tokens = int(max_tokens)
-        except Exception:
-            max_tokens = 8192
-        entries.append({
+        entry = {
             "id": model_id,
             "name": name,
-            "contextWindow": context,
-            "maxTokens": max_tokens,
-        })
+        }
+        if context is not None and str(context).strip() != "":
+            try:
+                entry["contextWindow"] = int(context)
+            except Exception:
+                pass
+        if max_tokens is not None and str(max_tokens).strip() != "":
+            try:
+                entry["maxTokens"] = int(max_tokens)
+            except Exception:
+                pass
+        if context_mode in {"auto", "manual"}:
+            entry["contextMode"] = context_mode
+        if params is not None:
+            entry["params"] = params
+        entries.append(entry)
     return entries
+
+
+_OLLAMA_CONTEXT_CACHE = {}
+_OLLAMA_CONTEXT_CACHE_LOCK = threading.Lock()
+_OLLAMA_CONTEXT_CACHE_TTL_SECONDS = 300
+_OLLAMA_SHOW_TIMEOUT_SECONDS = 3
+
+
+def _positive_int(value):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
+
+
+def _ollama_api_base(base_url):
+    value = str(base_url or "").strip().rstrip("/")
+    return re.sub(r"/v1$", "", value, flags=re.IGNORECASE)
+
+
+def _extract_ollama_context_window(show_data):
+    """Extract the context capacity Ollama advertises through /api/show."""
+    if not isinstance(show_data, dict):
+        return 0
+    context_window = 0
+    model_info = show_data.get("model_info")
+    if isinstance(model_info, dict):
+        for key, value in model_info.items():
+            if str(key).endswith(".context_length"):
+                context_window = _positive_int(value)
+                if context_window:
+                    break
+    parameters = show_data.get("parameters")
+    if isinstance(parameters, str):
+        for raw_line in parameters.splitlines():
+            match = re.match(r"^num_ctx\s+(-?\d+)\b", raw_line.strip())
+            if match:
+                parameter_context = _positive_int(match.group(1))
+                if parameter_context > context_window:
+                    context_window = parameter_context
+    return context_window
+
+
+def _query_ollama_context_window(base_url, model_id, api_key="", use_cache=True):
+    api_base = _ollama_api_base(base_url)
+    model_id = str(model_id or "").strip()
+    if not api_base or not model_id:
+        return {"contextWindow": 0, "error": "Ollama base URL and model are required"}
+    parsed = urllib.parse.urlparse(api_base)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return {"contextWindow": 0, "error": "Ollama base URL must use http or https"}
+    cache_key = f"{api_base}|{model_id}"
+    now = time.time()
+    if use_cache:
+        with _OLLAMA_CONTEXT_CACHE_LOCK:
+            cached = _OLLAMA_CONTEXT_CACHE.get(cache_key)
+            if cached and cached.get("expires", 0) > now:
+                return copy.deepcopy(cached.get("result") or {})
+    try:
+        payload = json.dumps({"name": model_id}).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        concrete_key = str(api_key or "").strip()
+        if concrete_key and concrete_key not in {"ollama-local", "OLLAMA_API_KEY"}:
+            headers["Authorization"] = f"Bearer {concrete_key}"
+        request = urllib.request.Request(f"{api_base}/api/show", data=payload, headers=headers, method="POST")
+        with urllib.request.urlopen(request, timeout=_OLLAMA_SHOW_TIMEOUT_SECONDS) as response:
+            show_data = json.loads(response.read().decode("utf-8"))
+        context_window = _extract_ollama_context_window(show_data)
+        result = {
+            "contextWindow": context_window,
+            "error": "" if context_window else "Ollama did not advertise a context length",
+        }
+    except Exception as exc:
+        result = {"contextWindow": 0, "error": str(exc)}
+    with _OLLAMA_CONTEXT_CACHE_LOCK:
+        _OLLAMA_CONTEXT_CACHE[cache_key] = {
+            "expires": now + _OLLAMA_CONTEXT_CACHE_TTL_SECONDS,
+            "result": copy.deepcopy(result),
+        }
+        if len(_OLLAMA_CONTEXT_CACHE) > 256:
+            oldest_key = min(_OLLAMA_CONTEXT_CACHE, key=lambda key: _OLLAMA_CONTEXT_CACHE[key].get("expires", 0))
+            _OLLAMA_CONTEXT_CACHE.pop(oldest_key, None)
+    return result
+
+
+def _query_ollama_context_windows(base_url, model_ids, api_key="", use_cache=True):
+    model_ids = list(dict.fromkeys(str(model_id or "").strip() for model_id in model_ids if str(model_id or "").strip()))
+    if not model_ids:
+        return {}
+    results = {}
+    workers = min(8, len(model_ids))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ollama-show") as executor:
+        futures = {
+            executor.submit(_query_ollama_context_window, base_url, model_id, api_key, use_cache): model_id
+            for model_id in model_ids
+        }
+        for future in as_completed(futures):
+            model_id = futures[future]
+            try:
+                results[model_id] = future.result()
+            except Exception as exc:
+                results[model_id] = {"contextWindow": 0, "error": str(exc)}
+    return results
+
+
+def _merge_provider_models(existing_models, requested_models, is_ollama=False, ollama_contexts=None):
+    """Merge editable model rows without inventing metadata for existing models."""
+    old_models = {
+        str(model.get("id") or "").strip(): model
+        for model in (existing_models or [])
+        if isinstance(model, dict) and str(model.get("id") or "").strip()
+    }
+    ollama_contexts = ollama_contexts or {}
+    new_models = []
+    for requested in requested_models or []:
+        if not isinstance(requested, dict):
+            continue
+        model_id = str(requested.get("id") or "").strip()
+        if not model_id:
+            continue
+        old_model = old_models.get(model_id)
+        updated = copy.deepcopy(old_model) if old_model else {
+            "id": model_id,
+            "name": requested.get("name") or model_id,
+            "reasoning": False,
+            "input": ["text"],
+            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+            "maxTokens": 8192,
+        }
+        updated["id"] = model_id
+        updated["name"] = requested.get("name") or updated.get("name") or model_id
+        if "maxTokens" in requested and _positive_int(requested.get("maxTokens")):
+            updated["maxTokens"] = _positive_int(requested.get("maxTokens"))
+
+        context_mode = str(requested.get("contextMode") or "").strip().lower()
+        requested_context = _positive_int(requested.get("contextWindow"))
+        detected_context = _positive_int((ollama_contexts.get(model_id) or {}).get("contextWindow"))
+        if is_ollama and not old_model and not context_mode:
+            context_mode = "auto"
+
+        if is_ollama and context_mode == "auto":
+            if not detected_context:
+                detail = str((ollama_contexts.get(model_id) or {}).get("error") or "context length unavailable")
+                return None, f"Could not detect the model-default context for {model_id}: {detail}"
+            updated["contextWindow"] = detected_context
+            params = copy.deepcopy(updated.get("params")) if isinstance(updated.get("params"), dict) else {}
+            params.pop("num_ctx", None)
+            if params:
+                updated["params"] = params
+            else:
+                updated.pop("params", None)
+        elif is_ollama and context_mode == "manual":
+            if requested_context < 1024:
+                return None, f"Manual context for {model_id} must be at least 1,024 tokens"
+            if detected_context and requested_context > detected_context:
+                return None, f"Manual context for {model_id} cannot exceed its advertised {detected_context:,}-token limit"
+            updated["contextWindow"] = requested_context
+            params = copy.deepcopy(updated.get("params")) if isinstance(updated.get("params"), dict) else {}
+            params["num_ctx"] = requested_context
+            updated["params"] = params
+        else:
+            if requested_context:
+                updated["contextWindow"] = requested_context
+            if isinstance(requested.get("params"), dict):
+                params = copy.deepcopy(updated.get("params")) if isinstance(updated.get("params"), dict) else {}
+                params.update(copy.deepcopy(requested.get("params")))
+                updated["params"] = params
+            if not old_model and "contextWindow" not in updated:
+                updated["contextWindow"] = 100000
+        new_models.append(updated)
+    return new_models, ""
 
 
 def _mask_secret(value):
@@ -1356,22 +1539,45 @@ def _openclaw_local_providers_from_config(cfg):
     for provider, pdata in (cfg.get("models", {}).get("providers", {}) or {}).items():
         if _openclaw_provider_kind(provider, pdata) != "local":
             continue
+        is_ollama = provider == "ollama" or str(pdata.get("api") or "").lower() == "ollama"
+        configured_model_ids = [
+            str(model.get("id") or "").strip()
+            for model in (pdata.get("models", []) or [])
+            if isinstance(model, dict) and str(model.get("id") or "").strip()
+        ]
+        ollama_contexts = _query_ollama_context_windows(
+            pdata.get("baseUrl", ""),
+            configured_model_ids,
+            pdata.get("apiKey", ""),
+        ) if is_ollama else {}
         model_rows = []
         for model in pdata.get("models", []) or []:
             model_id = str(model.get("id") or "").strip()
             if not model_id:
                 continue
-            model_rows.append({
+            params = model.get("params") if isinstance(model.get("params"), dict) else {}
+            manual_num_ctx = _positive_int(params.get("num_ctx"))
+            detected = ollama_contexts.get(model_id) or {}
+            model_row = {
                 "id": model_id,
                 "name": model.get("name") or model_id,
                 "contextWindow": model.get("contextWindow", 0),
                 "maxTokens": model.get("maxTokens", 0),
-            })
+            }
+            if is_ollama:
+                model_row.update({
+                    "advertisedContextWindow": _positive_int(detected.get("contextWindow")),
+                    "contextMode": "manual" if manual_num_ctx else "auto",
+                    "manualContextWindow": manual_num_ctx,
+                    "contextDetectionError": str(detected.get("error") or ""),
+                })
+            model_rows.append(model_row)
         providers.append({
             "id": provider,
             "provider": provider,
             "baseUrl": pdata.get("baseUrl", ""),
             "api": pdata.get("api", ""),
+            "isOllama": is_ollama,
             "apiKeyConfigured": bool(pdata.get("apiKey")),
             "timeoutSeconds": pdata.get("timeoutSeconds"),
             "models": model_rows,
@@ -14839,7 +15045,8 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
         requested_api = req.get("api")
         requested_api_key = req.get("apiKey")
         requested_timeout = req.get("timeoutSeconds")
-        if provider == "ollama":
+        is_ollama = provider == "ollama" or str(requested_api or existing.get("api") or "").lower() == "ollama"
+        if is_ollama:
             # OpenClaw 2026.5.x expects the native Ollama API root, not /v1.
             base_url = re.sub(r"/v1/?$", "", (base_url or "").strip())
             requested_api = requested_api or "ollama"
@@ -14856,27 +15063,33 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
         if requested_timeout:
             existing["timeoutSeconds"] = int(requested_timeout)
 
-        old_models = {m["id"]: m for m in existing.get("models", [])}
-        new_models = []
-        for m in models:
-            if m["id"] in old_models:
-                updated = old_models[m["id"]]
-                updated["name"] = m.get("name", updated.get("name", m["id"]))
-                if "contextWindow" in m:
-                    updated["contextWindow"] = m["contextWindow"]
-                if "maxTokens" in m:
-                    updated["maxTokens"] = m["maxTokens"]
-                new_models.append(updated)
-            else:
-                new_models.append({
-                    "id": m["id"],
-                    "name": m.get("name", m["id"]),
-                    "reasoning": False,
-                    "input": ["text"],
-                    "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-                    "contextWindow": m.get("contextWindow", 100000),
-                    "maxTokens": m.get("maxTokens", 8192),
-                })
+        old_model_ids = {
+            str(model.get("id") or "").strip()
+            for model in (existing.get("models", []) or [])
+            if isinstance(model, dict)
+        }
+        context_lookup_ids = [
+            model.get("id")
+            for model in models
+            if is_ollama and (
+                model.get("contextMode") in {"auto", "manual"}
+                or model.get("id") not in old_model_ids
+            )
+        ]
+        ollama_contexts = _query_ollama_context_windows(
+            base_url,
+            context_lookup_ids,
+            requested_api_key or existing.get("apiKey") or "",
+            use_cache=False,
+        ) if context_lookup_ids else {}
+        new_models, merge_error = _merge_provider_models(
+            existing.get("models", []),
+            models,
+            is_ollama=is_ollama,
+            ollama_contexts=ollama_contexts,
+        )
+        if merge_error:
+            return {"ok": False, "error": merge_error}
         existing["models"] = new_models
         cfg["models"]["providers"][provider] = existing
 
@@ -14892,7 +15105,19 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             return {"ok": False, "error": err}
 
         self._signal_gateway(restart=False)
-        return {"ok": True, "provider": provider, "modelCount": len(new_models)}
+        return {
+            "ok": True,
+            "provider": provider,
+            "modelCount": len(new_models),
+            "models": [
+                {
+                    "id": model.get("id"),
+                    "contextWindow": model.get("contextWindow", 0),
+                    "numCtx": ((model.get("params") or {}).get("num_ctx") if isinstance(model.get("params"), dict) else None),
+                }
+                for model in new_models
+            ],
+        }
 
     def _delete_custom_provider(self, provider):
         return self._send_watcher_request({"type": "delete-custom-provider", "provider": provider})

@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#070b13">
     <title>Model Settings - Virtual Office</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <script>fetch('/vo-config').then(r=>r.json()).then(d=>{if(d.office&&d.office.name)document.title='Model Settings - '+d.office.name;}).catch(()=>{});</script>
     <script>try{document.documentElement.dataset.uiTheme=localStorage.getItem('vo-ui-theme')==='light'?'light':'dark';let p=localStorage.getItem('vo-ui-preset')||'classic';document.documentElement.dataset.uiPreset=/^(classic|retro|cyberpunk|gameboy|custom)$/.test(p)?p:'classic'}catch(e){document.documentElement.dataset.uiTheme='dark';document.documentElement.dataset.uiPreset='classic'}</script>
     <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
@@ -61,9 +62,16 @@
         .checkbox-row input { width:auto; min-width:0; }
         .provider-tools { display:flex; gap:4px; flex-wrap:wrap; justify-content:flex-end; }
         .model-editor { font-family:monospace; font-size:11px; line-height:1.35; min-height:92px; }
+        .context-settings { margin-top:10px; border-top:1px solid var(--border); padding-top:8px; }
+        .context-row { display:grid; grid-template-columns:minmax(150px, 1.4fr) minmax(180px, 1fr) minmax(120px, .8fr); gap:6px; align-items:center; padding:6px; border:1px solid var(--border); border-radius:4px; margin:5px 0; }
+        .context-model { min-width:0; overflow-wrap:anywhere; }
+        .context-model small { display:block; margin-top:4px; color:var(--text-dim); line-height:1.35; }
+        .context-row select, .context-row input { min-width:0; }
+        .context-row input:disabled { opacity:.65; cursor:not-allowed; }
         @media (max-width:700px) {
             .provider-header { flex-direction:column; }
             .provider-current { max-width:100%; text-align:left; }
+            .context-row { grid-template-columns:1fr; }
         }
         code { color:var(--gold); overflow-wrap:anywhere; }
         ::-webkit-scrollbar { width:5px; }
@@ -278,6 +286,81 @@ function modelsText(models) {
     return (models || []).map(m => m.id || m.name || '').filter(Boolean).join('\n');
 }
 
+function formatContextLimit(value) {
+    const tokens = Number(value || 0);
+    return Number.isFinite(tokens) && tokens > 0 ? Math.round(tokens).toLocaleString() + ' tokens' : 'unknown';
+}
+
+function isOpenClawModelActive(providerId, modelId) {
+    const oc = nativeData?.openclaw || {};
+    const fullId = String(modelId || '').includes('/') ? String(modelId) : String(providerId || '') + '/' + String(modelId || '');
+    if (oc.defaultModel === fullId || oc.runtimeDefaultModel === fullId) return true;
+    return Object.values(oc.agents || {}).some(agent => agent?.model === fullId);
+}
+
+function renderOllamaContextControls(provider, providerIndex) {
+    if (!provider.isOllama) return '';
+    const models = provider.models || [];
+    if (!models.length) return '';
+    return `<div class="context-settings">
+        <h3>Ollama Context Limits</h3>
+        <p class="muted">Model default reads the advertised limit from Ollama. Manual override caps both OpenClaw's context budget and Ollama's runtime <code>num_ctx</code>.</p>
+        ${models.map((model, modelIndex) => {
+            const advertised = Number(model.advertisedContextWindow || 0);
+            const configured = Number(model.contextWindow || 0);
+            const manual = model.contextMode === 'manual';
+            const inputValue = manual ? Number(model.manualContextWindow || configured || 0) : Number(advertised || configured || 0);
+            const active = isOpenClawModelActive(provider.provider, model.id);
+            const autoLabel = advertised ? `Model default (${advertised.toLocaleString()})` : 'Model default (unavailable)';
+            const detail = advertised
+                ? `Advertised: ${formatContextLimit(advertised)} · Configured: ${formatContextLimit(configured)}`
+                : `Configured: ${formatContextLimit(configured)}${model.contextDetectionError ? ' · Detection: ' + model.contextDetectionError : ''}`;
+            return `<div class="context-row">
+                <div class="context-model"><span>${esc(model.id)}${active ? ' · ACTIVE' : ''}</span><small>${esc(detail)}</small></div>
+                <select id="oc-context-mode-${providerIndex}-${modelIndex}" onchange="toggleOllamaContextOverride(${providerIndex}, ${modelIndex})">
+                    <option value="auto" ${manual ? '' : 'selected'} ${!advertised && manual ? 'disabled' : ''}>${esc(autoLabel)}</option>
+                    <option value="manual" ${manual ? 'selected' : ''}>Manual override</option>
+                </select>
+                <input id="oc-context-value-${providerIndex}-${modelIndex}" type="number" min="1024" step="1024" ${advertised ? `max="${advertised}"` : ''} value="${esc(inputValue || '')}" ${manual ? '' : 'disabled'} aria-label="Context limit for ${esc(model.id)}">
+            </div>`;
+        }).join('')}
+    </div>`;
+}
+
+function toggleOllamaContextOverride(providerIndex, modelIndex) {
+    const mode = val(`oc-context-mode-${providerIndex}-${modelIndex}`);
+    const input = document.getElementById(`oc-context-value-${providerIndex}-${modelIndex}`);
+    if (!input) return;
+    input.disabled = mode !== 'manual';
+    if (mode === 'manual' && !Number(input.value || 0)) {
+        const provider = ((nativeData?.openclaw || {}).localProviders || [])[providerIndex] || {};
+        const model = (provider.models || [])[modelIndex] || {};
+        input.value = Number(model.contextWindow || model.advertisedContextWindow || 0) || '';
+    }
+}
+
+function openClawProviderModelsPayload(index) {
+    const provider = ((nativeData?.openclaw || {}).localProviders || [])[index] || {};
+    const rawModelIds = val('oc-local-provider-models-' + index).replace(/,/g, '\n').split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+    if (!provider.isOllama) return rawModelIds.join('\n');
+    const existingIndex = new Map((provider.models || []).map((model, modelIndex) => [model.id, modelIndex]));
+    return [...new Set(rawModelIds)].map(modelId => {
+        const modelIndex = existingIndex.get(modelId);
+        if (modelIndex === undefined) return { id:modelId, name:modelId, contextMode:'auto' };
+        const model = provider.models[modelIndex] || {};
+        const mode = val(`oc-context-mode-${index}-${modelIndex}`) === 'manual' ? 'manual' : 'auto';
+        const payload = { id:modelId, name:model.name || modelId, contextMode:mode };
+        if (mode === 'manual') {
+            const contextWindow = Number(val(`oc-context-value-${index}-${modelIndex}`));
+            if (!Number.isInteger(contextWindow) || contextWindow < 1024) {
+                throw new Error(`Enter a manual context of at least 1,024 tokens for ${modelId}.`);
+            }
+            payload.contextWindow = contextWindow;
+        }
+        return payload;
+    });
+}
+
 function localProviderSummary(provider) {
     const bits = [];
     if (provider.baseUrl) bits.push(provider.baseUrl);
@@ -318,6 +401,7 @@ function renderOpenClawLocalProviders(oc) {
                 <div class="row"><label>API Key</label><input id="oc-local-provider-key-${idx}" type="password" autocomplete="off" placeholder="${provider.apiKeyConfigured ? 'Configured - leave blank to keep' : 'optional'}"></div>
                 <div class="row"><label>Models</label><textarea class="model-editor" id="oc-local-provider-models-${idx}" placeholder="one model per line">${esc(modelsText(provider.models))}</textarea></div>
                 <p class="muted">Add or remove models by editing this list, then Save.</p>
+                ${renderOllamaContextControls(provider, idx)}
                 <p id="oc-local-provider-status-${idx}" class="status-msg"></p>
             </div>
         `).join('')}</div>
@@ -412,7 +496,10 @@ function renderOpenClaw() {
     for (const provider of Object.keys(byProvider).sort()) {
         const models = byProvider[provider].sort((a,b) => a.id.localeCompare(b.id));
         html += `<div class="card"><div class="provider-header"><div class="provider-name">${esc(provider)}</div><div class="muted">${models.length}</div></div><div class="model-list">`;
-        for (const m of models) html += `<div class="model-item"><span>${esc(m.id)}</span><span class="${m.available ? 'ok' : 'err'}">${m.available ? (m.local ? 'local' : 'available') : 'missing'}</span></div>`;
+        for (const m of models) {
+            const context = Number(m.contextWindow || 0) > 0 ? ` · ctx ${Number(m.contextWindow).toLocaleString()}` : '';
+            html += `<div class="model-item"><span>${esc(m.id)}${esc(context)}</span><span class="${m.available ? 'ok' : 'err'}">${m.available ? (m.local ? 'local' : 'available') : 'missing'}</span></div>`;
+        }
         html += '</div></div>';
     }
     html += '</div>';
@@ -798,14 +885,20 @@ async function saveOpenClawProvider() {
 
 async function saveOpenClawLocalProvider(index) {
     const timeoutRaw = val('oc-local-provider-timeout-' + index);
-    const body = {
-        provider: val('oc-local-provider-id-' + index),
-        baseUrl: val('oc-local-provider-url-' + index),
-        api: val('oc-local-provider-api-' + index),
-        apiKey: val('oc-local-provider-key-' + index),
-        timeoutSeconds: timeoutRaw ? Number(timeoutRaw) : null,
-        models: val('oc-local-provider-models-' + index)
-    };
+    let body;
+    try {
+        body = {
+            provider: val('oc-local-provider-id-' + index),
+            baseUrl: val('oc-local-provider-url-' + index),
+            api: val('oc-local-provider-api-' + index),
+            apiKey: val('oc-local-provider-key-' + index),
+            timeoutSeconds: timeoutRaw ? Number(timeoutRaw) : null,
+            models: openClawProviderModelsPayload(index)
+        };
+    } catch (error) {
+        setStatus('oc-local-provider-status-' + index, { ok:false, error:error.message });
+        return;
+    }
     const data = await postJson('/api/native-models/openclaw/provider', body);
     setStatus('oc-local-provider-status-' + index, data, 'Saved ' + (data.provider || body.provider));
     if (data.ok) {
