@@ -109,7 +109,7 @@ a:hover { text-decoration: underline; }
 @keyframes spin { to { transform: rotate(360deg); } }
 </style>
   <link rel="stylesheet" href="ui-standalone.css?v=20260722-3">
-    <link rel="stylesheet" href="ui-themes.css?v=20260722-12">
+    <link rel="stylesheet" href="ui-themes.css?v=20260805-workspace-chat-1">
 </head>
 <body class="ui-standalone cron-page">
 
@@ -155,9 +155,16 @@ a:hover { text-decoration: underline; }
       </div>
       <div class="form-group">
         <label>Session Target</label>
-        <select id="f-target">
+        <select id="f-target" onchange="toggleTargetFields()">
           <option value="isolated">Isolated (agentTurn)</option>
           <option value="main">Main (systemEvent)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Wake Mode</label>
+        <select id="f-wake">
+          <option value="now">Run when due</option>
+          <option value="next-heartbeat">Next heartbeat</option>
         </select>
       </div>
     </div>
@@ -228,12 +235,12 @@ a:hover { text-decoration: underline; }
       <textarea id="f-message" placeholder="What should the agent do?"></textarea>
     </div>
 
-    <div class="form-group">
+    <div class="form-group" id="timeout-settings">
       <label>Timeout (seconds)</label>
       <input id="f-timeout" type="number" value="300" min="10" style="width:120px">
     </div>
 
-    <div style="border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:14px;background:var(--surface2)">
+    <div id="delivery-settings" style="border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:14px;background:var(--surface2)">
       <label style="display:block;font-size:12px;color:var(--accent);margin-bottom:10px;font-weight:600;text-transform:uppercase">📬 Delivery Settings</label>
       <div class="form-group">
         <label>Delivery Mode</label>
@@ -246,7 +253,7 @@ a:hover { text-decoration: underline; }
         <div class="form-row">
           <div class="form-group">
             <label>Channel</label>
-            <select id="f-del-channel">
+            <select id="f-del-channel" onchange="populateDeliveryAccounts(this.value)">
               <option value="telegram">Telegram</option>
               <option value="webchat">Webchat</option>
               <option value="discord">Discord</option>
@@ -291,6 +298,9 @@ let GATEWAY_TOKEN = '';
 let GATEWAY_PROTOCOL_VERSION = 4;
 let AGENTS = [];
 let _cronWsPort = 0; // 0 = not yet loaded
+let DELIVERY_CHANNELS = [];
+let DELIVERY_CHANNEL_LABELS = {};
+let DELIVERY_ACCOUNTS = {};
 
 // Load gateway token, WS port, and agents dynamically
 (async function() {
@@ -407,6 +417,7 @@ function sendConnect() {
       const el = document.getElementById('ws-status');
       el.textContent = 'Connected'; el.className = 'status online';
       loadJobs();
+      loadDeliveryOptions();
     } else {
       const el = document.getElementById('ws-status');
       el.textContent = 'Auth Failed'; el.className = 'status offline';
@@ -421,7 +432,18 @@ function rpc(method, params) {
     const id = nextId();
     ws.send(JSON.stringify({type:'req', id, method, params}));
     const timeout = setTimeout(() => { delete pendingCB[id]; reject(new Error('Timeout')); }, 30000);
-    pendingCB[id] = (res) => { clearTimeout(timeout); resolve(res); };
+    pendingCB[id] = (res) => {
+      clearTimeout(timeout);
+      if (!res || res.ok === false) {
+        const detail = res && res.error;
+        const message = typeof detail === 'string'
+          ? detail
+          : (detail && (detail.message || detail.code)) || 'Gateway request failed';
+        reject(new Error(message));
+        return;
+      }
+      resolve(res);
+    };
   });
 }
 
@@ -433,16 +455,58 @@ function initAgentDropdowns() {
 function populateAgentSelects() {
   const filterSel = document.getElementById('filter-agent');
   const formSel = document.getElementById('f-agent');
-  const delAcctSel = document.getElementById('f-del-account');
   // Clear existing options (keep first "All"/"Default" option)
   while (filterSel.options.length > 1) filterSel.remove(1);
   while (formSel.options.length > 0) formSel.remove(0);
-  if (delAcctSel) while (delAcctSel.options.length > 1) delAcctSel.remove(1);
+  formSel.add(new Option('Default Agent', ''));
   AGENTS.forEach(a => {
     filterSel.add(new Option(a.label, a.id));
     formSel.add(new Option(a.label, a.id));
-    if (delAcctSel) delAcctSel.add(new Option(a.label, a.id));
   });
+}
+
+function ensureSelectOption(select, value, label) {
+  if (!select || !value) return;
+  const exists = Array.from(select.options).some(option => option.value === value);
+  if (!exists) select.add(new Option(label || value, value));
+}
+
+async function loadDeliveryOptions() {
+  try {
+    const response = await rpc('channels.status', {});
+    const status = response.payload || response;
+    const configured = status.channels || {};
+    const order = (status.channelOrder || Object.keys(configured)).filter(id => configured[id]?.configured !== false);
+    if (order.length) DELIVERY_CHANNELS = order;
+    DELIVERY_CHANNEL_LABELS = status.channelLabels || {};
+    DELIVERY_ACCOUNTS = status.channelAccounts || {};
+  } catch (e) {
+    console.warn('Failed to load delivery channels:', e);
+  }
+  const select = document.getElementById('f-del-channel');
+  const current = select.value;
+  if (DELIVERY_CHANNELS.length) {
+    select.innerHTML = '';
+    DELIVERY_CHANNELS.forEach(id => select.add(new Option(DELIVERY_CHANNEL_LABELS[id] || id, id)));
+  }
+  ensureSelectOption(select, current, current);
+  if (current) select.value = current;
+  populateDeliveryAccounts(select.value);
+}
+
+function populateDeliveryAccounts(channel, selectedValue) {
+  const select = document.getElementById('f-del-account');
+  if (!select) return;
+  const selected = selectedValue !== undefined ? selectedValue : select.value;
+  select.innerHTML = '';
+  select.add(new Option('Default', ''));
+  const accounts = Array.isArray(DELIVERY_ACCOUNTS[channel]) ? DELIVERY_ACCOUNTS[channel] : [];
+  accounts.filter(account => account && account.configured !== false).forEach(account => {
+    const id = account.id || account.accountId;
+    if (id) select.add(new Option(account.label || account.name || id, id));
+  });
+  ensureSelectOption(select, selected, selected ? selected + ' (current)' : '');
+  select.value = selected || '';
 }
 
 // --- Load Jobs ---
@@ -550,6 +614,17 @@ function toggleDeliveryFields() {
   document.getElementById('delivery-fields').style.display = mode === 'announce' ? 'block' : 'none';
 }
 
+function toggleTargetFields() {
+  const isMain = document.getElementById('f-target').value === 'main';
+  document.getElementById('timeout-settings').style.display = isMain ? 'none' : 'block';
+  const deliverySelect = document.getElementById('f-delivery');
+  if (isMain) deliverySelect.value = 'none';
+  deliverySelect.disabled = isMain;
+  document.getElementById('delivery-settings').style.opacity = isMain ? '0.65' : '1';
+  document.getElementById('delivery-settings').title = isMain ? 'Main-session system events do not produce a separate result to deliver.' : '';
+  toggleDeliveryFields();
+}
+
 // --- Day helpers ---
 function setDays(preset) {
   const cbs = document.querySelectorAll('.day-cb');
@@ -654,8 +729,10 @@ function closeModal() {
 
 function clearForm() {
   document.getElementById('f-name').value = '';
-  document.getElementById('f-agent').value = 'main';
+  const agentSelect = document.getElementById('f-agent');
+  agentSelect.value = Array.from(agentSelect.options).some(option => option.value === 'main') ? 'main' : '';
   document.getElementById('f-target').value = 'isolated';
+  document.getElementById('f-wake').value = 'now';
   document.getElementById('f-sched-type').value = 'cron';
   document.getElementById('f-cron-time').value = '09:00';
   try { document.getElementById('f-cron-tz').value = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch(e) { document.getElementById('f-cron-tz').value = ''; }
@@ -666,18 +743,23 @@ function clearForm() {
   document.getElementById('f-message').value = '';
   document.getElementById('f-timeout').value = '300';
   document.getElementById('f-delivery').value = 'none';
-  document.getElementById('f-del-channel').value = 'telegram';
-  document.getElementById('f-del-account').value = '';
+  const deliveryChannelSelect = document.getElementById('f-del-channel');
+  deliveryChannelSelect.value = DELIVERY_CHANNELS[0] || 'telegram';
+  populateDeliveryAccounts(deliveryChannelSelect.value, '');
   document.getElementById('f-del-to').value = '';
   document.getElementById('f-enabled').checked = true;
   toggleScheduleFields();
   toggleDeliveryFields();
+  toggleTargetFields();
 }
 
 function populateForm(job) {
   document.getElementById('f-name').value = job.name || '';
-  document.getElementById('f-agent').value = job.agentId || 'main';
+  const agentSelect = document.getElementById('f-agent');
+  ensureSelectOption(agentSelect, job.agentId || '', (job.agentId || '') + ' (current)');
+  agentSelect.value = job.agentId || '';
   document.getElementById('f-target').value = job.sessionTarget || 'isolated';
+  document.getElementById('f-wake').value = job.wakeMode || 'now';
   document.getElementById('f-enabled').checked = job.enabled !== false;
 
   const s = job.schedule || {};
@@ -701,10 +783,13 @@ function populateForm(job) {
   document.getElementById('f-timeout').value = p.timeoutSeconds || 300;
   const del = job.delivery || {};
   document.getElementById('f-delivery').value = del.mode || 'none';
-  document.getElementById('f-del-channel').value = del.channel || 'telegram';
-  document.getElementById('f-del-account').value = del.accountId || '';
+  const deliveryChannelSelect = document.getElementById('f-del-channel');
+  ensureSelectOption(deliveryChannelSelect, del.channel || '', (del.channel || '') + ' (current)');
+  deliveryChannelSelect.value = del.channel || DELIVERY_CHANNELS[0] || 'telegram';
+  populateDeliveryAccounts(deliveryChannelSelect.value, del.accountId || '');
   document.getElementById('f-del-to').value = del.to || '';
   toggleDeliveryFields();
+  toggleTargetFields();
 }
 
 function toggleScheduleFields() {
@@ -714,15 +799,75 @@ function toggleScheduleFields() {
   document.getElementById('sched-at').style.display = type === 'at' ? 'block' : 'none';
 }
 
+function cronJobFromResponse(response) {
+  const payload = response && response.payload !== undefined ? response.payload : response;
+  if (!payload) return null;
+  if (payload.job) return payload.job;
+  if (payload.id && payload.schedule && payload.payload) return payload;
+  return null;
+}
+
+function comparableDelivery(delivery) {
+  const value = delivery || {mode: 'none'};
+  const mode = value.mode || 'none';
+  if (mode === 'none') return {mode: 'none'};
+  return {
+    mode,
+    channel: value.channel || '',
+    accountId: value.accountId || '',
+    to: value.to || ''
+  };
+}
+
+function assertCronJobSaved(saved, expected, expectedAgentId) {
+  if (!saved) throw new Error('Gateway did not return the saved cron job');
+  const missing = [];
+  const sameOptional = (a, b) => (a || '') === (b || '');
+  if (saved.name !== expected.name) missing.push('job name');
+  if (!sameOptional(saved.agentId, expectedAgentId)) missing.push('agent');
+  if (saved.sessionTarget !== expected.sessionTarget) missing.push('session target');
+  if (saved.wakeMode !== expected.wakeMode) missing.push('wake mode');
+  if (saved.enabled !== expected.enabled) missing.push('enabled state');
+
+  const actualSchedule = saved.schedule || {};
+  const expectedSchedule = expected.schedule || {};
+  if (actualSchedule.kind !== expectedSchedule.kind) missing.push('schedule type');
+  else if (expectedSchedule.kind === 'cron' && (actualSchedule.expr !== expectedSchedule.expr || !sameOptional(actualSchedule.tz, expectedSchedule.tz))) missing.push('cron schedule');
+  else if (expectedSchedule.kind === 'every' && actualSchedule.everyMs !== expectedSchedule.everyMs) missing.push('interval');
+  else if (expectedSchedule.kind === 'at' && new Date(actualSchedule.at).getTime() !== new Date(expectedSchedule.at).getTime()) missing.push('one-shot time');
+
+  const actualPayload = saved.payload || {};
+  const expectedPayload = expected.payload || {};
+  if (actualPayload.kind !== expectedPayload.kind) missing.push('payload type');
+  else if (expectedPayload.kind === 'systemEvent' && actualPayload.text !== expectedPayload.text) missing.push('message');
+  else if (expectedPayload.kind === 'agentTurn') {
+    if (actualPayload.message !== expectedPayload.message) missing.push('message');
+    if (actualPayload.timeoutSeconds !== expectedPayload.timeoutSeconds) missing.push('timeout');
+  }
+
+  const actualDelivery = saved.delivery || {mode: 'none'};
+  const expectedDelivery = expected.delivery || {mode: 'none'};
+  if ((actualDelivery.mode || 'none') !== (expectedDelivery.mode || 'none')) missing.push('delivery mode');
+  if (expectedDelivery.mode === 'announce') {
+    if (!sameOptional(actualDelivery.channel, expectedDelivery.channel)) missing.push('delivery channel');
+    if (!sameOptional(actualDelivery.accountId, expectedDelivery.accountId)) missing.push('delivery account');
+    if (!sameOptional(actualDelivery.to, expectedDelivery.to)) missing.push('delivery target');
+  }
+  if (missing.length) throw new Error('Saved job did not retain: ' + missing.join(', '));
+}
+
 async function saveJob() {
   const name = document.getElementById('f-name').value.trim();
   const agentId = document.getElementById('f-agent').value;
   const sessionTarget = document.getElementById('f-target').value;
+  const wakeMode = document.getElementById('f-wake').value;
   const enabled = document.getElementById('f-enabled').checked;
   const message = document.getElementById('f-message').value.trim();
   const timeout = parseInt(document.getElementById('f-timeout').value) || 300;
-  const deliveryMode = document.getElementById('f-delivery').value;
+  const deliveryMode = sessionTarget === 'main' ? 'none' : document.getElementById('f-delivery').value;
+  const originalJob = editingJobId ? allJobs.find(job => job.id === editingJobId) : null;
 
+  if (!name) { toast('Job name is required', 'error'); return; }
   if (!message) { toast('Message/prompt is required', 'error'); return; }
 
   // Build schedule
@@ -743,6 +888,10 @@ async function saveJob() {
     if (!d || !t) { toast('Date and time required', 'error'); return; }
     schedule = {kind:'at', at: new Date(`${d}T${t}`).toISOString()};
   }
+  if (originalJob && originalJob.schedule?.kind === schedule.kind) {
+    if (schedule.kind === 'cron' && originalJob.schedule.staggerMs !== undefined) schedule.staggerMs = originalJob.schedule.staggerMs;
+    if (schedule.kind === 'every' && originalJob.schedule.anchorMs !== undefined) schedule.anchorMs = originalJob.schedule.anchorMs;
+  }
 
   // Build payload
   let payload;
@@ -752,37 +901,53 @@ async function saveJob() {
     payload = {kind:'agentTurn', message, timeoutSeconds: timeout};
   }
 
-  const job = {name, schedule, payload, sessionTarget, enabled};
+  const job = {name, schedule, payload, sessionTarget, wakeMode, enabled};
   if (deliveryMode === 'announce') {
     const delChannel = document.getElementById('f-del-channel').value;
     const delAccount = document.getElementById('f-del-account').value;
     const delTo = document.getElementById('f-del-to').value.trim();
-    if (!delTo) { toast('Delivery "Send To" is required when announcing', 'error'); return; }
-    job.delivery = {mode: 'announce', channel: delChannel, to: delTo};
+    if (!delChannel) { toast('Select a delivery channel', 'error'); return; }
+    job.delivery = {mode: 'announce', channel: delChannel};
+    if (delTo) job.delivery.to = delTo;
     if (delAccount) job.delivery.accountId = delAccount;
   } else {
     job.delivery = {mode: 'none'};
   }
 
   const btn = document.getElementById('modal-save');
+  const wasEditing = !!editingJobId;
+  const savedJobId = editingJobId;
   btn.disabled = true; btn.textContent = 'Saving...';
 
   try {
-    if (editingJobId) {
-      await rpc('cron.update', {id: editingJobId, patch: {...job, agentId}});
-      toast('Job updated!', 'success');
+    let response;
+    if (wasEditing) {
+      const patch = {...job, agentId: agentId || null};
+      // Legacy jobs can reference channels that are no longer configured.
+      // Omitting an unchanged delivery block lets unrelated edits (such as
+      // Session Target) save without re-validating that legacy channel.
+      if (originalJob && JSON.stringify(comparableDelivery(originalJob.delivery)) === JSON.stringify(comparableDelivery(job.delivery))) {
+        delete patch.delivery;
+      }
+      response = await rpc('cron.update', {id: savedJobId, patch});
     } else {
-      job.agentId = agentId;
-      await rpc('cron.add', job);
-      toast('Job created!', 'success');
+      if (agentId) job.agentId = agentId;
+      response = await rpc('cron.add', job);
     }
+    const responseJob = cronJobFromResponse(response);
+    const persistedId = savedJobId || (responseJob && responseJob.id);
+    if (!persistedId) throw new Error('Gateway saved the job but did not return its ID');
+    const getResponse = await rpc('cron.get', {id: persistedId});
+    const persistedJob = cronJobFromResponse(getResponse);
+    assertCronJobSaved(persistedJob, job, agentId);
+    toast(wasEditing ? 'Job updated and verified!' : 'Job created and verified!', 'success');
     closeModal();
-    loadJobs();
+    await loadJobs();
   } catch (e) {
     toast('Save failed: '+e.message, 'error');
   }
   btn.disabled = false;
-  btn.textContent = editingJobId ? 'Save Changes' : 'Create Job';
+  btn.textContent = wasEditing ? 'Save Changes' : 'Create Job';
 }
 
 // --- Toast ---

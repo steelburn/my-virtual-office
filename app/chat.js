@@ -2730,7 +2730,7 @@
     if (!mainPanel || !mainPanel.classList.contains('open')) return;
 
     const GAP = CHAT_STACK_GAP;
-    const MIN_W = 160;
+    const MIN_W = 220;
 
     // Collect open secondary panels in order (1, 2, 3)
     const openSecondaries = [];
@@ -2747,16 +2747,43 @@
     // Available space to the left of the main panel
     const availableLeft = mainLeft - GAP;
     const totalGaps = (openSecondaries.length - 1) * GAP;
-    const secWidth = Math.max(MIN_W, Math.floor((availableLeft - totalGaps) / openSecondaries.length));
+    const availableWidth = Math.max(0, availableLeft - totalGaps);
+
+    // A secondary window should open at a useful window-sized width, not
+    // stretch across every unused pixel to the left of the main chat. Keep a
+    // user's horizontal resize as its preferred width and only compress the
+    // group when the viewport cannot fit all open windows side by side.
+    const desiredWidths = openSecondaries.map((panel) => {
+      const preferred = Number(panel.dataset.chatPreferredWidth);
+      const desired = panel.dataset.hasCustomWidth && Number.isFinite(preferred)
+        ? preferred
+        : mainRect.width;
+      return Math.max(MIN_W, Math.min(desired, window.innerWidth * 0.92));
+    });
+    const desiredTotal = desiredWidths.reduce((sum, width) => sum + width, 0);
+    let tiledWidths = desiredWidths.slice();
+    if (desiredTotal > availableWidth && availableWidth >= MIN_W * openSecondaries.length) {
+      const shrinkableTotal = desiredWidths.reduce((sum, width) => sum + Math.max(0, width - MIN_W), 0);
+      const overflow = desiredTotal - availableWidth;
+      tiledWidths = desiredWidths.map((width) => {
+        if (shrinkableTotal <= 0) return width;
+        const share = Math.max(0, width - MIN_W) / shrinkableTotal;
+        return Math.max(MIN_W, width - overflow * share);
+      });
+    } else if (availableWidth < MIN_W * openSecondaries.length) {
+      const constrainedWidth = Math.max(120, availableWidth / openSecondaries.length);
+      tiledWidths = desiredWidths.map(() => constrainedWidth);
+    }
 
     // Position each open secondary from right to left, starting just left of main
     let cursor = mainLeft - GAP;
-    openSecondaries.forEach((panel) => {
-      const left = cursor - secWidth;
+    openSecondaries.forEach((panel, index) => {
+      const panelWidth = Math.floor(tiledWidths[index]);
+      const left = cursor - panelWidth;
       panel.style.position = 'fixed';
       panel.style.left = Math.max(0, left) + 'px';
       panel.style.right = 'auto';
-      panel.style.width = secWidth + 'px';
+      panel.style.width = panelWidth + 'px';
       panel.style.transform = 'none';
       // Only set height/bottom if panel doesn't have an explicit height yet
       if (!panel.dataset.hasCustomHeight) {
@@ -2807,6 +2834,8 @@
     // Reset secondaries — clear custom heights, equal size
     openSecondaries.forEach((panel) => {
       delete panel.dataset.hasCustomHeight;
+      delete panel.dataset.hasCustomWidth;
+      delete panel.dataset.chatPreferredWidth;
       panel.style.height = '500px';
       panel.style.bottom = '0px';
       panel.style.top = '';
@@ -3975,6 +4004,10 @@
 
   /** Is this panel anchored via CSS `right` (default docked mode)? */
   function _isRightAnchored(panel) {
+    // Secondary panels are explicitly positioned from the left by the tiling
+    // system. Treating them as right-anchored makes a left-edge drag move the
+    // wrong edge and then lets the next tile pass overwrite the result.
+    if (panel.classList.contains('chat-panel-secondary')) return false;
     // Floating or snapped-left panels are NOT right-anchored
     if (panel.classList.contains('floating') || panel.classList.contains('snap-left')) return false;
     // Default docked-right or snap-right panels ARE right-anchored
@@ -4031,6 +4064,14 @@
         const widthDelta = newW - startW;
         panel.style.width = newW + 'px';
         panel.style.left = (startRect.left - widthDelta) + 'px';
+      }
+    }
+
+    if (panel.classList.contains('chat-panel-secondary') && (movesLeft || movesRight)) {
+      const preferredWidth = parseFloat(panel.style.width);
+      if (Number.isFinite(preferredWidth)) {
+        panel.dataset.hasCustomWidth = '1';
+        panel.dataset.chatPreferredWidth = String(preferredWidth);
       }
     }
 
@@ -4157,8 +4198,9 @@
     document.body.style.userSelect = '';
     document.body.style.webkitUserSelect = '';
     document.body.style.cursor = '';
-    // Re-tile secondary panels after any resize, then resolve overlaps
-    _tileSecondaryPanels();
+    // Apply the final tile synchronously so overlap detection sees the final
+    // geometry instead of the pre-tile frame.
+    _tileSecondaryPanelsNow();
     _positionExteriorTabs();
     resizedPanels.forEach(p => _resolveOverlaps(p));
   }
@@ -4266,6 +4308,20 @@
   function _resolveOverlaps(movedPanel) {
     const allPanels = _getAllOpenChatPanels();
     if (allPanels.length < 2) return;
+
+    // The normal tiled layout is already collision-free. Avoid converting
+    // every other panel to floating unless a collision actually exists.
+    let hasOverlap = false;
+    for (let i = 0; i < allPanels.length && !hasOverlap; i++) {
+      const a = _getPanelRect(allPanels[i]);
+      for (let j = i + 1; j < allPanels.length; j++) {
+        if (_rectsOverlap(a, _getPanelRect(allPanels[j]), OVERLAP_PAD)) {
+          hasOverlap = true;
+          break;
+        }
+      }
+    }
+    if (!hasOverlap) return;
 
     // First, convert any non-floating panels to floating so we can
     // position them via style.left/top. Do this BEFORE reading rects

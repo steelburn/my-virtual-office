@@ -7505,7 +7505,8 @@ var _agentWorkspace = {
     loading: false,
     drag: null,
     resize: null,
-    lastRect: null
+    lastRect: null,
+    skillSections: { agent: true, library: true, workshop: false }
 };
 
 function _worldToScreen(wx, wy) {
@@ -7739,9 +7740,14 @@ function _renderAgentWorkspaceSkills(data) {
     var editor = data.skillEditor || null;
     var libraryEditor = data.librarySkillEditor || null;
     var agentSkillsAllowed = !data.settings || data.settings.agentSkillsApplicable !== false;
+    var openSections = _agentWorkspace.skillSections || {};
+    var editorType = libraryEditor ? 'Skill Library' : (editor ? 'Agent Skill' : 'SKILL.md');
     return '<div class="agent-workspace-skills-shell">' +
-        '<div class="agent-workspace-skill-column">' +
-            '<div class="agent-workspace-panel-heading"><span>Agent Skills</span>' + (agentSkillsAllowed ? '<button type="button" data-aw-action="newAgentSkill">New</button>' : '') + '</div>' +
+        '<aside class="agent-workspace-skill-browser">' +
+        '<details class="agent-workspace-skill-section" data-aw-skill-section="agent"' + (openSections.agent ? ' open' : '') + '>' +
+            '<summary><span>Agent Skills</span><span class="agent-workspace-skill-count">' + skills.length + '</span></summary>' +
+            '<div class="agent-workspace-skill-section-body">' +
+            (agentSkillsAllowed ? '<div class="agent-workspace-skill-section-actions"><button type="button" data-aw-action="newAgentSkill">New Skill</button></div>' : '') +
             (agentSkillsAllowed ? _agentWorkspaceItemList(skills, 'No skills installed for this agent', function(s) {
                 return '<div class="agent-workspace-item">' +
                     '<div><b>' + escHtml(s.name) + '</b></div>' +
@@ -7749,9 +7755,12 @@ function _renderAgentWorkspaceSkills(data) {
                     '<div class="agent-workspace-actions"><button type="button" data-aw-skill-edit="' + escAttr(s.name) + '">Open</button><button type="button" data-aw-action="saveAgentSkillToLibrary" data-aw-id="' + escAttr(s.name) + '">Save to Skill Library</button><button type="button" data-aw-action="deleteAgentSkill" data-aw-id="' + escAttr(s.name) + '">Delete</button></div>' +
                 '</div>';
             }) : '<div class="agent-workspace-empty">Hermes does not use OpenClaw workspace skills. You can still create and edit reusable skills in the library.</div>') +
-        '</div>' +
-        '<div class="agent-workspace-skill-column">' +
-            '<div class="agent-workspace-panel-heading"><span>Skill Library</span><button type="button" data-aw-action="newLibrarySkill">New</button></div>' +
+            '</div>' +
+        '</details>' +
+        '<details class="agent-workspace-skill-section" data-aw-skill-section="library"' + (openSections.library ? ' open' : '') + '>' +
+            '<summary><span>Skill Library</span><span class="agent-workspace-skill-count">' + library.length + '</span></summary>' +
+            '<div class="agent-workspace-skill-section-body">' +
+            '<div class="agent-workspace-skill-section-actions"><button type="button" data-aw-action="newLibrarySkill">New Skill</button></div>' +
             _agentWorkspaceItemList(library, 'No library skills found', function(s) {
                 return '<div class="agent-workspace-item">' +
                     '<div><b>' + escHtml(s.name) + '</b></div>' +
@@ -7759,10 +7768,18 @@ function _renderAgentWorkspaceSkills(data) {
                     '<div class="agent-workspace-actions"><button type="button" data-aw-library-edit="' + escAttr(s.name) + '">Open</button>' + (agentSkillsAllowed ? '<button type="button" data-aw-action="applyLibrarySkill" data-aw-id="' + escAttr(s.name) + '">Install</button>' : '') + '</div>' +
                 '</div>';
             }) +
-        '</div>' +
-        '<div class="agent-workspace-skill-editor">' +
-            '<div class="agent-workspace-panel-heading"><span>Skill Workshop</span><button type="button" data-aw-action="refreshSkillWorkshop">Refresh</button></div>' +
+            '</div>' +
+        '</details>' +
+        '<details class="agent-workspace-skill-section" data-aw-skill-section="workshop"' + (openSections.workshop ? ' open' : '') + '>' +
+            '<summary><span>Skill Workshop</span><span class="agent-workspace-skill-count">Proposals</span></summary>' +
+            '<div class="agent-workspace-skill-section-body">' +
+            '<div class="agent-workspace-skill-section-actions"><button type="button" data-aw-action="refreshSkillWorkshop">Refresh</button></div>' +
             '<div id="agent-workspace-skill-workshop-list" class="skill-workshop-list agent-workspace-workshop-list"><span style="color:#666;font-size:11px;">Loading proposals...</span></div>' +
+            '</div>' +
+        '</details>' +
+        '</aside>' +
+        '<div class="agent-workspace-skill-editor">' +
+            '<div class="agent-workspace-panel-heading"><span>Skill Editor</span><span class="agent-workspace-skill-count">' + editorType + '</span></div>' +
             (editor || libraryEditor ? '<form class="agent-workspace-editor" data-aw-form="' + (libraryEditor ? 'library-skill-save' : 'agent-skill-save') + '">' +
                 '<div class="agent-workspace-editor-header"><input name="name" value="' + escAttr((editor || libraryEditor).name || '') + '" placeholder="skill-name">' +
                 '<button type="submit">Save</button></div>' +
@@ -7846,6 +7863,7 @@ function _renderAgentWorkspace() {
     var body = document.getElementById('agent-workspace-body');
     var data = _agentWorkspace.data;
     if (!body) return;
+    body.classList.toggle('agent-workspace-body-skills', _agentWorkspace.activeTab === 'skills');
     document.querySelectorAll('.agent-workspace-tabs button').forEach(function(btn) {
         btn.classList.toggle('active', btn.dataset.awTab === _agentWorkspace.activeTab);
     });
@@ -8013,7 +8031,7 @@ function _initAgentWorkspaceUI() {
     var maxBtn = document.getElementById('agent-workspace-maximize');
     var header = document.getElementById('agent-workspace-drag-handle');
     var body = document.getElementById('agent-workspace-body');
-    var resizeHandle = panel ? panel.querySelector('.agent-workspace-resize-handle') : null;
+    var resizeHandles = panel ? panel.querySelectorAll('.agent-workspace-resize-handle') : [];
     var pointerMoveFrame = 0;
     var pendingPointer = null;
 
@@ -8035,6 +8053,12 @@ function _initAgentWorkspaceUI() {
         });
     });
     if (body) {
+        body.addEventListener('toggle', function(e) {
+            var section = e.target.closest && e.target.closest('[data-aw-skill-section]');
+            if (!section || section !== e.target) return;
+            if (!_agentWorkspace.skillSections) _agentWorkspace.skillSections = {};
+            _agentWorkspace.skillSections[section.dataset.awSkillSection] = section.open;
+        }, true);
         body.addEventListener('submit', function(e) {
             var form = e.target.closest('[data-aw-form]');
             if (!form) return;
@@ -8224,23 +8248,35 @@ function _initAgentWorkspaceUI() {
             header.setPointerCapture(e.pointerId);
         });
     }
-    if (resizeHandle) {
+    resizeHandles.forEach(function(resizeHandle) {
         resizeHandle.addEventListener('pointerdown', function(e) {
             if (!panel || panel.classList.contains('maximized')) return;
             e.preventDefault();
+            e.stopPropagation();
             var rect = panel.getBoundingClientRect();
+            panel.style.left = rect.left + 'px';
+            panel.style.top = rect.top + 'px';
+            panel.style.right = 'auto';
             _agentWorkspace.resize = {
                 id: e.pointerId,
+                handle: resizeHandle,
+                dir: resizeHandle.dataset.resize || 'se',
                 x: e.clientX,
                 y: e.clientY,
+                left: rect.left,
+                top: rect.top,
+                right: rect.right,
+                bottom: rect.bottom,
                 w: rect.width,
                 h: rect.height,
-                maxW: window.innerWidth - 16,
-                maxH: window.innerHeight - 16
+                viewportW: window.innerWidth,
+                viewportH: window.innerHeight
             };
+            document.body.style.userSelect = 'none';
+            document.body.style.cursor = getComputedStyle(resizeHandle).cursor;
             resizeHandle.setPointerCapture(e.pointerId);
         });
-    }
+    });
     function flushPointerMove() {
         pointerMoveFrame = 0;
         if (!pendingPointer) return;
@@ -8251,8 +8287,28 @@ function _initAgentWorkspaceUI() {
         }
         if (_agentWorkspace.resize && panel) {
             var r = _agentWorkspace.resize;
-            panel.style.width = Math.max(360, Math.min(r.maxW, r.w + pendingPointer.clientX - r.x)) + 'px';
-            panel.style.height = Math.max(320, Math.min(r.maxH, r.h + pendingPointer.clientY - r.y)) + 'px';
+            var dx = pendingPointer.clientX - r.x;
+            var dy = pendingPointer.clientY - r.y;
+            var left = r.left;
+            var top = r.top;
+            var width = r.w;
+            var height = r.h;
+            if (r.dir.indexOf('w') >= 0) {
+                left = Math.max(0, Math.min(r.right - 360, r.left + dx));
+                width = r.right - left;
+            } else if (r.dir.indexOf('e') >= 0) {
+                width = Math.max(360, Math.min(r.viewportW - r.left, r.w + dx));
+            }
+            if (r.dir.indexOf('n') >= 0) {
+                top = Math.max(0, Math.min(r.bottom - 320, r.top + dy));
+                height = r.bottom - top;
+            } else if (r.dir.indexOf('s') >= 0) {
+                height = Math.max(320, Math.min(r.viewportH - r.top, r.h + dy));
+            }
+            panel.style.left = left + 'px';
+            panel.style.top = top + 'px';
+            panel.style.width = width + 'px';
+            panel.style.height = height + 'px';
         }
     }
     document.addEventListener('pointermove', function(e) {
@@ -8267,7 +8323,19 @@ function _initAgentWorkspaceUI() {
         }
         pendingPointer = null;
         _agentWorkspace.drag = null;
+        if (_agentWorkspace.resize && _agentWorkspace.resize.handle && _agentWorkspace.resize.handle.hasPointerCapture && _agentWorkspace.resize.handle.hasPointerCapture(_agentWorkspace.resize.id)) {
+            _agentWorkspace.resize.handle.releasePointerCapture(_agentWorkspace.resize.id);
+        }
         _agentWorkspace.resize = null;
+        document.body.style.userSelect = '';
+        document.body.style.cursor = '';
+    });
+    document.addEventListener('pointercancel', function() {
+        pendingPointer = null;
+        _agentWorkspace.drag = null;
+        _agentWorkspace.resize = null;
+        document.body.style.userSelect = '';
+        document.body.style.cursor = '';
     });
     document.addEventListener('click', function(e) {
         var menu = document.getElementById('agent-workspace-menu');

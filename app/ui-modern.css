@@ -2833,6 +2833,8 @@ html[data-ui-theme="light"] :where(
 html[data-ui-theme="light"] :where(
   .agent-workspace-file-list-pane,
   .agent-workspace-skill-column,
+  .agent-workspace-skill-browser,
+  .agent-workspace-skill-section,
   .agent-workspace-notes-folders,
   .agent-workspace-file-editor-pane,
   .agent-workspace-skill-editor,

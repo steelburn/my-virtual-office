@@ -186,7 +186,7 @@ html, body {
 
 .agent-workspace-menu {
     position: fixed;
-    z-index: 1300;
+    z-index: 10021;
     background: #101624;
     border: 1px solid #ffd700;
     border-radius: 6px;
@@ -219,11 +219,11 @@ html, body {
     background: #111827;
     border: 2px solid #2f405f;
     border-radius: 8px;
-    z-index: 1250;
+    z-index: 10020;
     display: flex;
     flex-direction: column;
     box-shadow: 0 16px 60px rgba(0,0,0,0.65);
-    overflow: hidden;
+    overflow: visible;
 }
 .agent-workspace-panel.hidden { display: none; }
 .agent-workspace-panel.maximized {
@@ -243,6 +243,7 @@ html, body {
     padding: 8px 10px;
     background: #0b1020;
     border-bottom: 1px solid #2f405f;
+    border-radius: 6px 6px 0 0;
     cursor: move;
 }
 .agent-workspace-title {
@@ -313,7 +314,9 @@ html, body {
     font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: 13px;
     color: #d8e0ee;
+    border-radius: 0 0 6px 6px;
 }
+.agent-workspace-body.agent-workspace-body-skills { overflow: hidden; }
 .agent-workspace-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
@@ -457,6 +460,7 @@ html, body {
 }
 .agent-workspace-file-list-pane,
 .agent-workspace-skill-column,
+.agent-workspace-skill-browser,
 .agent-workspace-notes-folders {
     min-height: 0;
     overflow: auto;
@@ -531,7 +535,78 @@ html, body {
     resize: both;
 }
 .agent-workspace-skills-shell {
-    grid-template-columns: minmax(210px, 24%) minmax(230px, 26%) minmax(360px, 1fr);
+    grid-template-columns: minmax(230px, 30%) minmax(0, 1fr);
+    height: 100%;
+    min-height: 0;
+    align-items: stretch;
+    overflow: hidden;
+}
+.agent-workspace-skill-browser {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.agent-workspace-skill-section {
+    flex: 0 0 auto;
+    border: 1px solid #27384f;
+    border-radius: 6px;
+    background: #0d1422;
+    overflow: hidden;
+}
+.agent-workspace-skill-section > summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 10px;
+    color: #ffd700;
+    cursor: pointer;
+    list-style: none;
+    font-size: 10px;
+    font-family: 'Press Start 2P', cursive;
+    user-select: none;
+}
+.agent-workspace-skill-section > summary::-webkit-details-marker { display: none; }
+.agent-workspace-skill-section > summary::before {
+    content: '▶';
+    font-size: 8px;
+}
+.agent-workspace-skill-section[open] > summary::before { content: '▼'; }
+.agent-workspace-skill-section > summary span:first-of-type { flex: 1; }
+.agent-workspace-skill-count {
+    color: #93a4bd;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 11px;
+}
+.agent-workspace-skill-section-body {
+    padding: 0 8px 8px;
+}
+.agent-workspace-skill-section-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+.agent-workspace-skill-section-actions button {
+    border: 1px solid #3a3a5e;
+    background: #1f2a44;
+    color: #e8e8f0;
+    border-radius: 4px;
+    padding: 6px 8px;
+    cursor: pointer;
+}
+.agent-workspace-skill-editor {
+    position: static;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+}
+.agent-workspace-skill-editor > .agent-workspace-editor {
+    flex: 1 1 auto;
+}
+.agent-workspace-skill-editor textarea {
+    min-height: 0;
+    resize: none;
 }
 .agent-workspace-notes-app {
     grid-template-columns: minmax(230px, 28%) minmax(420px, 1fr);
@@ -611,13 +686,18 @@ html, body {
 }
 .agent-workspace-resize-handle {
     position: absolute;
-    right: 0;
-    bottom: 0;
-    width: 18px;
-    height: 18px;
-    cursor: nwse-resize;
-    z-index: 2;
+    z-index: 5;
+    touch-action: none;
 }
+.agent-workspace-resize-handle.top { top: -8px; left: 10px; right: 10px; height: 8px; cursor: ns-resize; }
+.agent-workspace-resize-handle.bottom { bottom: -8px; left: 10px; right: 10px; height: 8px; cursor: ns-resize; }
+.agent-workspace-resize-handle.left { left: -8px; top: 10px; bottom: 10px; width: 8px; cursor: ew-resize; }
+.agent-workspace-resize-handle.right { right: -8px; top: 10px; bottom: 10px; width: 8px; cursor: ew-resize; }
+.agent-workspace-resize-handle.top-left { top: -8px; left: -8px; width: 14px; height: 14px; cursor: nwse-resize; }
+.agent-workspace-resize-handle.top-right { top: -8px; right: -8px; width: 14px; height: 14px; cursor: nesw-resize; }
+.agent-workspace-resize-handle.bottom-left { bottom: -8px; left: -8px; width: 14px; height: 14px; cursor: nesw-resize; }
+.agent-workspace-resize-handle.bottom-right { bottom: -8px; right: -8px; width: 14px; height: 14px; cursor: nwse-resize; }
+.agent-workspace-panel.maximized .agent-workspace-resize-handle { display: none; }
 .agent-workspace-empty {
     color: #93a4bd;
     padding: 12px;
@@ -647,6 +727,13 @@ html, body {
     .agent-workspace-notes-app {
         grid-template-columns: 1fr;
     }
+    .agent-workspace-body.agent-workspace-body-skills { overflow: auto; }
+    .agent-workspace-skills-shell {
+        height: auto;
+        overflow: visible;
+    }
+    .agent-workspace-skill-browser { overflow: visible; }
+    .agent-workspace-skill-editor { min-height: 520px; }
     .agent-workspace-file-editor-pane textarea,
     .agent-workspace-skill-editor textarea,
     .agent-workspace-note-editor textarea {

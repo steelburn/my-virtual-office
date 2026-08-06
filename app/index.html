@@ -22,10 +22,10 @@
         }
     })();
     </script>
-    <link rel="stylesheet" href="style.css?v=20260723-layout-selection-resize-1">
+    <link rel="stylesheet" href="style.css?v=20260805-workspace-chat-2">
     <link rel="stylesheet" href="projects.css?v=20260722-1">
-    <link rel="stylesheet" href="ui-modern.css?v=20260723-layout-selection-resize-1">
-    <link rel="stylesheet" href="ui-themes.css?v=20260722-14">
+    <link rel="stylesheet" href="ui-modern.css?v=20260805-workspace-chat-1">
+    <link rel="stylesheet" href="ui-themes.css?v=20260805-workspace-chat-1">
     <link rel="stylesheet" href="office-layouts.css?v=20260722-2">
     <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
 </head>
@@ -751,7 +751,14 @@
         <button id="agent-workspace-open-btn" type="button">Open agent workspace</button>
     </div>
     <div id="agent-workspace-panel" class="agent-workspace-panel hidden">
-        <div class="agent-workspace-resize-handle" data-resize="se"></div>
+        <div class="agent-workspace-resize-handle top-left" data-resize="nw"></div>
+        <div class="agent-workspace-resize-handle top" data-resize="n"></div>
+        <div class="agent-workspace-resize-handle top-right" data-resize="ne"></div>
+        <div class="agent-workspace-resize-handle right" data-resize="e"></div>
+        <div class="agent-workspace-resize-handle bottom-right" data-resize="se"></div>
+        <div class="agent-workspace-resize-handle bottom" data-resize="s"></div>
+        <div class="agent-workspace-resize-handle bottom-left" data-resize="sw"></div>
+        <div class="agent-workspace-resize-handle left" data-resize="w"></div>
         <div class="agent-workspace-header" id="agent-workspace-drag-handle">
             <div class="agent-workspace-title">
                 <span id="agent-workspace-emoji">🤖</span>
@@ -825,7 +832,7 @@
         setTimeout(resizeCanvas, 320);
     }
     </script>
-    <script src="game.js?v=20260729-gathering-wall-clearance-3"></script>
+    <script src="game.js?v=20260805-workspace-chat-1"></script>
     <script src="office-layouts.js?v=20260723-place-only-1"></script>
     <script src="browser-panel.js?v=20260722-ui-perf-1"></script>
     <script src="projects.js?v=20260722-ui-perf-1"></script>
@@ -1052,7 +1059,7 @@
     </script>
     <!-- marked.js v15.0.12 - bundled locally for airgapped/offline use -->
     <script src="marked.min.js"></script>
-    <script src="chat.js?v=20260722-ui-perf-1"></script>
+    <script src="chat.js?v=20260805-workspace-chat-1"></script>
     <script src="sms-panel.js?v=20260722-ui-perf-1"></script>
     <script src="pc-monitor.js?v=0"></script>
     <script src="api-usage.js?v=20260610-native-usage"></script>
