@@ -12,6 +12,7 @@ import time
 import json
 import sys
 import os
+import re
 
 BASE = os.environ.get("VO_TEST_URL", "http://127.0.0.1:8090")
 API = f"{BASE}/api/projects"
@@ -185,19 +186,25 @@ workflow_section_end = server_src.find("WORKFLOW_STATE_FILE =", workflow_section
 workflow_code = server_src[workflow_section_start:workflow_section_end] if workflow_section_start >= 0 else ""
 
 hardcoded_patterns = [
-    ("eliubuntu", "Hardcoded username"),
-    ("100.93.199.57", "Hardcoded IP"),
-    ("100.101.16.92", "Hardcoded IP"),
-    ("eli.autobot13", "Hardcoded email"),
-    ("admin123", "Hardcoded password"),
-    ("ghp_", "Hardcoded GitHub token"),
-    ("f2d0bb2d", "Hardcoded token"),
+    (r"/home/(?!user(?:/|$))[A-Za-z0-9._-]+", "Hardcoded Unix user home"),
+    (r"[A-Za-z]:\\Users\\[A-Za-z0-9._-]+", "Hardcoded Windows user home"),
+    (
+        r"\b(?:10(?:\.[0-9]{1,3}){3}|192\.168(?:\.[0-9]{1,3}){2}|"
+        r"100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])(?:\.[0-9]{1,3}){2})\b",
+        "Hardcoded private or tailnet IP",
+    ),
+    (r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "Hardcoded email"),
+    (
+        r"(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
+        r"sk-ant-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{30,})",
+        "Hardcoded credential",
+    ),
 ]
 
 hardcoded_found = []
 for pattern, desc in hardcoded_patterns:
-    if pattern in workflow_code:
-        hardcoded_found.append(f"{desc}: '{pattern}'")
+    if re.search(pattern, workflow_code):
+        hardcoded_found.append(desc)
 
 check("No hardcoded personal values in workflow code",
       len(hardcoded_found) == 0,
@@ -280,6 +287,16 @@ proj_final = api_get(f"/{PROJECT_ID}")
 final_task = next((t for t in proj_final.get("project", {}).get("tasks", []) if t["id"] == TASK_ID), None)
 check("Task in Done column", final_task and final_task.get("columnId") == done_col)
 check("Task has completedAt", final_task and final_task.get("completedAt") is not None)
+
+# Verify both named checklist items survived the API round trip and received
+# an explicit passing review. These checks are intentionally separate so an
+# omitted or duplicated item cannot be hidden by the aggregate Done status.
+final_review = {
+    item.get("text"): item.get("status")
+    for item in (final_task.get("reviewCheck", []) if final_task else [])
+}
+check("Verify item A passed final review", final_review.get("Verify item A") == "pass")
+check("Verify item B passed final review", final_review.get("Verify item B") == "pass")
 
 # ── Cleanup ──
 print("\n🧹 Cleaning up...")

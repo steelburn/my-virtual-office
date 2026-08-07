@@ -18,7 +18,7 @@ It connects to supported agent harnesses and visualizes what your agents are doi
 
 Virtual Office connects to OpenClaw through the OpenClaw gateway and the mounted OpenClaw home directory. The gateway provides live chat and activity events, while the home directory lets Virtual Office discover agents, read safe profile metadata, load model settings, and surface workspace tools in the UI.
 
-For Docker deployments, mount your OpenClaw home directory into the container and set `VO_OPENCLAW_PATH`, `VO_GATEWAY_URL`, and `VO_GATEWAY_HTTP` when the defaults do not match your setup.
+For Docker deployments, mount your OpenClaw home directory into the container and set `VO_OPENCLAW_PATH`, `VO_GATEWAY_URL`, and `VO_GATEWAY_HTTP` when the defaults do not match your setup. Virtual Office automatically translates host workspace paths recorded by the Gateway into the container mount. If the host OpenClaw home cannot be inferred from `openclaw.json`, set `VO_OPENCLAW_GATEWAY_PATH` to the absolute OpenClaw home path as seen by the Gateway.
 
 ### Hermes Agents
 
@@ -157,6 +157,19 @@ That means the same image tag works on standard x86_64 machines and ARM64 device
 3. Enter a license key or skip for demo mode
 4. Customize your office, add agents, and watch them come to life
 
+### Provider SDK
+
+The built-in Provider SDK supports OpenClaw, Hermes, Codex CLI, Claude Code,
+OpenCode, and Antigravity. Open **☰ Menu → Provider SDK** to configure
+connections, models, permissions, native discovery, and active-session
+behavior. The New Agent and Agent Desk screens use each provider's manifest
+for native agent creation, allowlisted files, and AgentSkills.
+
+CLI authentication remains native to each framework. For Docker deployments,
+the CLI executable and any native home/config directory must be installed in
+or mounted into the container, then mapped with the matching environment
+variables below. Virtual Office does not copy or expose provider credentials.
+
 ## Remote Access and Security
 
 **Recommended remote access: use [Tailscale](https://tailscale.com/).**
@@ -223,12 +236,28 @@ All settings live in `vo-config.json`. Environment variables override config val
 | `VO_GATEWAY_URL` | ws://127.0.0.1:18789 | OpenClaw gateway WebSocket URL |
 | `VO_GATEWAY_HTTP` | http://127.0.0.1:18789 | OpenClaw gateway HTTP URL |
 | `VO_OPENCLAW_PATH` | ~/.openclaw | Path to OpenClaw home directory |
+| `VO_OPENCLAW_GATEWAY_PATH` | auto-detected | OpenClaw home path in the external Gateway's filesystem namespace |
 | `VO_HERMES_ENABLED` | true | Enable native Hermes API connections |
 | `VO_HERMES_CONNECTIONS_JSON` | `[]` | JSON list of native gateway connections (`id`, `name`, `apiUrl`, `apiKey`) |
 | `VO_HERMES_TIMEOUT_SEC` | 600 | Timeout for Hermes API runs |
+| `VO_HERMES_LOCAL_PROFILES_ENABLED` | false | Discover local Hermes profiles in `VO_HERMES_HOME` |
+| `VO_HERMES_HOME` | /data/hermes-home | Hermes native home visible inside the container |
+| `VO_HERMES_BIN` | hermes | Hermes executable visible inside the container |
 | `VO_HERMES_PLATFORM_ENABLED` | false unless token is set | Enable the separate Hermes Messaging Gateway platform bridge |
 | `VO_HERMES_PLATFORM_TOKEN` | *(none)* | Shared token required by the Hermes `my_virtual_office` platform plugin |
 | `VO_HERMES_PLATFORM_AGENT_ID` | hermes-gateway | Office agent ID for the Hermes Messaging Gateway platform |
+| `VO_CODEX_ENABLED` | true | Enable the Codex CLI adapter |
+| `VO_CODEX_HOME` | /data/codex-home | Standalone Codex home visible inside the container |
+| `VO_CODEX_BIN` | codex | Standalone Codex executable visible inside the container |
+| `VO_CLAUDE_CODE_ENABLED` | true | Enable the Claude Code adapter |
+| `VO_CLAUDE_CODE_HOME` | /data/claude-code-home | Claude Code native config directory |
+| `VO_CLAUDE_CODE_BIN` | claude | Claude Code executable visible inside the container |
+| `VO_OPENCODE_ENABLED` | false | Enable the OpenCode adapter |
+| `VO_OPENCODE_CONFIG_DIR` | /data/opencode-config | OpenCode native config directory |
+| `VO_OPENCODE_BIN` | opencode | OpenCode executable visible inside the container |
+| `VO_ANTIGRAVITY_ENABLED` | false | Enable the Antigravity adapter |
+| `VO_ANTIGRAVITY_HOME` | /data/antigravity-config | Antigravity native config directory |
+| `VO_ANTIGRAVITY_BIN` | agy | Antigravity executable visible inside the container |
 | `VO_STATUS_DIR` | /data | Directory for presence/status data inside the container. By default this is backed by the `vo-data` Docker volume. |
 | `VO_WEATHER_LOCATION` | *(none)* | Weather location for window display |
 

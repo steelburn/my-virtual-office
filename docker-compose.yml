@@ -14,6 +14,10 @@ services:
       - vo-data:/data
     environment:
       - VO_OPENCLAW_PATH=/openclaw
+      # Optional host/Gateway namespace for the same mounted directory. The
+      # app can infer it from openclaw.json; set this only when inference is
+      # unavailable or your Gateway uses a nonstandard workspace root.
+      - VO_OPENCLAW_GATEWAY_PATH=${VO_OPENCLAW_GATEWAY_PATH:-}
       - VO_STATUS_DIR=/data
       - VO_GATEWAY_URL=${VO_GATEWAY_URL:-ws://host.docker.internal:18789}
       - VO_GATEWAY_HTTP=${VO_GATEWAY_HTTP:-http://host.docker.internal:18789}
@@ -25,8 +29,12 @@ services:
       # connection per Hermes profile, or configure connections in Settings.
       - VO_HERMES_ENABLED=${VO_HERMES_ENABLED:-true}
       - VO_HERMES_CONNECTIONS_JSON=${VO_HERMES_CONNECTIONS_JSON:-[]}
+      - VO_HERMES_LOCAL_PROFILES_ENABLED=${VO_HERMES_LOCAL_PROFILES_ENABLED:-false}
+      - VO_HERMES_HOME=${VO_HERMES_HOME:-/data/hermes-home}
+      - VO_HERMES_BIN=${VO_HERMES_BIN:-hermes}
       # Optional native Codex support. Install codex in the image/container PATH
       # or set VO_CODEX_BIN to an absolute path available inside the container.
+      - VO_CODEX_ENABLED=${VO_CODEX_ENABLED:-true}
       - CODEX_HOME=${VO_CODEX_HOME:-/data/codex-home}
       - VO_CODEX_HOME=${VO_CODEX_HOME:-/data/codex-home}
       - VO_CODEX_BIN=${VO_CODEX_BIN:-codex}
@@ -40,6 +48,7 @@ services:
       - VO_CODEX_REGISTER_NATIVE_AGENTS=${VO_CODEX_REGISTER_NATIVE_AGENTS:-1}
       # Optional native Claude Code support. Install claude in the image/container PATH
       # or set VO_CLAUDE_CODE_BIN to an absolute path available inside the container.
+      - VO_CLAUDE_CODE_ENABLED=${VO_CLAUDE_CODE_ENABLED:-true}
       - CLAUDE_CONFIG_DIR=${VO_CLAUDE_CODE_HOME:-/data/claude-code-home}
       - VO_CLAUDE_CODE_HOME=${VO_CLAUDE_CODE_HOME:-/data/claude-code-home}
       - VO_CLAUDE_CODE_BIN=${VO_CLAUDE_CODE_BIN:-claude}
@@ -50,6 +59,21 @@ services:
       - VO_CLAUDE_CODE_INCLUDE_MAIN=${VO_CLAUDE_CODE_INCLUDE_MAIN:-1}
       - VO_CLAUDE_CODE_INCLUDE_NATIVE_AGENTS=${VO_CLAUDE_CODE_INCLUDE_NATIVE_AGENTS:-1}
       - VO_CLAUDE_CODE_REGISTER_NATIVE_AGENTS=${VO_CLAUDE_CODE_REGISTER_NATIVE_AGENTS:-1}
+      # Optional OpenCode support. Mount or install the native CLI, then enable it.
+      - VO_OPENCODE_ENABLED=${VO_OPENCODE_ENABLED:-false}
+      - VO_OPENCODE_BIN=${VO_OPENCODE_BIN:-opencode}
+      - VO_OPENCODE_CONFIG_DIR=${VO_OPENCODE_CONFIG_DIR:-/data/opencode-config}
+      - VO_OPENCODE_WORKSPACE_ROOT=${VO_OPENCODE_WORKSPACE_ROOT:-/data/opencode-agents}
+      - VO_OPENCODE_MAIN_WORKSPACE=${VO_OPENCODE_MAIN_WORKSPACE:-/data/opencode-main}
+      - VO_OPENCODE_INCLUDE_MAIN=${VO_OPENCODE_INCLUDE_MAIN:-1}
+      - VO_OPENCODE_INCLUDE_AGENTS=${VO_OPENCODE_INCLUDE_AGENTS:-1}
+      - VO_OPENCODE_REGISTER_AGENTS=${VO_OPENCODE_REGISTER_AGENTS:-1}
+      # Optional Antigravity support. Authentication remains owned by its native CLI.
+      - VO_ANTIGRAVITY_ENABLED=${VO_ANTIGRAVITY_ENABLED:-false}
+      - VO_ANTIGRAVITY_BIN=${VO_ANTIGRAVITY_BIN:-agy}
+      - VO_ANTIGRAVITY_HOME=${VO_ANTIGRAVITY_HOME:-/data/antigravity-config}
+      - VO_ANTIGRAVITY_WORKSPACE_ROOT=${VO_ANTIGRAVITY_WORKSPACE_ROOT:-/data/antigravity-agents}
+      - VO_ANTIGRAVITY_PRINT_TIMEOUT=${VO_ANTIGRAVITY_PRINT_TIMEOUT:-5m}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${VO_PORT:-8090}/health')"]

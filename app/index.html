@@ -22,9 +22,9 @@
         }
     })();
     </script>
-    <link rel="stylesheet" href="style.css?v=20260805-workspace-chat-2">
+    <link rel="stylesheet" href="style.css?v=20260807-provider-sdk-1">
     <link rel="stylesheet" href="projects.css?v=20260722-1">
-    <link rel="stylesheet" href="ui-modern.css?v=20260805-workspace-chat-1">
+    <link rel="stylesheet" href="ui-modern.css?v=20260807-provider-sdk-1">
     <link rel="stylesheet" href="ui-themes.css?v=20260805-workspace-chat-1">
     <link rel="stylesheet" href="office-layouts.css?v=20260722-2">
     <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
@@ -41,6 +41,13 @@
                         <button class="catalog-close-btn" onclick="toggleMainMenu()">✕</button>
                     </div>
                     <div class="main-menu-body">
+                        <div class="mm-section">
+                            <div class="mm-section-title">🧩 Provider SDK</div>
+                            <div style="font-size:9px;color:#777;margin:4px 0 8px;line-height:1.5;">
+                                Configure every installed agent framework from its manifest: connections, models, permissions, discovery, and active-session streaming.
+                            </div>
+                            <a href="/providers.html" style="text-decoration:none"><button class="mm-btn mm-btn-primary" type="button">Open Provider SDK Settings</button></a>
+                        </div>
                         <!-- Connection -->
                         <div class="mm-section">
                             <div class="mm-section-title">🔌 OpenClaw Connection</div>
@@ -195,6 +202,7 @@
                 <button id="btn-expand-all" title="Expand all bubbles" onclick="expandAllBubbles()">💬 Expand All</button>
                 <button id="btn-minimize-all" title="Minimize all bubbles" onclick="minimizeAllBubbles()">💬 Minimize All</button>
                 <a href="/models.html" style="text-decoration:none"><button title="Model & Provider Settings">⚙️ Models</button></a>
+                <a href="/providers.html" style="text-decoration:none"><button title="Provider SDK Connections & Models">🧩 Providers</button></a>
                 <a href="/cron.html" style="text-decoration:none"><button title="Cron Job Manager">⏰ Cron</button></a>
                 <button title="Project Manager" onclick="openProjectsManager()">📋 Projects</button>
                 <button title="Reset canvas zoom" onclick="resetCamera()">🔍 Reset</button>
@@ -832,7 +840,7 @@
         setTimeout(resizeCanvas, 320);
     }
     </script>
-    <script src="game.js?v=20260805-workspace-chat-1"></script>
+    <script src="game.js?v=20260807-provider-sdk-1"></script>
     <script src="office-layouts.js?v=20260723-place-only-1"></script>
     <script src="browser-panel.js?v=20260722-ui-perf-1"></script>
     <script src="projects.js?v=20260722-ui-perf-1"></script>
@@ -1059,11 +1067,12 @@
     </script>
     <!-- marked.js v15.0.12 - bundled locally for airgapped/offline use -->
     <script src="marked.min.js"></script>
-    <script src="chat.js?v=20260805-workspace-chat-1"></script>
+    <script src="chat-events.js?v=20260807-provider-sdk-1"></script>
+    <script src="chat.js?v=20260807-provider-sdk-1"></script>
     <script src="sms-panel.js?v=20260722-ui-perf-1"></script>
     <script src="pc-monitor.js?v=0"></script>
     <script src="api-usage.js?v=20260610-native-usage"></script>
-    <script src="ui-modern.js?v=20260722-layouts-2"></script>
+    <script src="ui-modern.js?v=20260807-provider-sdk-2"></script>
     <script src="ui-themes.js?v=20260722-5"></script>
     <script>
     // License check — demo watermark + feature gates

@@ -902,6 +902,13 @@ body.ui-office-editing .ui-edit-toolbar {
   border-left-color: var(--ui-accent);
   background: rgba(245, 200, 76, .08);
 }
+.agent-card.offline {
+  opacity: 0.68;
+  border-style: dashed;
+}
+.agent-card.offline .agent-card-role {
+  color: var(--danger, #ef9a9a);
+}
 
 .agent-card-name {
   color: var(--ui-text-1);

@@ -102,9 +102,9 @@
         var minimizeBtn = document.getElementById('btn-minimize-all');
         var smsBtn = document.getElementById('sms-toggle');
         var browserBtn = document.getElementById('browser-toggle');
-        var links = toolbar.querySelectorAll(':scope > a');
-        var modelsLink = links.length > 0 ? links[0] : null;
-        var cronLink = links.length > 1 ? links[1] : null;
+        var modelsLink = toolbar.querySelector(':scope > a[href="/models.html"]');
+        var providersLink = toolbar.querySelector(':scope > a[href="/providers.html"]');
+        var cronLink = toolbar.querySelector(':scope > a[href="/cron.html"]');
 
         if (settingsBtn) settingsBtn.textContent = '⚙️ Settings';
         if (editBtn) editBtn.textContent = '✏️ Edit Office';
@@ -116,6 +116,7 @@
         if (smsBtn) smsBtn.textContent = '📞 SMS';
         if (browserBtn) browserBtn.textContent = '🌐 Browser';
         if (modelsLink && modelsLink.querySelector('button')) modelsLink.querySelector('button').textContent = '⚙️ Models';
+        if (providersLink && providersLink.querySelector('button')) providersLink.querySelector('button').textContent = '🧩 Providers';
         if (cronLink && cronLink.querySelector('button')) cronLink.querySelector('button').textContent = '⏰ Cron';
 
         [
@@ -124,6 +125,7 @@
             [agentBtn, '👥 Agents'],
             [projectBtn, '📋 Projects'],
             [modelsLink && modelsLink.querySelector('button'), '⚙️ Models'],
+            [providersLink && providersLink.querySelector('button'), '🧩 Providers'],
             [cronLink && cronLink.querySelector('button'), '⏰ Cron'],
             [browserBtn, '🌐 Browser'],
             [smsBtn, '📞 SMS'],
@@ -175,7 +177,7 @@
         themeBtn.id = 'btn-ui-theme';
         themeBtn.type = 'button';
         themeBtn.addEventListener('click', toggleTheme);
-        [settingsBtn, editBtn, agentBtn, projectBtn, modelsLink, cronLink, browserBtn, smsBtn, expandBtn, minimizeBtn, resetBtn, themeBtn].forEach(function (el) {
+        [settingsBtn, editBtn, agentBtn, projectBtn, modelsLink, providersLink, cronLink, browserBtn, smsBtn, expandBtn, minimizeBtn, resetBtn, themeBtn].forEach(function (el) {
             if (el) primary.appendChild(el);
         });
 

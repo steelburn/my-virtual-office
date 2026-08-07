@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from urllib.parse import quote, urljoin
 from typing import Any
 
+from .file_safety import backup_files
+
 
 @dataclass
 class HermesProvider:
@@ -162,7 +164,17 @@ class HermesProvider:
         except Exception as exc:
             return {"ok": False, "error": str(exc), "exitCode": None, "reply": ""}
 
-    def send_chat_message(self, profile: str, message: str, session_id: str | None = None, timeout_sec: int | None = None, yolo_once: bool = False) -> dict[str, Any]:
+    def send_chat_message(
+        self,
+        profile: str,
+        message: str,
+        session_id: str | None = None,
+        timeout_sec: int | None = None,
+        yolo_once: bool = False,
+        on_progress: Any = None,
+        files: list[str] | None = None,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
         """Send a message through Hermes chat, optionally resuming a session.
 
         Unlike ``send_message``/``hermes -z``, this uses the public
@@ -201,6 +213,8 @@ class HermesProvider:
                 m = re.match(r"^\s*session_id:\s*(\S+)\s*$", line)
                 if m:
                     found_session_id = m.group(1).strip()
+                elif "tirith security scanner enabled but not available" in line.lower():
+                    continue
                 else:
                     reply_lines.append(line)
             for line in stderr.splitlines():
@@ -210,7 +224,7 @@ class HermesProvider:
             reply = "\n".join(reply_lines).strip()
             if result.returncode != 0 and not reply:
                 reply = f"[Hermes error] {stderr[:1000]}"
-            return {
+            outcome = {
                 "ok": result.returncode == 0,
                 "reply": reply,
                 "stderr": stderr[:2000],
@@ -218,6 +232,12 @@ class HermesProvider:
                 "profile": profile or "default",
                 "sessionId": found_session_id,
             }
+            # The legacy Hermes CLI is buffered, but it still participates in
+            # the universal SDK event contract. API-connected Hermes agents
+            # provide true token/tool progress through HermesOfficeProvider.
+            if callable(on_progress):
+                on_progress(outcome)
+            return outcome
         except subprocess.TimeoutExpired:
             return {"ok": False, "error": "Hermes call timed out", "exitCode": None, "reply": "", "sessionId": session_id or ""}
         except Exception as exc:
@@ -371,6 +391,7 @@ class HermesProvider:
 
         profile_home = os.path.join(self.home_path, "profiles", safe_profile)
         os.makedirs(profile_home, exist_ok=True)
+        os.makedirs(os.path.join(profile_home, "skills"), exist_ok=True)
         self._write_profile_bootstrap(profile_home, name=name, role=role, emoji=emoji, profile=safe_profile)
         self._chown_like_home(profile_home)
 
@@ -382,6 +403,44 @@ class HermesProvider:
             "workspace": profile_home,
             "message": f"Hermes profile '{safe_profile}' created successfully",
         }
+
+    def update_profile(self, profile: str, patch: dict[str, Any]) -> dict[str, Any]:
+        safe_profile = self._safe_profile_name(profile)
+        profile_home = self.home_path if safe_profile == "default" else os.path.join(self.home_path, "profiles", safe_profile)
+        if not os.path.isdir(profile_home):
+            return {"ok": False, "error": f"Hermes profile '{safe_profile}' was not found"}
+        identity_path = os.path.join(profile_home, "IDENTITY.md")
+        profile_yaml = os.path.join(profile_home, "profile.yaml")
+        backup_id, backups = backup_files(profile_home, [identity_path, profile_yaml])
+        current = {"name": safe_profile.replace("-", " ").title(), "role": "Hermes Agent", "emoji": "⚕️"}
+        try:
+            text = open(identity_path, "r", encoding="utf-8", errors="replace").read()
+            for key, label in (("name", "Name"), ("role", "Creature"), ("emoji", "Emoji")):
+                match = re.search(rf"(?im)^\\s*-\\s*\\*\\*{label}:\\*\\*\\s*(.+)$", text)
+                if match:
+                    current[key] = match.group(1).split(" — Hermes profile", 1)[0].strip()
+        except OSError:
+            pass
+        for key in current:
+            if key in patch:
+                current[key] = str(patch.get(key) or "").strip()
+        with open(identity_path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "# IDENTITY.md\n\n"
+                f"- **Name:** {current['name']}\n"
+                f"- **Creature:** {current['role']} — Hermes profile\n"
+                "- **Vibe:** Helpful, direct, ready to work\n"
+                f"- **Emoji:** {current['emoji']}\n"
+            )
+        if "role" in patch and safe_profile != "default":
+            subprocess.run(
+                [self.binary, "profile", "describe", safe_profile, "--text", str(current["role"])[:500]],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=self._subprocess_env(),
+            )
+        return {"ok": True, "profile": safe_profile, "backupId": backup_id, "backups": backups}
 
     def delete_agent(self, profile: str) -> dict[str, Any]:
         """Delete a Hermes profile through the public CLI."""

@@ -157,6 +157,61 @@ def main():
             }
         }), encoding="utf-8")
 
+        # OpenClaw mirrors Codex tools/finals into its transcript but can omit
+        # public commentary. The recovery path must read only phase=commentary
+        # messages from the matching standard Codex rollout, never reasoning.
+        commentary_session_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        commentary_run_id = "office-commentary-run"
+        commentary_thread_id = "019fd7c8-15ec-7852-a0a4-a0188edb277d"
+        (adam_sessions_dir / "sessions.json").write_text(json.dumps({
+            "agent:adam:main": {
+                "sessionId": commentary_session_id,
+                "label": "Main chat",
+                "updatedAt": "2026-08-06T15:55:01Z",
+            },
+            "agent:adam:file-only": {
+                "sessionId": "file-only-session",
+                "label": "File-only session",
+                "preview": "loaded from configured OpenClaw home",
+                "updatedAt": "2026-07-07T13:10:00Z",
+            },
+        }), encoding="utf-8")
+        (adam_sessions_dir / f"{commentary_session_id}.jsonl").write_text("\n", encoding="utf-8")
+        commentary_trajectory = [
+            json.dumps({"type": "context.compiled", "ts": "2026-08-06T15:54:02.149Z", "runId": commentary_run_id, "data": {"threadId": commentary_thread_id}}),
+        ]
+        commentary_trajectory.extend(
+            json.dumps({"type": "diagnostic", "ts": f"2026-08-06T{15 + (54 + index) // 60:02d}:{(54 + index) % 60:02d}:00.000Z", "runId": commentary_run_id, "data": {"sequence": index}})
+            for index in range(100)
+        )
+        commentary_trajectory.extend([
+            json.dumps({"type": "tool.call", "ts": "2026-08-06T15:54:19.660Z", "runId": commentary_run_id, "data": {"toolCallId": "tool-1", "name": "read", "arguments": {"path": "/tmp/example"}}}),
+            json.dumps({"type": "tool.result", "ts": "2026-08-06T15:54:20.699Z", "runId": commentary_run_id, "data": {"toolCallId": "tool-1", "name": "read", "result": "ok"}}),
+        ])
+        (adam_sessions_dir / f"{commentary_session_id}.trajectory.jsonl").write_text("\n".join(commentary_trajectory) + "\n", encoding="utf-8")
+        rollout_dir = openclaw_dir / "agents" / "adam" / "agent" / "codex-home" / "sessions" / "2026" / "08" / "06"
+        rollout_dir.mkdir(parents=True, exist_ok=True)
+        commentary_rollout = [
+            json.dumps({"timestamp": "2026-08-06T15:54:10.855Z", "type": "response_item", "payload": {"type": "reasoning", "summary": [], "encrypted_content": "private"}}),
+            json.dumps({"timestamp": "2026-08-06T15:54:11.863Z", "type": "response_item", "payload": {"id": "commentary-1", "type": "message", "role": "assistant", "phase": "commentary", "content": [{"type": "output_text", "text": "I will inspect the exact change set."}]}}),
+        ]
+        commentary_rollout.extend(
+            json.dumps({"timestamp": f"2026-08-06T{15 + (54 + index) // 60:02d}:{(54 + index) % 60:02d}:00.500Z", "type": "response_item", "payload": {"type": "reasoning", "summary": [], "encrypted_content": f"private-{index}"}})
+            for index in range(100)
+        )
+        commentary_rollout.append(
+            json.dumps({"timestamp": "2026-08-06T15:55:01.433Z", "type": "response_item", "payload": {"id": "final-1", "type": "message", "role": "assistant", "phase": "final_answer", "content": [{"type": "output_text", "text": "Final answer"}]}}),
+        )
+        (rollout_dir / f"rollout-2026-08-06T11-54-02-{commentary_thread_id}.jsonl").write_text("\n".join(commentary_rollout) + "\n", encoding="utf-8")
+
+        recovered = server._session_trajectory_messages("agent:adam:main", max_tools=80)
+        recovered_commentary = [msg for msg in recovered if msg.get("source") == "codex-commentary"]
+        check("OpenClaw activity recovers public Codex commentary", len(recovered_commentary) == 1 and recovered_commentary[0].get("text") == "I will inspect the exact change set.")
+        check("Long trajectories retain Codex thread mapping beyond the tail window", len(recovered_commentary) == 1)
+        check("Long Codex rollouts retain early commentary beyond the tail window", len(recovered_commentary) == 1)
+        check("Codex commentary keeps its OpenClaw run id", recovered_commentary[0].get("runId") == commentary_run_id if recovered_commentary else False)
+        check("Codex recovery excludes reasoning and final-answer records", all("private" not in str(msg) and msg.get("text") != "Final answer" for msg in recovered))
+
         claude_session_id = "11111111-2222-3333-4444-555555555555"
         claude_file = claude_home / "projects" / "test-project" / f"{claude_session_id}.jsonl"
         claude_file.write_text("\n".join([

@@ -2166,6 +2166,13 @@ function _buildAgentDefs(apiAgents) {
             providerType: a.providerType || 'runtime',
             providerAgentId: a.providerAgentId || a.id,
             provider: a.provider || '',
+            capabilities: a.capabilities || {},
+            workspace: a.workspace || '',
+            model: a.model || '',
+            available: a.available !== false,
+            connectionState: a.connectionState || (a.available === false ? 'offline' : 'connected'),
+            lastSeenAt: a.lastSeenAt || 0,
+            offlineSince: a.offlineSince || 0,
             name: saved.name || a.name || a.id,
             emoji: saved.emoji || a.emoji || '🤖',
             role: saved.role || a.role || '',
@@ -2223,6 +2230,24 @@ function _fetchRoster() {
             if (!_rosterLoaded) {
                 _rosterLoaded = true;
                 _initAgentsFromDefs();
+            } else {
+                AGENT_DEFS.forEach(function(def) {
+                    var current = agents.find(function(agent) { return agent.id === def.id; });
+                    if (current) {
+                        ['statusKey','providerKind','providerType','providerAgentId','provider','capabilities','workspace','model','available','connectionState','lastSeenAt','offlineSince'].forEach(function(key) {
+                            current[key] = def[key];
+                        });
+                    } else {
+                        agents.push(new Agent(def));
+                    }
+                });
+                agentMap = {};
+                agents.forEach(function(agent) {
+                    agentMap[agent.id] = agent;
+                    if (agent.statusKey) agentMap[agent.statusKey] = agent;
+                });
+                if (typeof updateSidebar === 'function') updateSidebar();
+                if (typeof _acpRefreshList === 'function') _acpRefreshList();
             }
         }
     }).catch(function(e) { console.warn('Failed to fetch roster:', e); });
@@ -4623,6 +4648,7 @@ function _initAgentsFromDefs() {
 
 // Kick off roster fetch immediately
 _fetchRoster();
+setInterval(_fetchRoster, 30000);
 let selectedAgent = null;
 const dismissedNotify = new Set();  // track dismissed notifications to prevent poll re-enabling
 
@@ -7694,10 +7720,15 @@ function _renderAgentWorkspaceTasks(data) {
 }
 
 function _renderAgentWorkspaceFiles(data) {
-    var canEdit = !data.settings || data.settings.filesApplicable !== false;
+    var canRead = !data.settings || data.settings.filesApplicable !== false;
+    var canWrite = canRead && (!data.settings || data.settings.filesWritable !== false);
     var editor = data.fileEditor || null;
     var search = data.fileSearch || '';
     var files = data.files || [];
+    var resourceSchema = (data.settings && data.settings.resourceSchema) || [];
+    var canCreate = canWrite && resourceSchema.some(function(resource) {
+        return resource && resource.readable !== false && resource.writable && resource.creatable !== false;
+    });
     if (search) {
         var q = search.toLowerCase();
         files = files.filter(function(f) {
@@ -7705,32 +7736,42 @@ function _renderAgentWorkspaceFiles(data) {
                 String(f.kind || '').toLowerCase().indexOf(q) >= 0;
         });
     }
-    var html = canEdit ? '<div class="agent-workspace-files-shell">' +
+    var html = canRead ? '<div class="agent-workspace-files-shell">' +
         '<div class="agent-workspace-file-list-pane">' +
-        '<form class="agent-workspace-form agent-workspace-file-tools" data-aw-form="file-create">' +
+        (canCreate ? '<form class="agent-workspace-form agent-workspace-file-tools" data-aw-form="file-create">' +
             '<input name="search" data-aw-file-search value="' + escAttr(search) + '" placeholder="Search files">' +
             '<input name="path" placeholder="notes/new-note.md">' +
             '<button type="submit">Create</button>' +
-        '</form>' : '<div class="agent-workspace-empty">This platform does not expose editable workspace files through Virtual Office. Hermes profile internals stay private; use Notes and Tasks for durable dashboard data.</div>';
-    if (canEdit) {
+        '</form>' : '<div class="agent-workspace-meta">Only provider-declared native resources are shown. Read-only and hidden files stay protected.</div>') :
+        '<div class="agent-workspace-empty">This provider connection does not expose native workspace resources.</div>';
+    if (canRead) {
         html += _agentWorkspaceItemList(files, 'No matching workspace files', function(f) {
             return '<div class="agent-workspace-item agent-workspace-file-row">' +
                 '<button type="button" class="agent-workspace-file-open" data-aw-action="readFile" data-aw-path="' + escAttr(f.path || '') + '">' + escHtml(f.path || f.name) + '</button>' +
-                '<div class="agent-workspace-meta">' + escHtml(f.kind || 'file') + ' · ' + escHtml(Math.ceil((f.size || 0) / 1024)) + ' KB · ' + escHtml(_formatAgentWorkspaceTime(f.modified)) + '</div>' +
-                (f.path && f.kind !== 'large-text' ? '<div class="agent-workspace-actions"><button type="button" data-aw-action="readFile" data-aw-path="' + escAttr(f.path) + '">Open</button><button type="button" data-aw-action="deleteFile" data-aw-path="' + escAttr(f.path) + '">Delete</button></div>' : '') +
+                '<div class="agent-workspace-meta">' + escHtml(f.resourceLabel || f.resourceId || f.kind || 'native resource') + ' · ' +
+                    (f.runtimeActive ? 'runtime active' : 'office only') + ' · ' + (f.writable ? 'editable' : 'read only') +
+                    (f.generated ? ' · managed' : '') + ' · ' + escHtml(Math.ceil((f.size || 0) / 1024)) + ' KB · ' + escHtml(_formatAgentWorkspaceTime(f.modified)) + '</div>' +
+                (f.path && f.kind !== 'large-text' ? '<div class="agent-workspace-actions"><button type="button" data-aw-action="readFile" data-aw-path="' + escAttr(f.path) + '">Open</button>' +
+                    (canWrite && f.deletable ? '<button type="button" data-aw-action="deleteFile" data-aw-path="' + escAttr(f.path) + '">Delete</button>' : '') + '</div>' : '') +
             '</div>';
         }) + '</div>';
     }
     if (editor) {
+        var editorWritable = canWrite && editor.writable !== false;
         html += '<form class="agent-workspace-editor agent-workspace-file-editor-pane" data-aw-form="file-save">' +
             '<div class="agent-workspace-editor-header"><input name="path" value="' + escAttr(editor.path || '') + '" readonly>' +
-            '<div class="agent-workspace-actions"><button type="submit">Save</button><button type="button" data-aw-action="closeFile">Close</button></div></div>' +
-            '<textarea name="content" spellcheck="false">' + escTextarea(editor.content || '') + '</textarea>' +
+            '<input type="hidden" name="revision" value="' + escAttr(editor.revision || '') + '">' +
+            '<div class="agent-workspace-actions">' +
+                (editorWritable ? '<button type="submit">Review &amp; Save</button>' : '') +
+                '<button type="button" data-aw-action="fileHistory" data-aw-path="' + escAttr(editor.path || '') + '">History</button>' +
+                '<button type="button" data-aw-action="closeFile">Close</button></div></div>' +
+            '<div class="agent-workspace-meta">' + escHtml(editor.resourceLabel || 'Native resource') + ' · ' + (editor.runtimeActive ? 'runtime active' : 'office only') + (editor.managedBy ? ' · managed in ' + escHtml(editor.managedBy) : '') + '</div>' +
+            '<textarea name="content" spellcheck="false"' + (editorWritable ? '' : ' readonly') + '>' + escTextarea(editor.content || '') + '</textarea>' +
         '</form>';
-    } else if (canEdit) {
+    } else if (canRead) {
         html += '<div class="agent-workspace-file-editor-pane agent-workspace-empty">Open a file to edit it here.</div>';
     }
-    if (canEdit) html += '</div>';
+    if (canRead) html += '</div>';
     return html;
 }
 
@@ -7740,6 +7781,9 @@ function _renderAgentWorkspaceSkills(data) {
     var editor = data.skillEditor || null;
     var libraryEditor = data.librarySkillEditor || null;
     var agentSkillsAllowed = !data.settings || data.settings.agentSkillsApplicable !== false;
+    var skillSchema = (data.settings && data.settings.skillSchema) || [];
+    var skillsWritable = agentSkillsAllowed && skillSchema.some(function(root) { return root && root.writable; });
+    var workshopApplicable = data.agent && (data.agent.providerKind || 'openclaw') === 'openclaw';
     var openSections = _agentWorkspace.skillSections || {};
     var editorType = libraryEditor ? 'Skill Library' : (editor ? 'Agent Skill' : 'SKILL.md');
     return '<div class="agent-workspace-skills-shell">' +
@@ -7747,14 +7791,17 @@ function _renderAgentWorkspaceSkills(data) {
         '<details class="agent-workspace-skill-section" data-aw-skill-section="agent"' + (openSections.agent ? ' open' : '') + '>' +
             '<summary><span>Agent Skills</span><span class="agent-workspace-skill-count">' + skills.length + '</span></summary>' +
             '<div class="agent-workspace-skill-section-body">' +
-            (agentSkillsAllowed ? '<div class="agent-workspace-skill-section-actions"><button type="button" data-aw-action="newAgentSkill">New Skill</button></div>' : '') +
+            (skillsWritable ? '<div class="agent-workspace-skill-section-actions"><button type="button" data-aw-action="newAgentSkill">New Skill</button></div>' : '') +
             (agentSkillsAllowed ? _agentWorkspaceItemList(skills, 'No skills installed for this agent', function(s) {
                 return '<div class="agent-workspace-item">' +
-                    '<div><b>' + escHtml(s.name) + '</b></div>' +
-                    '<div class="agent-workspace-meta">' + escHtml(s.type || 'skill') + (s.description ? ' · ' + escHtml(s.description) : '') + '</div>' +
-                    '<div class="agent-workspace-actions"><button type="button" data-aw-skill-edit="' + escAttr(s.name) + '">Open</button><button type="button" data-aw-action="saveAgentSkillToLibrary" data-aw-id="' + escAttr(s.name) + '">Save to Skill Library</button><button type="button" data-aw-action="deleteAgentSkill" data-aw-id="' + escAttr(s.name) + '">Delete</button></div>' +
+                    '<div><b>' + escHtml(s.displayName || s.name) + '</b></div>' +
+                    '<div class="agent-workspace-meta">' + escHtml(s.rootLabel || s.type || 'skill') + ' · ' + (s.runtimeActive ? 'runtime active' : 'stored only') +
+                        (s.valid === false ? ' · invalid: ' + escHtml(s.validationError || 'SKILL.md validation failed') : '') +
+                        (s.description ? ' · ' + escHtml(s.description) : '') + '</div>' +
+                    '<div class="agent-workspace-actions"><button type="button" data-aw-skill-edit="' + escAttr(s.name) + '">Open</button><button type="button" data-aw-action="saveAgentSkillToLibrary" data-aw-id="' + escAttr(s.name) + '">Save to Skill Library</button>' +
+                        (s.writable ? '<button type="button" data-aw-action="deleteAgentSkill" data-aw-id="' + escAttr(s.name) + '">Delete</button>' : '') + '</div>' +
                 '</div>';
-            }) : '<div class="agent-workspace-empty">Hermes does not use OpenClaw workspace skills. You can still create and edit reusable skills in the library.</div>') +
+            }) : '<div class="agent-workspace-empty">This provider connection does not expose agent-scoped skills. The reusable Skill Library remains available.</div>') +
             '</div>' +
         '</details>' +
         '<details class="agent-workspace-skill-section" data-aw-skill-section="library"' + (openSections.library ? ' open' : '') + '>' +
@@ -7765,16 +7812,18 @@ function _renderAgentWorkspaceSkills(data) {
                 return '<div class="agent-workspace-item">' +
                     '<div><b>' + escHtml(s.name) + '</b></div>' +
                     '<div class="agent-workspace-meta">' + escHtml(s.description || 'Reusable library skill') + '</div>' +
-                    '<div class="agent-workspace-actions"><button type="button" data-aw-library-edit="' + escAttr(s.name) + '">Open</button>' + (agentSkillsAllowed ? '<button type="button" data-aw-action="applyLibrarySkill" data-aw-id="' + escAttr(s.name) + '">Install</button>' : '') + '</div>' +
+                    '<div class="agent-workspace-actions"><button type="button" data-aw-library-edit="' + escAttr(s.name) + '">Open</button>' + (skillsWritable ? '<button type="button" data-aw-action="applyLibrarySkill" data-aw-id="' + escAttr(s.name) + '">Install</button>' : '') + '</div>' +
                 '</div>';
             }) +
             '</div>' +
         '</details>' +
         '<details class="agent-workspace-skill-section" data-aw-skill-section="workshop"' + (openSections.workshop ? ' open' : '') + '>' +
-            '<summary><span>Skill Workshop</span><span class="agent-workspace-skill-count">Proposals</span></summary>' +
+            '<summary><span>' + (workshopApplicable ? 'Skill Workshop' : 'Native Skill Editor') + '</span><span class="agent-workspace-skill-count">' + (workshopApplicable ? 'Proposals' : 'SKILL.md') + '</span></summary>' +
             '<div class="agent-workspace-skill-section-body">' +
-            '<div class="agent-workspace-skill-section-actions"><button type="button" data-aw-action="refreshSkillWorkshop">Refresh</button></div>' +
-            '<div id="agent-workspace-skill-workshop-list" class="skill-workshop-list agent-workspace-workshop-list"><span style="color:#666;font-size:11px;">Loading proposals...</span></div>' +
+            (workshopApplicable
+                ? '<div class="agent-workspace-skill-section-actions"><button type="button" data-aw-action="refreshSkillWorkshop">Refresh</button></div>' +
+                  '<div id="agent-workspace-skill-workshop-list" class="skill-workshop-list agent-workspace-workshop-list"><span style="color:#666;font-size:11px;">Loading proposals...</span></div>'
+                : '<div class="agent-workspace-meta">This provider uses native SKILL.md files. Proposal review is an OpenClaw-only service.</div>') +
             '</div>' +
         '</details>' +
         '</aside>' +
@@ -7782,8 +7831,8 @@ function _renderAgentWorkspaceSkills(data) {
             '<div class="agent-workspace-panel-heading"><span>Skill Editor</span><span class="agent-workspace-skill-count">' + editorType + '</span></div>' +
             (editor || libraryEditor ? '<form class="agent-workspace-editor" data-aw-form="' + (libraryEditor ? 'library-skill-save' : 'agent-skill-save') + '">' +
                 '<div class="agent-workspace-editor-header"><input name="name" value="' + escAttr((editor || libraryEditor).name || '') + '" placeholder="skill-name">' +
-                '<button type="submit">Save</button></div>' +
-                '<textarea name="content" spellcheck="false">' + escTextarea((editor || libraryEditor).content || '') + '</textarea>' +
+                ((libraryEditor || editor.writable !== false) ? '<button type="submit">Save</button>' : '') + '</div>' +
+                '<textarea name="content" spellcheck="false"' + ((!libraryEditor && editor.writable === false) ? ' readonly' : '') + '>' + escTextarea((editor || libraryEditor).content || '') + '</textarea>' +
             '</form>' : '<div class="agent-workspace-empty">Open or create a skill to edit its SKILL.md here.</div>') +
         '</div>' +
     '</div>';
@@ -7833,6 +7882,17 @@ function _renderAgentWorkspaceSettings(data) {
     var settings = workspace.settings || {};
     var score = data.score || {};
     var modelEditable = !data.settings || data.settings.modelEditable !== false;
+    var resources = (data.settings && data.settings.resourceSchema) || [];
+    var skillRoots = (data.settings && data.settings.skillSchema) || [];
+    var providerKind = agent.providerKind || 'openclaw';
+    var modelControl = '';
+    if (modelEditable) {
+        modelControl = providerKind === 'openclaw'
+            ? '<label class="agent-workspace-settings-span">Model<select name="model" id="agent-workspace-model-select"><option value="">Loading models...</option></select></label>'
+            : '<label class="agent-workspace-settings-span">Model<input name="model" value="' + escAttr(agent.model || '') + '" placeholder="Use provider default"></label>';
+    } else {
+        modelControl = '<label class="agent-workspace-settings-span">Model<input name="model" value="' + escAttr(agent.model || agent.provider || 'Provider managed') + '" readonly></label>';
+    }
     return '<form class="agent-workspace-settings agent-workspace-settings-polished" data-aw-form="settings">' +
         '<section class="agent-workspace-settings-section"><h3>Agent</h3>' +
             '<div class="agent-workspace-settings-grid">' +
@@ -7847,10 +7907,19 @@ function _renderAgentWorkspaceSettings(data) {
         '</section>' +
         '<section class="agent-workspace-settings-section"><h3>Runtime</h3>' +
             '<div class="agent-workspace-settings-grid">' +
-                (modelEditable ? '<label class="agent-workspace-settings-span">Model<select name="model" id="agent-workspace-model-select"><option value="">Loading models...</option></select></label>' : '<label class="agent-workspace-settings-span">Model<input name="model" value="' + escAttr(agent.model || agent.provider || 'Hermes managed') + '" readonly></label>') +
+                modelControl +
                 '<label class="agent-workspace-checkbox"><input type="checkbox" name="cronEnabled"' + (settings.cronEnabled ? ' checked' : '') + (data.settings && data.settings.cronApplicable ? '' : ' disabled') + '> Cron enabled</label>' +
             '</div>' +
-            '<div class="agent-workspace-meta">' + escHtml(provider) + ' · current ' + escHtml(agent.model || agent.provider || 'default') + ' · ' + (data.settings && data.settings.cronApplicable ? 'OpenClaw cron supported' : 'Cron not surfaced for this platform') + '</div>' +
+            '<div class="agent-workspace-meta">' + escHtml(provider) + ' · ' + (agent.available === false ? 'offline / unavailable' : 'connected') + ' · current ' + escHtml(agent.model || agent.provider || 'default') + ' · ' + (data.settings && data.settings.cronApplicable ? 'OpenClaw cron supported' : 'Cron not surfaced for this platform') + '</div>' +
+        '</section>' +
+        '<section class="agent-workspace-settings-section"><h3>Native Integration</h3>' +
+            '<div class="agent-workspace-item"><b>Files</b><div class="agent-workspace-meta">' +
+                escHtml(resources.filter(function(r) { return r && r.readable !== false; }).map(function(r) {
+                    return (r.label || r.id) + ' (' + (r.runtimeActive ? 'runtime active' : 'office only') + ', ' + (r.writable ? 'editable' : 'read only') + ')';
+                }).join(' · ') || 'No native files exposed') + '</div></div>' +
+            '<div class="agent-workspace-item"><b>Skills</b><div class="agent-workspace-meta">' +
+                escHtml(skillRoots.map(function(root) { return (root.label || root.id) + ' at ' + (root.path || ''); }).join(' · ') || 'No agent skill roots exposed') + '</div></div>' +
+            '<div class="agent-workspace-meta">Credential-bearing and undeclared files are always hidden. Provider connection controls live in Provider SDK Settings.</div>' +
         '</section>' +
         '<section class="agent-workspace-settings-section"><h3>Heartbeat</h3>' +
             (data.settings && data.settings.heartbeatApplicable ? '<textarea name="heartbeatContent" spellcheck="false">' + escTextarea(data.settings.heartbeatContent || '') + '</textarea>' : '<div class="agent-workspace-item">Not applicable<div class="agent-workspace-meta">' + escHtml(provider) + ' does not use OpenClaw HEARTBEAT.md.</div></div>') +
@@ -7882,10 +7951,13 @@ function _renderAgentWorkspace() {
     else if (_agentWorkspace.activeTab === 'notes') body.innerHTML = _renderAgentWorkspaceNotes(data);
     else if (_agentWorkspace.activeTab === 'settings') body.innerHTML = _renderAgentWorkspaceSettings(data);
     else body.innerHTML = _renderAgentWorkspaceOverview(data);
-    if (_agentWorkspace.activeTab === 'settings' && (!data.settings || data.settings.modelEditable !== false)) _populateAgentWorkspaceModels(data);
+    if (_agentWorkspace.activeTab === 'settings' && data.agent && (data.agent.providerKind || 'openclaw') === 'openclaw' && (!data.settings || data.settings.modelEditable !== false)) _populateAgentWorkspaceModels(data);
     if (_agentWorkspace.activeTab === 'skills') {
-        renderSkillWorkshopQueue();
-        if (!_skillWorkshopLoaded && !_skillWorkshopLoading) refreshSkillWorkshopQueue();
+        var workshopApplicable = data.agent && (data.agent.providerKind || 'openclaw') === 'openclaw';
+        if (workshopApplicable) {
+            renderSkillWorkshopQueue();
+            if (!_skillWorkshopLoaded && !_skillWorkshopLoading) refreshSkillWorkshopQueue();
+        }
     }
 }
 
@@ -7938,6 +8010,18 @@ async function _populateAgentWorkspaceModels(data) {
 }
 
 async function _agentWorkspacePost(action, payload) {
+    var json = await _agentWorkspaceRequest(action, payload);
+    if (!json) return json;
+    if (action === 'readFile' && json.ok && json.file) {
+        if (_agentWorkspace.data) _agentWorkspace.data.fileEditor = json.file;
+    } else {
+        _agentWorkspace.data = json;
+    }
+    _renderAgentWorkspace();
+    return json;
+}
+
+async function _agentWorkspaceRequest(action, payload) {
     var agent = _agentWorkspace.agent;
     var key = _agentWorkspaceKey(agent);
     if (!key) return;
@@ -7948,13 +8032,59 @@ async function _agentWorkspacePost(action, payload) {
         body: JSON.stringify(body)
     });
     var json = await res.json();
-    if (action === 'readFile' && json.ok && json.file) {
-        if (_agentWorkspace.data) _agentWorkspace.data.fileEditor = json.file;
-    } else {
-        _agentWorkspace.data = json;
-    }
-    _renderAgentWorkspace();
+    if (!res.ok || json.error) throw new Error(json.error || res.statusText);
     return json;
+}
+
+async function _saveAgentWorkspaceFileWithPreview(form) {
+    var path = form.elements.path.value;
+    var content = form.elements.content.value;
+    var revision = form.elements.revision ? form.elements.revision.value : '';
+    try {
+        var preview = await _agentWorkspaceRequest('previewFileSave', { path: path, content: content });
+        if (!preview.changed) {
+            _acpShowToast('No file changes to save.');
+            return;
+        }
+        var diff = String(preview.diff || '').slice(0, 7000);
+        if (!window.confirm('Review native file changes before saving:\n\n' + diff + '\n\nSave this change?')) return;
+        var saved = await _agentWorkspaceRequest('saveFile', {
+            path: path,
+            content: content,
+            expectedRevision: revision
+        });
+        _agentWorkspace.data = saved;
+        _renderAgentWorkspace();
+        _acpShowToast('✅ Saved with backup.');
+    } catch (e) {
+        alert('File was not saved: ' + e.message);
+        if (_agentWorkspace.agent) _loadAgentWorkspace(_agentWorkspace.agent);
+    }
+}
+
+async function _showAgentWorkspaceFileHistory(path) {
+    try {
+        var history = await _agentWorkspaceRequest('listFileRevisions', { path: path });
+        var revisions = history.revisions || [];
+        if (!revisions.length) {
+            alert('No saved revisions exist for ' + path + '.');
+            return;
+        }
+        var list = revisions.map(function(item, index) {
+            return (index + 1) + '. ' + (item.createdAt || item.backupId) + ' · ' + (item.size || 0) + ' bytes';
+        }).join('\n');
+        var choice = window.prompt('Choose a revision number to restore:\n\n' + list, '1');
+        if (!choice) return;
+        var selected = revisions[Number(choice) - 1];
+        if (!selected) throw new Error('Invalid revision number');
+        if (!window.confirm('Restore ' + path + ' from ' + (selected.createdAt || selected.backupId) + '? A backup of the current file will be made first.')) return;
+        await _agentWorkspaceRequest('restoreFileRevision', { path: path, backupId: selected.backupId });
+        await _loadAgentWorkspace(_agentWorkspace.agent);
+        await _agentWorkspacePost('readFile', { path: path });
+        _acpShowToast('✅ Revision restored.');
+    } catch (e) {
+        alert('Could not restore revision: ' + e.message);
+    }
 }
 
 async function _agentWorkspaceSetModel(model) {
@@ -8076,7 +8206,7 @@ function _initAgentWorkspaceUI() {
                 var path = form.elements.path.value.trim();
                 if (path) _agentWorkspacePost('createFile', { path: path, content: '# ' + path.split('/').pop().replace(/\.[^.]+$/, '') + '\n' });
             } else if (form.dataset.awForm === 'file-save') {
-                _agentWorkspacePost('saveFile', { path: form.elements.path.value, content: form.elements.content.value });
+                _saveAgentWorkspaceFileWithPreview(form);
             } else if (form.dataset.awForm === 'note') {
                 var folder = form.elements.newFolder.value.trim() || form.elements.folder.value || 'General';
                 var tags = [];
@@ -8089,7 +8219,11 @@ function _initAgentWorkspaceUI() {
                 if (form.elements.id.value) _agentWorkspacePost('updateNote', Object.assign({ id: form.elements.id.value }, notePayload));
                 else _agentWorkspacePost('addNote', notePayload);
             } else if (form.dataset.awForm === 'agent-skill-save') {
-                _agentWorkspacePost('saveAgentSkill', { name: form.elements.name.value, content: form.elements.content.value });
+                _agentWorkspacePost('saveAgentSkill', {
+                    name: form.elements.name.value,
+                    content: form.elements.content.value,
+                    rootId: ((_agentWorkspace.data || {}).skillEditor || {}).rootId || ''
+                });
             } else if (form.dataset.awForm === 'library-skill-save') {
                 _agentWorkspacePost('saveLibrarySkill', { name: form.elements.name.value, content: form.elements.content.value });
             } else if (form.dataset.awForm === 'settings') {
@@ -8106,8 +8240,10 @@ function _initAgentWorkspaceUI() {
                 var currentData = _agentWorkspace.data || {};
                 var canSetModel = currentData.settings && currentData.settings.modelEditable !== false;
                 var selectedModel = canSetModel && form.elements.model ? form.elements.model.value : '';
+                var isOpenClawModel = !currentData.agent || (currentData.agent.providerKind || 'openclaw') === 'openclaw';
+                if (canSetModel && !isOpenClawModel) payload.model = selectedModel;
                 Promise.resolve(_agentWorkspacePost('updateSettings', payload)).then(function() {
-                    return canSetModel ? _agentWorkspaceSetModel(selectedModel) : { ok: true };
+                    return canSetModel && isOpenClawModel ? _agentWorkspaceSetModel(selectedModel) : { ok: true };
                 }).then(function(result) {
                     var status = document.getElementById('agent-workspace-settings-status');
                     if (status) status.textContent = result && result.ok === false ? (result.error || 'Model not changed') : 'Saved';
@@ -8127,10 +8263,19 @@ function _initAgentWorkspaceUI() {
                 _renderAgentWorkspace();
                 return;
             }
+            if (target && target.dataset.awAction === 'fileHistory') {
+                _showAgentWorkspaceFileHistory(target.dataset.awPath || '');
+                return;
+            }
             if (skillEdit) {
                 var skill = _findAgentSkill(skillEdit.dataset.awSkillEdit);
                 if (!_agentWorkspace.data || !skill) return;
-                _agentWorkspace.data.skillEditor = { name: skill.name, content: skill.content || '' };
+                _agentWorkspace.data.skillEditor = {
+                    name: skill.name,
+                    content: skill.content || '',
+                    rootId: skill.rootId || '',
+                    writable: skill.writable !== false
+                };
                 delete _agentWorkspace.data.librarySkillEditor;
                 _renderAgentWorkspace();
                 return;
@@ -8186,7 +8331,8 @@ function _initAgentWorkspaceUI() {
             }
             if (action === 'newAgentSkill') {
                 if (_agentWorkspace.data) {
-                    _agentWorkspace.data.skillEditor = { name: 'new-skill', content: '---\\nname: new-skill\\ndescription: \"Agent workflow skill.\"\\n---\\n\\n# New Skill\\n\\nUse this skill when...\\n' };
+                    var roots = ((_agentWorkspace.data.settings || {}).skillSchema || []);
+                    _agentWorkspace.data.skillEditor = { name: 'new-skill', rootId: (roots[0] || {}).id || '', writable: true, content: '---\\nname: new-skill\\ndescription: \"Agent workflow skill.\"\\n---\\n\\n# New Skill\\n\\nUse this skill when...\\n' };
                     delete _agentWorkspace.data.librarySkillEditor;
                 }
                 _renderAgentWorkspace();
@@ -13754,12 +13900,13 @@ function _acpRefreshList() {
     container.innerHTML = '';
     agents.forEach(function(agent) {
         var card = document.createElement('div');
-        card.className = 'agent-card' + (agent.id === _agentPanelSelectedId ? ' selected' : '');
+        var isOffline = agent.available === false;
+        card.className = 'agent-card' + (agent.id === _agentPanelSelectedId ? ' selected' : '') + (isOffline ? ' offline' : '');
         card.innerHTML =
             '<span class="agent-card-emoji">' + agent.emoji + '</span>' +
             '<span class="agent-card-info">' +
                 '<span class="agent-card-name">' + agent.name + '</span>' +
-                '<span class="agent-card-role">' + agent.role + '</span>' +
+                '<span class="agent-card-role">' + agent.role + (isOffline ? ' · Offline' : '') + '</span>' +
             '</span>';
         card.onclick = function() { _acpSelectAgent(agent.id); };
         container.appendChild(card);
@@ -13805,6 +13952,7 @@ function _acpBuildEditor(agent) {
     previewInfo.innerHTML =
         '<div class="agent-preview-name" id="acp-preview-name">' + es.name + '</div>' +
         '<div class="agent-preview-role" id="acp-preview-role">' + es.role + '</div>' +
+        (agent.available === false ? '<div class="agent-preview-role" style="color:#ef9a9a">Offline — native agent was not found during the latest scan</div>' : '') +
         '<div class="agent-preview-role" id="acp-preview-branch">Branch: ' + getBranchDisplayName(es.branch) + '</div>' +
         '<div class="agent-preview-emoji" id="acp-preview-emoji">' + es.emoji + '</div>';
     previewWrap.appendChild(previewInfo);
@@ -13996,7 +14144,7 @@ function _acpBuildEditor(agent) {
         var delWrap = document.createElement('div');
         delWrap.className = 'agent-delete-wrap';
         var delBtn = document.createElement('button');
-        delBtn.innerHTML = '🗑️ Delete Agent';
+        delBtn.innerHTML = agent.available === false ? '🧹 Forget Offline Agent' : '🗑️ Delete Agent';
         delBtn.className = 'agent-delete-btn';
         delBtn.onclick = function() { _acpDeleteAgent(agent.id); };
         delWrap.appendChild(delBtn);
@@ -14279,8 +14427,32 @@ function _acpSave() {
     saveOfficeConfig();
     _acpRefreshList();
 
-    // Show saved toast
-    _acpShowToast('✅ Saved!');
+    // Keep the native provider profile in sync through the same capability
+    // contract used by the Agent Desk. Providers without profileEdit simply
+    // retain the Virtual Office display override.
+    fetch('/api/agent-workspace/' + encodeURIComponent(es.statusKey || es.id), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            action: 'updateSettings',
+            actor: 'user',
+            name: es.name,
+            displayName: es.name,
+            role: es.role,
+            emoji: es.emoji,
+            branch: es.branch,
+            color: es.color
+        })
+    }).then(function(res) {
+        return res.json().then(function(data) {
+            if (!res.ok || data.error) throw new Error(data.error || res.statusText);
+            return data;
+        });
+    }).then(function() {
+        _acpShowToast('✅ Office and native profile saved!');
+    }).catch(function(e) {
+        _acpShowToast('⚠️ Office saved; native profile: ' + e.message);
+    });
 }
 
 function _acpAutoSave() {
@@ -14337,32 +14509,13 @@ function _isCustomAgent(agentId) {
     return !AGENT_DEFS.find(function(d){ return d.id === agentId; });
 }
 
-function _acpAgentPlatformDefaults(platformId) {
-    if (platformId === 'hermes') {
-        return {
-            role: 'Hermes Agent',
-            emoji: '⚕️',
-            prompt: 'You are a Hermes-backed Virtual Office agent. Reply clearly and stay focused on the assigned role.'
-        };
-    }
-    if (platformId === 'codex') {
-        return {
-            role: 'Codex Agent',
-            emoji: '🤖',
-            prompt: 'You are a Codex-backed Virtual Office agent. Help with software tasks, keep changes scoped, and explain results clearly.'
-        };
-    }
-    if (platformId === 'claude-code') {
-        return {
-            role: 'Claude Code Agent',
-            emoji: '🤖',
-            prompt: 'You are a Claude Code-backed Virtual Office agent. Help with software tasks, use tools carefully, and explain results clearly.'
-        };
-    }
+function _acpAgentPlatformDefaults(platform) {
+    var item = typeof platform === 'string' ? { id: platform, label: platform } : (platform || {});
+    var label = item.label || item.name || item.id || 'AI';
     return {
-        role: 'AI assistant',
-        emoji: '🤖',
-        prompt: 'You are a helpful Virtual Office agent. Stay organized, concise, and focused on your assigned role.'
+        role: label + ' Agent',
+        emoji: item.icon || '🤖',
+        prompt: 'You are a ' + label + '-backed Virtual Office agent. Stay organized, concise, and focused on your assigned role.'
     };
 }
 
@@ -14377,7 +14530,7 @@ function _acpShowCreateAgentDialog(platforms) {
             return '<option value="' + escAttr(p.id) + '">' + escHtml(p.label || p.id) + '</option>';
         }).join('');
         var first = platforms[0] || { id: 'openclaw', label: 'OpenClaw' };
-        var defaults = _acpAgentPlatformDefaults(first.id);
+        var defaults = _acpAgentPlatformDefaults(first);
         var lastDefaults = defaults;
         modal.innerHTML =
             '<div class="modal-content agent-create-modal">' +
@@ -14389,20 +14542,13 @@ function _acpShowCreateAgentDialog(platforms) {
                 '<form class="agent-create-form">' +
                     '<label>Agent Platform<select name="platform">' + optionsHtml + '</select></label>' +
                     '<div class="agent-create-platform-note"></div>' +
-                    '<div class="agent-create-codex-options" hidden>' +
-                        '<label><span class="agent-create-native-label">Native Location</span><select name="codexCreationMode">' +
-                            '<option value="standard">Default native agents directory</option>' +
-                            '<option value="custom">Custom parent directory</option>' +
-                        '</select></label>' +
-                        '<label class="agent-create-codex-custom" hidden>Custom Parent Directory<input name="codexCustomDirectory" placeholder="/path/to/agent-workspaces" autocomplete="off"></label>' +
-                        '<div class="agent-create-codex-note"></div>' +
-                    '</div>' +
                     '<label>Name<input name="name" maxlength="80" placeholder="New Agent" autocomplete="off"></label>' +
                     '<div class="agent-create-row">' +
                         '<label>Role<input name="role" maxlength="160" value="' + escAttr(defaults.role) + '"></label>' +
                         '<label>Emoji<input name="emoji" maxlength="8" value="' + escAttr(defaults.emoji) + '"></label>' +
                     '</div>' +
                     '<label>Standing Prompt<textarea name="prompt" maxlength="5000">' + escTextarea(defaults.prompt) + '</textarea></label>' +
+                    '<div class="agent-create-provider-fields"></div>' +
                     '<div class="agent-create-error" aria-live="polite"></div>' +
                     '<div class="agent-create-actions">' +
                         '<button type="submit">Create Agent</button>' +
@@ -14415,48 +14561,79 @@ function _acpShowCreateAgentDialog(platforms) {
             var value = modal.querySelector('select[name="platform"]').value;
             return platforms.find(function(p) { return p.id === value; }) || first;
         }
+        function providerExtraFields(p) {
+            var schema = (p && p.creationSchema) || {};
+            return (schema.fields || []).filter(function(field) {
+                return field && ['name', 'role', 'emoji', 'instructions'].indexOf(field.id) < 0;
+            });
+        }
+        function renderProviderFields() {
+            var p = selectedPlatform();
+            var holder = modal.querySelector('.agent-create-provider-fields');
+            var html = providerExtraFields(p).map(function(field) {
+                var fieldId = String(field.id || '');
+                var attrs = ' data-provider-field="' + escAttr(fieldId) + '"';
+                if (field.required) attrs += ' data-provider-required="true"';
+                var control = '';
+                if (field.type === 'select') {
+                    control = '<select' + attrs + '>' + (field.options || []).map(function(option) {
+                        var selected = String(option.value) === String(field.default || '') ? ' selected' : '';
+                        return '<option value="' + escAttr(option.value) + '"' + selected + '>' + escHtml(option.label || option.value) + '</option>';
+                    }).join('') + '</select>';
+                } else if (field.type === 'textarea') {
+                    control = '<textarea' + attrs + '>' + escTextarea(field.default || '') + '</textarea>';
+                } else {
+                    var inputType = field.type === 'number' ? 'number' : 'text';
+                    control = '<input type="' + inputType + '"' + attrs + ' value="' + escAttr(field.default || '') + '" autocomplete="off">';
+                }
+                var condition = field.showWhen || {};
+                return '<label class="agent-create-provider-field" data-show-field="' + escAttr(condition.field || Object.keys(condition)[0] || '') +
+                    '" data-show-value="' + escAttr(condition.value || condition[Object.keys(condition)[0]] || '') + '">' +
+                    escHtml(field.label || fieldId) + control + '</label>';
+            }).join('');
+            holder.innerHTML = html;
+            holder.querySelectorAll('[data-provider-field]').forEach(function(control) {
+                control.addEventListener('change', updateConditionalProviderFields);
+                control.addEventListener('input', updateConditionalProviderFields);
+            });
+            updateConditionalProviderFields();
+        }
+        function updateConditionalProviderFields() {
+            var values = {};
+            modal.querySelectorAll('[data-provider-field]').forEach(function(control) {
+                values[control.getAttribute('data-provider-field')] = control.value;
+            });
+            modal.querySelectorAll('.agent-create-provider-field').forEach(function(label) {
+                var field = label.getAttribute('data-show-field');
+                var expected = label.getAttribute('data-show-value');
+                var hidden = !!field && String(values[field] || '') !== String(expected || '');
+                label.hidden = hidden;
+                var control = label.querySelector('[data-provider-field]');
+                if (control) {
+                    control.required = !hidden && control.getAttribute('data-provider-required') === 'true';
+                    control.disabled = hidden;
+                }
+            });
+        }
         function updatePlatformDefaults() {
             var p = selectedPlatform();
-            var next = _acpAgentPlatformDefaults(p.id);
+            var next = _acpAgentPlatformDefaults(p);
             var role = modal.querySelector('input[name="role"]');
             var emoji = modal.querySelector('input[name="emoji"]');
             var prompt = modal.querySelector('textarea[name="prompt"]');
             var note = modal.querySelector('.agent-create-platform-note');
-            var codexOptions = modal.querySelector('.agent-create-codex-options');
             if (!role.value.trim() || role.value === lastDefaults.role) role.value = next.role;
             if (!emoji.value.trim() || emoji.value === lastDefaults.emoji) emoji.value = next.emoji;
             if (!prompt.value.trim() || prompt.value === lastDefaults.prompt) prompt.value = next.prompt;
-            note.textContent = p.description || '';
-            if (codexOptions) {
-                codexOptions.hidden = !(p.id === 'codex' || p.id === 'claude-code');
-                updateCodexDirectoryControls();
-            }
+            var nativeFiles = (p.resourceSchema || []).filter(function(resource) { return resource && resource.readable !== false; }).map(function(resource) {
+                return resource.label || resource.id;
+            });
+            var skillRoots = (p.skillSchema || []).map(function(root) { return root.label || root.path || root.id; });
+            note.textContent = (p.description || '') +
+                (nativeFiles.length ? ' Native files: ' + nativeFiles.join(', ') + '.' : '') +
+                (skillRoots.length ? ' Skills: ' + skillRoots.join(', ') + '.' : ' This provider does not expose agent skills.');
+            renderProviderFields();
             lastDefaults = next;
-        }
-        function updateCodexDirectoryControls() {
-            var p = selectedPlatform();
-            var codexBox = modal.querySelector('.agent-create-codex-options');
-            var mode = modal.querySelector('select[name="codexCreationMode"]');
-            var custom = modal.querySelector('.agent-create-codex-custom');
-            var customInput = modal.querySelector('input[name="codexCustomDirectory"]');
-            var note = modal.querySelector('.agent-create-codex-note');
-            var label = modal.querySelector('.agent-create-native-label');
-            if (!codexBox || !mode || !custom || !note) return;
-            var isHarness = p.id === 'codex' || p.id === 'claude-code';
-            codexBox.hidden = !isHarness;
-            if (!isHarness) return;
-            var providerData = p.id === 'claude-code' ? (p.claudeCode || {}) : (p.codex || {});
-            var providerName = p.id === 'claude-code' ? 'Claude Code' : 'Codex';
-            var nativeDir = providerData.nativeAgentsDir || (p.id === 'claude-code' ? '$CLAUDE_CONFIG_DIR/agents' : '$CODEX_HOME/agents');
-            var workspaceRoot = providerData.workspaceRoot || '';
-            if (label) label.textContent = providerName + ' Location';
-            custom.hidden = mode.value !== 'custom';
-            if (mode.value === 'custom') {
-                note.textContent = 'Creates a project-local ' + providerName + ' agent under the custom parent directory.';
-                if (customInput && !customInput.value.trim() && workspaceRoot) customInput.placeholder = workspaceRoot;
-            } else {
-                note.textContent = 'Registers the agent in ' + nativeDir + ' and creates a managed workspace for Virtual Office.';
-            }
         }
         function close(value) {
             document.removeEventListener('keydown', onKeyDown);
@@ -14473,7 +14650,6 @@ function _acpShowCreateAgentDialog(platforms) {
             }
         });
         modal.querySelector('select[name="platform"]').addEventListener('change', updatePlatformDefaults);
-        modal.querySelector('select[name="codexCreationMode"]').addEventListener('change', updateCodexDirectoryControls);
         modal.querySelector('form').addEventListener('submit', function(e) {
             e.preventDefault();
             var error = modal.querySelector('.agent-create-error');
@@ -14481,28 +14657,34 @@ function _acpShowCreateAgentDialog(platforms) {
             var role = modal.querySelector('input[name="role"]').value.trim();
             var emoji = modal.querySelector('input[name="emoji"]').value.trim();
             var prompt = modal.querySelector('textarea[name="prompt"]').value.trim();
-            var codexCreationMode = modal.querySelector('select[name="codexCreationMode"]').value;
-            var codexCustomDirectory = modal.querySelector('input[name="codexCustomDirectory"]').value.trim();
             if (!name) {
                 error.textContent = 'Agent name is required.';
                 modal.querySelector('input[name="name"]').focus();
                 return;
             }
             var p = selectedPlatform();
-            if ((p.id === 'codex' || p.id === 'claude-code') && codexCreationMode === 'custom' && !codexCustomDirectory) {
-                error.textContent = 'Custom parent directory is required for custom ' + (p.id === 'claude-code' ? 'Claude Code' : 'Codex') + ' creation.';
-                modal.querySelector('input[name="codexCustomDirectory"]').focus();
+            var providerValues = {};
+            var invalid = null;
+            modal.querySelectorAll('[data-provider-field]').forEach(function(control) {
+                var label = control.closest('.agent-create-provider-field');
+                if (label && label.hidden) return;
+                var id = control.getAttribute('data-provider-field');
+                providerValues[id] = control.value.trim();
+                if (control.required && !providerValues[id] && !invalid) invalid = control;
+            });
+            if (invalid) {
+                error.textContent = 'Please complete all required provider fields.';
+                invalid.focus();
                 return;
             }
-            var fallback = _acpAgentPlatformDefaults(p.id);
+            var fallback = _acpAgentPlatformDefaults(p);
             close({
                 selectedPlatform: p,
                 agentName: name,
                 agentRole: role || fallback.role,
                 agentEmoji: emoji || fallback.emoji,
                 agentPrompt: prompt || role || fallback.prompt,
-                codexCreationMode: (p.id === 'codex' || p.id === 'claude-code') ? codexCreationMode : '',
-                codexCustomDirectory: (p.id === 'codex' || p.id === 'claude-code') ? codexCustomDirectory : ''
+                providerValues: providerValues
             });
         });
         document.addEventListener('keydown', onKeyDown);
@@ -14534,14 +14716,10 @@ function _acpCreateNewAgent() {
         var agentRole = form.agentRole;
         var agentEmoji = form.agentEmoji;
         var agentPrompt = form.agentPrompt;
-        var createPayload = { platform: selectedPlatform.id, name: agentName, role: agentRole, emoji: agentEmoji, prompt: agentPrompt };
-        if (selectedPlatform.id === 'codex') {
-            createPayload.codexCreationMode = form.codexCreationMode || 'standard';
-            createPayload.codexCustomDirectory = form.codexCustomDirectory || '';
-        } else if (selectedPlatform.id === 'claude-code') {
-            createPayload.claudeCodeCreationMode = form.codexCreationMode || 'standard';
-            createPayload.claudeCodeCustomDirectory = form.codexCustomDirectory || '';
-        }
+        var createPayload = Object.assign(
+            { platform: selectedPlatform.id, name: agentName, role: agentRole, emoji: agentEmoji, prompt: agentPrompt, instructions: agentPrompt },
+            form.providerValues || {}
+        );
 
         _acpShowToast('Creating agent in ' + selectedPlatform.label + '...');
         return fetch('/api/agent/create', {
@@ -14599,15 +14777,20 @@ function _acpCreateNewAgent() {
 }
 
 function _acpDeleteAgent(agentId) {
+    var runtimeAgent = agents.find(function(a) { return a.id === agentId; });
+    var isOffline = runtimeAgent && runtimeAgent.available === false;
     var agentName = agentId;
     var agentCfg = (officeConfig.agents || []).find(function(a) { return a.id === agentId; });
     if (agentCfg) agentName = agentCfg.name || agentId;
 
-    var providerKind = (agentCfg && agentCfg.providerKind)
+    var providerKind = (runtimeAgent && runtimeAgent.providerKind) || (agentCfg && agentCfg.providerKind)
         || (agentId.indexOf('hermes-') === 0 ? 'hermes'
         : (agentId.indexOf('codex-') === 0 ? 'codex'
         : (agentId.indexOf('claude-code-') === 0 ? 'claude-code' : 'openclaw')));
-    if (!confirm('Delete agent "' + agentName + '"?\n\nThis will permanently remove the agent from ' + providerKind + ', including its workspace/profile files, memory, and session history.\n\nThis cannot be undone.')) return;
+    var prompt = isOffline
+        ? 'Forget offline agent "' + agentName + '"?\n\nThis removes only its Virtual Office discovery record and office placement. Native ' + providerKind + ' files are not deleted.'
+        : 'Delete agent "' + agentName + '"?\n\nThis will permanently remove the agent from ' + providerKind + ', including its workspace/profile files, memory, and session history.\n\nThis cannot be undone.';
+    if (!confirm(prompt)) return;
 
     // Call server to delete from the backing agent platform.
     fetch('/api/agent/delete', {
@@ -14640,7 +14823,7 @@ function _acpDeleteAgent(agentId) {
             if (col) col.innerHTML = '<div style="padding:20px;color:#666;font-size:11px">No agents. Click ➕ New Agent to create one.</div>';
         }
 
-        _acpShowToast('🗑️ Agent "' + agentName + '" deleted');
+        _acpShowToast((data.forgotten || isOffline ? '🧹 Agent "' + agentName + '" forgotten' : '🗑️ Agent "' + agentName + '" deleted'));
     }).catch(function(e) {
         alert('Error deleting agent: ' + e.message);
     });
@@ -16788,15 +16971,21 @@ async function toggleSkillApply(skillName) {
         var data = await res.json();
         var agentList = Array.isArray(data) ? data : (data.agents || []);
 
-        var options = agentList.map(function(a) {
-            var id = a.id || a.agentId || a.name;
+        var compatibleAgents = agentList.filter(function(a) {
+            return !a.capabilities || a.capabilities.skills !== false;
+        });
+        var options = compatibleAgents.map(function(a) {
+            var id = a.key || a.id || a.agentId || a.name;
             var name = a.name || id;
-            return '<option value="' + _sklEsc(id) + '">' + _sklEsc(name) + '</option>';
+            var provider = a.providerKind ? ' · ' + a.providerKind : '';
+            var state = a.available === false ? ' · offline' : '';
+            return '<option value="' + _sklEsc(id) + '">' + _sklEsc(name + provider + state) + '</option>';
         }).join('');
 
-        dropdown.innerHTML =
-            '<select id="skl-agent-select-' + skillName + '">' + options + '</select>' +
-            '<button onclick="applySkillToAgent(\'' + _sklEsc(skillName) + '\')">Apply</button>';
+        dropdown.innerHTML = options
+            ? '<select id="skl-agent-select-' + skillName + '">' + options + '</select>' +
+              '<button onclick="applySkillToAgent(\'' + _sklEsc(skillName) + '\')">Apply</button>'
+            : '<span>No compatible SDK agents</span>';
         dropdown.style.display = 'flex';
     } catch (e) {
         _acpShowToast('❌ Failed to load agent list');

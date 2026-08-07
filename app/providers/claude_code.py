@@ -18,6 +18,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from .file_safety import backup_files
+
 
 ProgressCallback = Callable[[dict[str, Any]], None]
 
@@ -200,6 +202,7 @@ class ClaudeCodeProvider:
             return {"ok": False, "error": f"Native Claude Code agent '{safe_profile}' already exists in {native_agent_path}"}
 
         os.makedirs(os.path.join(agent_dir, ".claude", "agents"), exist_ok=True)
+        os.makedirs(os.path.join(agent_dir, ".claude", "skills"), exist_ok=True)
         model_value = (model or self.model or "").strip()
         instructions = (prompt or role or "Claude Code Agent").strip()
         project_agent_path = os.path.join(agent_dir, ".claude", "agents", f"{safe_profile}.md")
@@ -264,6 +267,36 @@ class ClaudeCodeProvider:
             except OSError:
                 pass
         return {"ok": True, "deleted": True, "profile": safe_profile, "agentId": f"claude-code-{safe_profile}"}
+
+    def update_profile(self, profile: str, patch: dict[str, Any]) -> dict[str, Any]:
+        safe_profile = self._safe_profile_name(profile)
+        agent_dir = self._workspace_for_profile(safe_profile)
+        meta_path = os.path.join(agent_dir, "office-agent.json")
+        meta = self._load_meta(agent_dir)
+        if not meta or meta.get("profile") != safe_profile:
+            return {"ok": False, "error": f"Managed Claude Code agent '{safe_profile}' was not found"}
+        for key in ("name", "role", "emoji", "model"):
+            if key in patch:
+                meta[key] = str(patch.get(key) or "")
+        if "instructions" in patch:
+            meta["prompt"] = str(patch.get("instructions") or "")
+        name = str(meta.get("name") or self._display_name(safe_profile))
+        role = str(meta.get("role") or "Claude Code Agent")
+        emoji = str(meta.get("emoji") or "🤖")
+        model = str(meta.get("model") or self.model or "")
+        instructions = str(meta.get("prompt") or role)
+        native_path = str(meta.get("nativeAgentPath") or "")
+        project_path = str(meta.get("projectAgentPath") or os.path.join(agent_dir, ".claude", "agents", f"{safe_profile}.md"))
+        paths = [meta_path, os.path.join(agent_dir, "IDENTITY.md"), os.path.join(agent_dir, "AGENTS.md"), os.path.join(agent_dir, "CLAUDE.md"), project_path, native_path]
+        backup_id, backups = backup_files(agent_dir, paths)
+        self._write_json(meta_path, meta)
+        self._write_text(os.path.join(agent_dir, "IDENTITY.md"), self._identity_md(name, role, emoji))
+        self._write_text(os.path.join(agent_dir, "AGENTS.md"), self._agents_md(name, role, instructions))
+        self._write_text(os.path.join(agent_dir, "CLAUDE.md"), self._claude_md(name, role, instructions))
+        self._write_text(project_path, self._agent_md(safe_profile, role, instructions, model))
+        if native_path:
+            self._write_text(native_path, self._agent_md(safe_profile, role, instructions, model))
+        return {"ok": True, "profile": safe_profile, "backupId": backup_id, "backups": backups}
 
     def send_chat_message(
         self,
@@ -356,6 +389,9 @@ class ClaudeCodeProvider:
             exit_code = proc.wait(timeout=5)
             reply = state.final_result or state.reply
             token_usage = self._usage_to_token_usage(state.usage)
+            error = state.error
+            if exit_code != 0 and not error:
+                error = reply or "\n".join(stderr_lines)[-1000:] or "Claude Code command failed"
             return {
                 "ok": exit_code == 0 and not state.is_error,
                 "reply": reply,
@@ -369,7 +405,7 @@ class ClaudeCodeProvider:
                 "tokenUsage": token_usage,
                 "usage": state.usage,
                 "model": state.model,
-                "error": state.error,
+                "error": error,
             }
         except subprocess.TimeoutExpired:
             if proc:

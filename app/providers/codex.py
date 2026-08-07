@@ -7,6 +7,8 @@ explicitly disable the native path.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -19,6 +21,8 @@ import time
 import tomllib
 from dataclasses import dataclass
 from typing import Any, Callable
+
+from .file_safety import backup_files
 
 
 ProgressCallback = Callable[[dict[str, Any]], None]
@@ -49,6 +53,7 @@ class CodexProvider:
     provider_type: str = "harness"
 
     def __post_init__(self) -> None:
+        self._last_auth_error = ""
         self.home_path = os.path.expanduser(
             self.home_path
             or os.environ.get("VO_CODEX_HOME")
@@ -73,6 +78,12 @@ class CodexProvider:
         self.include_main = str(os.environ.get("VO_CODEX_INCLUDE_MAIN", str(self.include_main))).lower() not in ("0", "false", "no", "off")
         self.include_native_agents = str(os.environ.get("VO_CODEX_INCLUDE_NATIVE_AGENTS", str(self.include_native_agents))).lower() not in ("0", "false", "no", "off")
         self.register_native_agents = str(os.environ.get("VO_CODEX_REGISTER_NATIVE_AGENTS", str(self.register_native_agents))).lower() not in ("0", "false", "no", "off")
+        self._auth_state_path = os.path.join(
+            os.environ.get("VO_STATUS_DIR", "/data"),
+            "provider-health-codex.json",
+        )
+        self._observed_auth_mtime = self._auth_file_mtime()
+        self._sync_auth_error_state()
 
     def is_available(self) -> bool:
         return bool(
@@ -83,6 +94,7 @@ class CodexProvider:
         )
 
     def test(self) -> dict[str, Any]:
+        self._sync_auth_error_state()
         if not self.binary or not os.path.isfile(self.binary):
             return {"ok": False, "error": f"Codex CLI not found. Set VO_CODEX_BIN or install codex on PATH.", "agents": []}
         if not os.access(self.binary, os.X_OK):
@@ -100,6 +112,11 @@ class CodexProvider:
                 account_result = account.get("result") if isinstance(account, dict) else {}
                 account_info = account_result.get("account") if isinstance(account_result, dict) else None
                 auth_ok = bool(account_info) or (isinstance(account_result, dict) and account_result.get("requiresOpenaiAuth") is False)
+                access_token_expired = self._access_token_expired()
+                if access_token_expired is True:
+                    auth_ok = False
+                if self._last_auth_error:
+                    auth_ok = False
                 return {
                     "ok": auth_ok,
                     "protocol": "app-server",
@@ -110,7 +127,14 @@ class CodexProvider:
                     "authOk": auth_ok,
                     "authStatus": self._account_status_text(account_result),
                     "codexHome": (init.get("result") or {}).get("codexHome") if isinstance(init, dict) else self.home_path,
-                    "error": "" if auth_ok else "Codex is installed but not authenticated. Run codex login or configure CODEX_API_KEY/CODEX_HOME for this environment.",
+                    "error": "" if auth_ok else (
+                        self._last_auth_error
+                        or (
+                            "Codex access token is expired. Run a Codex turn to verify refresh, or sign in again."
+                            if access_token_expired is True
+                            else "Codex is installed but not authenticated. Run codex login or configure CODEX_API_KEY/CODEX_HOME for this environment."
+                        )
+                    ),
                     "agents": self.discover_agents() if auth_ok else [],
                 }
             except Exception as exc:
@@ -224,6 +248,7 @@ class CodexProvider:
             return {"ok": False, "error": f"Native Codex agent '{safe_profile}' already exists in {native_agent_path}"}
 
         os.makedirs(os.path.join(agent_dir, ".codex", "agents"), exist_ok=True)
+        os.makedirs(os.path.join(agent_dir, ".agents", "skills"), exist_ok=True)
         model_value = (model or self.model or "").strip()
         instructions = (prompt or role or "Codex Agent").strip()
         meta = {
@@ -291,6 +316,37 @@ class CodexProvider:
                 pass
         return {"ok": True, "deleted": True, "profile": safe_profile, "agentId": f"codex-{safe_profile}"}
 
+    def update_profile(self, profile: str, patch: dict[str, Any]) -> dict[str, Any]:
+        safe_profile = self._safe_profile_name(profile)
+        agent_dir = self._runtime_workspace(safe_profile)
+        meta_path = os.path.join(agent_dir, "office-agent.json")
+        meta = self._load_meta(agent_dir)
+        if not meta or meta.get("profile") != safe_profile:
+            return {"ok": False, "error": f"Managed Codex agent '{safe_profile}' was not found"}
+        for key in ("name", "role", "emoji", "model"):
+            if key in patch:
+                meta[key] = str(patch.get(key) or "")
+        if "instructions" in patch:
+            meta["prompt"] = str(patch.get("instructions") or "")
+        name = str(meta.get("name") or self._display_name(safe_profile))
+        role = str(meta.get("role") or "Codex Agent")
+        emoji = str(meta.get("emoji") or "🤖")
+        model = str(meta.get("model") or self.model or "")
+        instructions = str(meta.get("prompt") or role)
+        native_path = str(meta.get("nativeAgentPath") or "")
+        project_path = os.path.join(agent_dir, ".codex", "agents", f"{safe_profile}.toml")
+        config_path = os.path.join(agent_dir, ".codex", "config.toml")
+        paths = [meta_path, os.path.join(agent_dir, "IDENTITY.md"), os.path.join(agent_dir, "AGENTS.md"), project_path, config_path, native_path]
+        backup_id, backups = backup_files(agent_dir, paths)
+        self._write_json(meta_path, meta)
+        self._write_text(os.path.join(agent_dir, "IDENTITY.md"), self._identity_md(name, role, emoji))
+        self._write_text(os.path.join(agent_dir, "AGENTS.md"), self._agents_md(name, role, instructions))
+        self._write_text(project_path, self._agent_toml(safe_profile, role, instructions, model))
+        self._write_text(config_path, self._config_toml(model))
+        if native_path:
+            self._write_text(native_path, self._agent_toml(safe_profile, role, instructions, model))
+        return {"ok": True, "profile": safe_profile, "backupId": backup_id, "backups": backups}
+
     def send_chat_message(
         self,
         profile: str,
@@ -300,8 +356,76 @@ class CodexProvider:
         on_progress: ProgressCallback | None = None,
     ) -> dict[str, Any]:
         if self.prefer_app_server:
-            return self._send_app_server_message(profile, message, session_id=session_id, timeout_sec=timeout_sec, on_progress=on_progress)
-        return self._send_exec_message(profile, message, session_id=session_id, timeout_sec=timeout_sec)
+            result = self._send_app_server_message(profile, message, session_id=session_id, timeout_sec=timeout_sec, on_progress=on_progress)
+        else:
+            result = self._send_exec_message(profile, message, session_id=session_id, timeout_sec=timeout_sec)
+        error_text = str(result.get("error") or result.get("stderr") or "")
+        if any(marker in error_text.lower() for marker in ("not authenticated", "token_expired", "refresh token", "log out and sign in")):
+            self._record_auth_error("Codex authentication expired. Sign in to Codex again before running agents.")
+            result["error"] = self._last_auth_error
+        elif result.get("ok"):
+            self._clear_auth_error()
+        return result
+
+    def _auth_file_mtime(self) -> float:
+        try:
+            return os.path.getmtime(os.path.join(self.home_path or "", "auth.json"))
+        except OSError:
+            return 0.0
+
+    def _access_token_expired(self) -> bool | None:
+        try:
+            with open(os.path.join(self.home_path or "", "auth.json"), "r", encoding="utf-8") as f:
+                auth = json.load(f)
+            token = str(((auth.get("tokens") or {}).get("access_token")) or "")
+            payload_part = token.split(".")[1]
+            payload_part += "=" * (-len(payload_part) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(payload_part.encode("ascii")))
+            expires_at = int(payload.get("exp") or 0)
+            return bool(expires_at and time.time() >= expires_at - 30)
+        except (FileNotFoundError, OSError, ValueError, IndexError, TypeError, json.JSONDecodeError, binascii.Error):
+            return None
+
+    def _sync_auth_error_state(self) -> None:
+        current_auth_mtime = self._auth_file_mtime()
+        if current_auth_mtime > 0 and current_auth_mtime != self._observed_auth_mtime:
+            self._observed_auth_mtime = current_auth_mtime
+            self._clear_auth_error()
+        try:
+            with open(self._auth_state_path, "r", encoding="utf-8") as f:
+                state = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError, AttributeError):
+            return
+        recorded_auth_mtime = float(state.get("authFileMtime") or 0)
+        if current_auth_mtime > recorded_auth_mtime:
+            self._clear_auth_error()
+            return
+        self._last_auth_error = str(state.get("error") or "")
+
+    def _record_auth_error(self, message: str) -> None:
+        self._last_auth_error = str(message or "")
+        state = {
+            "error": self._last_auth_error,
+            "recordedAt": time.time(),
+            "authFileMtime": self._auth_file_mtime(),
+        }
+        try:
+            os.makedirs(os.path.dirname(self._auth_state_path), exist_ok=True)
+            tmp_path = f"{self._auth_state_path}.tmp-{os.getpid()}"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(state, f)
+            os.replace(tmp_path, self._auth_state_path)
+        except OSError:
+            pass
+
+    def _clear_auth_error(self) -> None:
+        self._last_auth_error = ""
+        try:
+            os.remove(self._auth_state_path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
 
     def interrupt(self, profile: str) -> dict[str, Any]:
         safe_profile = self._safe_profile_name(profile)
@@ -357,6 +481,14 @@ class CodexProvider:
         outcome = self._app_server_simple_request(profile, "thread/list", {
             "cwd": agent_dir,
             "limit": max(1, int(limit)),
+            # Codex defaults an omitted sourceKinds filter to interactive CLI
+            # and VS Code threads only. Virtual Office must also follow turns
+            # started through `codex exec` or another app-server client.
+            "sourceKinds": ["cli", "vscode", "exec", "appServer", "unknown"],
+            # Active-session following is based on latest activity, including
+            # a resumed older thread, rather than original creation order.
+            "sortKey": "updated_at",
+            "sortDirection": "desc",
         }, timeout_sec=timeout_sec)
         if not outcome.get("ok"):
             return {"ok": False, "error": outcome.get("error"), "sessions": []}
