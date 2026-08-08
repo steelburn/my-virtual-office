@@ -2728,6 +2728,36 @@ button:active { transform: translateY(3px); box-shadow: none; }
     flex: 1;
     min-height: 0;
     overflow: hidden;
+    position: relative;
+}
+
+.chat-scroll-latest {
+    position: absolute;
+    right: 18px;
+    bottom: 14px;
+    z-index: 8;
+    width: 36px;
+    height: 36px;
+    min-width: 36px !important;
+    min-height: 36px !important;
+    padding: 0;
+    border: 1px solid rgba(255, 215, 0, 0.64);
+    border-radius: 50%;
+    background: rgba(18, 24, 39, 0.96);
+    color: var(--gold);
+    box-shadow: 0 5px 18px rgba(0, 0, 0, 0.42);
+    font: 700 22px/1 sans-serif;
+    cursor: pointer;
+}
+.chat-scroll-latest:hover,
+.chat-scroll-latest:focus-visible {
+    border-color: var(--gold);
+    background: #2a3041;
+    color: #fff;
+    transform: translateY(1px);
+}
+.chat-scroll-latest[hidden] {
+    display: none !important;
 }
 
 .chat-sessions-panel {
@@ -3757,6 +3787,15 @@ button:active { transform: translateY(3px); box-shadow: none; }
         -webkit-overflow-scrolling: touch !important;
         overscroll-behavior: contain !important;
         touch-action: pan-y !important;
+    }
+
+    .chat-scroll-latest {
+        right: 14px;
+        bottom: 12px;
+        width: 40px;
+        height: 40px;
+        min-width: 40px !important;
+        min-height: 40px !important;
     }
 }
 /* --- SMS responsive --- */

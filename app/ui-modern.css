@@ -1268,7 +1268,20 @@ body.ui-office-editing .ui-edit-toolbar {
     height: auto;
     min-height: 100%;
     overflow-x: hidden;
+  }
+
+  /* Keep exactly one root scroller on mobile. Giving both html and body
+     independent overflow creates an unreliable one-finger scroll chain in
+     mobile Safari after interacting with a fixed chat window. */
+  html {
     overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  body {
+    min-height: 100dvh;
+    overflow: visible;
+    touch-action: pan-y;
   }
 
   .main-container {
@@ -1299,6 +1312,13 @@ body.ui-office-editing .ui-edit-toolbar {
 
   #officeCanvas {
     touch-action: none;
+  }
+
+  /* Canvas gestures control the office camera. Swipes that begin on the
+     surrounding controls/dashboard belong to the document scroller. */
+  .toolbar,
+  .sidebar {
+    touch-action: pan-y;
   }
 
   .sidebar,

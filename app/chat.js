@@ -21,6 +21,10 @@
   const HERMES_APPROVAL_POLL_MS = 1500;
   const HERMES_HISTORY_POLL_MS = 250;
   const CHAT_SELECTION_STORAGE_KEY = 'vo-chat-selection-v1';
+  const MOBILE_CHAT_SCROLL_SURFACE_SELECTOR = '.chat-messages, .chat-sessions-list, .chat-input';
+  const CHAT_BOTTOM_FOLLOW_THRESHOLD = 28;
+  const CHAT_BOTTOM_REATTACH_THRESHOLD = 2;
+  const CHAT_MANUAL_SCROLL_INTENT_MS = 180;
   const NATIVE_PROVIDER_UI = Object.freeze({
     hermes: {
       label: 'Hermes',
@@ -55,6 +59,51 @@
     3: document.getElementById('chat-secondary-3')
   };
   let secondaryChatPanels = {};
+
+  function usesMobileChatLayout() {
+    return window.matchMedia('(max-width: 900px)').matches;
+  }
+
+  function installMobileChatTouchContainment(root) {
+    let gesture = null;
+
+    root.addEventListener('touchstart', (event) => {
+      if (!usesMobileChatLayout() || event.touches.length !== 1) {
+        gesture = null;
+        return;
+      }
+      const candidate = event.target.closest?.(MOBILE_CHAT_SCROLL_SURFACE_SELECTOR);
+      gesture = {
+        surface: candidate && root.contains(candidate) ? candidate : null,
+        y: event.touches[0].clientY
+      };
+    }, { passive: true });
+
+    root.addEventListener('touchmove', (event) => {
+      if (!gesture || !usesMobileChatLayout() || event.touches.length !== 1) return;
+      const nextY = event.touches[0].clientY;
+      const fingerDelta = nextY - gesture.y;
+      gesture.y = nextY;
+
+      const surface = gesture.surface;
+      if (!surface) {
+        if (event.cancelable) event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+
+      const maxScroll = Math.max(0, surface.scrollHeight - surface.clientHeight);
+      const atTop = surface.scrollTop <= 0;
+      const atBottom = surface.scrollTop >= maxScroll - 1;
+      const wouldLeaveSurface = maxScroll <= 0 || (atTop && fingerDelta > 0) || (atBottom && fingerDelta < 0);
+      if (wouldLeaveSurface && event.cancelable) event.preventDefault();
+      event.stopPropagation();
+    }, { passive: false });
+
+    const endGesture = () => { gesture = null; };
+    root.addEventListener('touchend', endGesture, { passive: true });
+    root.addEventListener('touchcancel', endGesture, { passive: true });
+  }
 
   function readSavedChatSelections() {
     try {
@@ -123,6 +172,16 @@
       this.pendingStreamContent = '';
       this.streamRenderTimer = null;
       this.scrollFrame = null;
+      this.scrollSettleFrame = null;
+      this.scrollSettleTimer = null;
+      this.followLatest = true;
+      this.scrollTrackingSuspended = false;
+      this.manualScrollIntentUntil = 0;
+      this.manualScrollBottomTarget = 0;
+      this.manualScrollDirection = 0;
+      this.lastMessagesScrollTop = 0;
+      this.lastTouchScrollY = null;
+      this.scrollbarPointerDown = false;
       this.lastLiveEventAt = 0;
       this.recoveryTimer = null;
       this.hermesProgressTimers = [];
@@ -160,6 +219,7 @@
       this.historyDirty = true;
 
       this.messages = root.querySelector('.chat-messages');
+      this.scrollLatestBtn = root.querySelector('.chat-scroll-latest');
       this.status = root.querySelector('.chat-status');
       this.agentSelect = root.querySelector('.chat-agent-select');
       this.modelName = root.querySelector('.chat-model-name, #chat-model-name');
@@ -177,12 +237,43 @@
       this.sessionsPanel = root.querySelector('.chat-sessions-panel');
       this.sessionsListEl = root.querySelector('.chat-sessions-list');
       this.sessionsNewBtn = root.querySelector('.chat-sessions-new');
+      installMobileChatTouchContainment(this.root);
 
       this.messages.addEventListener('click', (e) => {
         if (e.target.classList.contains('chat-image-clickable') || e.target.classList.contains('chat-image-thumb')) {
           openImageLightbox(e.target.src);
         }
       });
+      this.messages.addEventListener('scroll', () => this.handleMessagesScroll(), { passive: true });
+      this.messages.addEventListener('wheel', (event) => {
+        this.noteManualScrollIntent(Math.sign(event.deltaY));
+      }, { passive: true });
+      this.messages.addEventListener('touchstart', (event) => {
+        this.lastTouchScrollY = event.touches?.[0]?.clientY ?? null;
+      }, { passive: true });
+      this.messages.addEventListener('touchmove', (event) => {
+        const nextY = event.touches?.[0]?.clientY ?? this.lastTouchScrollY;
+        const direction = this.lastTouchScrollY == null || nextY == null
+          ? 0
+          : Math.sign(this.lastTouchScrollY - nextY);
+        this.lastTouchScrollY = nextY;
+        this.noteManualScrollIntent(direction);
+      }, { passive: true });
+      this.messages.addEventListener('touchend', () => { this.lastTouchScrollY = null; }, { passive: true });
+      this.messages.addEventListener('touchcancel', () => { this.lastTouchScrollY = null; }, { passive: true });
+      this.messages.addEventListener('pointerdown', (event) => {
+        const rect = this.messages.getBoundingClientRect();
+        const scrollbarWidth = Math.max(0, this.messages.offsetWidth - this.messages.clientWidth);
+        this.scrollbarPointerDown = scrollbarWidth > 0 && event.clientX >= rect.right - scrollbarWidth - 2;
+        if (this.scrollbarPointerDown) this.noteManualScrollIntent();
+      }, { passive: true });
+      window.addEventListener('pointermove', () => {
+        if (this.scrollbarPointerDown) this.noteManualScrollIntent();
+      }, { passive: true });
+      const releaseScrollbarPointer = () => { this.scrollbarPointerDown = false; };
+      window.addEventListener('pointerup', releaseScrollbarPointer, { passive: true });
+      window.addEventListener('pointercancel', releaseScrollbarPointer, { passive: true });
+      this.scrollLatestBtn?.addEventListener('click', () => this.resumeLatest());
 
       this.agentSelect?.addEventListener('change', () => {
         const opt = this.agentSelect.selectedOptions[0];
@@ -261,7 +352,9 @@
       this.historyRefreshSeq += 1;
       this.toggleSessionsPanel(false);
       if (this.streamRenderTimer) { clearTimeout(this.streamRenderTimer); this.streamRenderTimer = null; }
-      if (this.scrollFrame) { cancelAnimationFrame(this.scrollFrame); this.scrollFrame = null; }
+      this.cancelPendingScrollBottom();
+      this.followLatest = true;
+      this.clearManualScrollIntent();
       this.stopRecoveryWatchdog();
       this.stopHermesProgressTimers();
       this.stopHermesHistoryPolling();
@@ -286,6 +379,8 @@
       this.liveThinkingRunId = '';
       this.removeTypingIndicator();
       this.messages?.replaceChildren();
+      this.lastMessagesScrollTop = 0;
+      this.updateScrollLatestButton();
       this.sessionsListEl?.replaceChildren();
       this.currentSessions = [];
       for (const [runId, owner] of runOwners.entries()) {
@@ -302,7 +397,12 @@
     }
 
     resetConversation(systemText) {
+      this.cancelPendingScrollBottom();
+      this.followLatest = true;
+      this.clearManualScrollIntent();
       this.messages.innerHTML = '';
+      this.lastMessagesScrollTop = 0;
+      this.updateScrollLatestButton();
       this.streamingMsg = null;
       this.pendingStreamContent = '';
       if (this.streamRenderTimer) { clearTimeout(this.streamRenderTimer); this.streamRenderTimer = null; }
@@ -724,21 +824,22 @@
     }
 
     renderHistoryItems(items) {
-      this.messages.innerHTML = '';
-      this.liveThinkingEl = null;
-      this.liveThinkingPre = null;
-      this.liveThinkingRunId = '';
-      for (const item of ChatEvents.mergeHistoryItems(items)) {
-        const role = normalizeChatRole(item.role);
-        this.appendMessage(
-          role,
-          item.text || '',
-          item.epochMs || item.ts || item.timestamp || Date.now(),
-          normalizeChatMedia(item.media || item.attachments || []),
-          item.meta || normalizeSenderMeta({}, role, this),
-          item.tools || []
-        );
-      }
+      this.replaceHistoryMessages(() => {
+        this.liveThinkingEl = null;
+        this.liveThinkingPre = null;
+        this.liveThinkingRunId = '';
+        for (const item of ChatEvents.mergeHistoryItems(items)) {
+          const role = normalizeChatRole(item.role);
+          this.appendMessage(
+            role,
+            item.text || '',
+            item.epochMs || item.ts || item.timestamp || Date.now(),
+            normalizeChatMedia(item.media || item.attachments || []),
+            item.meta || normalizeSenderMeta({}, role, this),
+            item.tools || []
+          );
+        }
+      });
     }
 
     providerHistoryItems(messages, progressMarker) {
@@ -915,22 +1016,23 @@
           if (!res.ok || data.ok === false) throw new Error(data.error || res.statusText);
           this.startProviderHistoryPolling();
           this.providerHistorySignature = this.providerHistorySignatureFor(data.messages || []);
-          this.messages.innerHTML = '';
-          this.liveThinkingEl = null;
-          this.liveThinkingPre = null;
-          this.liveThinkingRunId = '';
-          for (const msg of (data.messages || [])) {
-            this.applySessionMetrics(msg);
-            const tools = normalizeHermesTools(msg.tools || [], msg.ephemeral !== 'provider-progress');
-            const meta = msg.role === 'assistant'
-              ? { ...resolveMessageSender(msg, this), thinking: msg.thinking || '', approval: msg.approval || null, reasoningTokens: msg.reasoningTokens || 0 }
-              : { label: 'You', kind: 'human' };
-            if (msg.text || msg.thinking || msg.approval || tools.length) {
-              const splitTools = msg.role === 'assistant' && msg.ephemeral !== 'provider-progress' && msg.text && tools.length;
-              if (splitTools) tools.forEach((tool, idx) => this.appendMessage('assistant', '', (msg.ts || Date.now()) + idx, [], resolveMessageSender(msg, this), [tool]));
-              this.appendMessage(msg.role, msg.text || '', msg.ts || Date.now(), normalizeChatMedia(msg.attachments || []), meta, splitTools ? [] : tools);
+          this.replaceHistoryMessages(() => {
+            this.liveThinkingEl = null;
+            this.liveThinkingPre = null;
+            this.liveThinkingRunId = '';
+            for (const msg of (data.messages || [])) {
+              this.applySessionMetrics(msg);
+              const tools = normalizeHermesTools(msg.tools || [], msg.ephemeral !== 'provider-progress');
+              const meta = msg.role === 'assistant'
+                ? { ...resolveMessageSender(msg, this), thinking: msg.thinking || '', approval: msg.approval || null, reasoningTokens: msg.reasoningTokens || 0 }
+                : { label: 'You', kind: 'human' };
+              if (msg.text || msg.thinking || msg.approval || tools.length) {
+                const splitTools = msg.role === 'assistant' && msg.ephemeral !== 'provider-progress' && msg.text && tools.length;
+                if (splitTools) tools.forEach((tool, idx) => this.appendMessage('assistant', '', (msg.ts || Date.now()) + idx, [], resolveMessageSender(msg, this), [tool]));
+                this.appendMessage(msg.role, msg.text || '', msg.ts || Date.now(), normalizeChatMedia(msg.attachments || []), meta, splitTools ? [] : tools);
+              }
             }
-          }
+          });
           this.scrollBottomAfterLayout();
           this.historyDirty = false;
           return;
@@ -1936,7 +2038,7 @@
       if (!force && this.pendingStreamContent === this.streamingMsg.content) return;
       this.streamingMsg.content = this.pendingStreamContent || this.streamingMsg.content || '';
       this.updateStreamingMessage(this.streamingMsg.content);
-      this.scrollBottom(true);
+      this.scrollBottom();
     }
 
     pruneToolCards() {
@@ -2042,7 +2144,6 @@
     }
 
     appendStreamingMessage(runId = '') {
-      const shouldStick = this.isNearBottom();
       this.removeTypingIndicator();
       const existing = this.messages.querySelector('.streaming-msg');
       if (existing) existing.classList.remove('streaming-msg');
@@ -2054,7 +2155,7 @@
       bubble.innerHTML = '<span class="cursor">▊</span>';
       div.appendChild(bubble);
       this.messages.appendChild(div);
-      this.scrollBottom(shouldStick);
+      this.scrollBottom();
     }
 
     updateStreamingMessage(content) {
@@ -2114,7 +2215,7 @@
       div.classList.remove('chat-stream-segment-settling');
       void div.offsetWidth;
       div.classList.add('chat-stream-segment-settling');
-      this.scrollBottom(true);
+      this.scrollBottom();
     }
 
     appendSystem(text) {
@@ -2774,23 +2875,140 @@
         this.setStatus('Codex error', 'disconnected');
       }
     }
-    isNearBottom(threshold = 24) {
+    isNearBottom(threshold = CHAT_BOTTOM_FOLLOW_THRESHOLD) {
       if (!this.messages) return true;
       return this.messages.scrollHeight - this.messages.scrollTop - this.messages.clientHeight <= threshold;
     }
 
+    noteManualScrollIntent(direction = 0) {
+      this.manualScrollIntentUntil = performance.now() + CHAT_MANUAL_SCROLL_INTENT_MS;
+      this.manualScrollBottomTarget = Math.max(0, this.messages.scrollHeight - this.messages.clientHeight);
+      this.manualScrollDirection = Number(direction) || 0;
+      if (this.manualScrollDirection < 0) {
+        this.followLatest = false;
+        this.cancelPendingScrollBottom();
+        this.updateScrollLatestButton();
+      }
+    }
+
+    clearManualScrollIntent() {
+      this.manualScrollIntentUntil = 0;
+      this.manualScrollBottomTarget = 0;
+      this.manualScrollDirection = 0;
+    }
+
+    hasManualScrollIntent() {
+      return performance.now() <= this.manualScrollIntentUntil;
+    }
+
+    handleMessagesScroll() {
+      if (this.scrollTrackingSuspended) return;
+      const nearBottom = this.isNearBottom();
+      const manualScrollIntent = this.hasManualScrollIntent();
+      const currentScrollTop = this.messages.scrollTop;
+      const movedUp = currentScrollTop < this.lastMessagesScrollTop - 0.5;
+      this.lastMessagesScrollTop = currentScrollTop;
+      const reachedManualBottom = manualScrollIntent && (
+        this.messages.scrollTop >= this.manualScrollBottomTarget - CHAT_BOTTOM_REATTACH_THRESHOLD
+      );
+      if (manualScrollIntent && (this.manualScrollDirection < 0 || movedUp)) {
+        this.followLatest = false;
+        this.cancelPendingScrollBottom();
+      } else if (reachedManualBottom || (!manualScrollIntent && nearBottom)) {
+        this.followLatest = true;
+        this.clearManualScrollIntent();
+      }
+      this.updateScrollLatestButton();
+      if (this.followLatest && !nearBottom) this.scrollBottom();
+    }
+
+    replaceHistoryMessages(renderMessages) {
+      const scrollState = {
+        followLatest: this.followLatest,
+        scrollTop: this.messages.scrollTop
+      };
+      this.scrollTrackingSuspended = true;
+      this.messages.innerHTML = '';
+      try {
+        renderMessages();
+      } finally {
+        if (scrollState.followLatest) {
+          this.followLatest = true;
+          this.messages.scrollTop = this.messages.scrollHeight;
+          this.lastMessagesScrollTop = this.messages.scrollTop;
+          this.scrollTrackingSuspended = false;
+          this.scrollBottom(true);
+        } else {
+          const maxScrollTop = Math.max(0, this.messages.scrollHeight - this.messages.clientHeight);
+          this.messages.scrollTop = Math.min(scrollState.scrollTop, maxScrollTop);
+          this.lastMessagesScrollTop = this.messages.scrollTop;
+          this.followLatest = !maxScrollTop;
+          this.scrollTrackingSuspended = false;
+          this.updateScrollLatestButton();
+        }
+      }
+    }
+
+    updateScrollLatestButton() {
+      if (!this.scrollLatestBtn) return;
+      const hasOverflow = this.messages.scrollHeight > this.messages.clientHeight + CHAT_BOTTOM_FOLLOW_THRESHOLD;
+      this.scrollLatestBtn.hidden = this.followLatest || !hasOverflow;
+    }
+
+    resumeLatest() {
+      this.cancelPendingScrollBottom();
+      this.followLatest = true;
+      this.clearManualScrollIntent();
+      this.updateScrollLatestButton();
+      this.scrollBottom(true);
+    }
+
+    cancelPendingScrollBottom() {
+      if (this.scrollFrame) cancelAnimationFrame(this.scrollFrame);
+      if (this.scrollSettleFrame) cancelAnimationFrame(this.scrollSettleFrame);
+      if (this.scrollSettleTimer) clearTimeout(this.scrollSettleTimer);
+      this.scrollFrame = null;
+      this.scrollSettleFrame = null;
+      this.scrollSettleTimer = null;
+    }
+
     scrollBottom(force = false) {
+      if (force) {
+        this.cancelPendingScrollBottom();
+        this.followLatest = true;
+        this.clearManualScrollIntent();
+      }
+      if (this.scrollTrackingSuspended) return;
+      if (!this.followLatest) {
+        this.updateScrollLatestButton();
+        return;
+      }
+      const scrollToEnd = () => {
+        if (this.scrollTrackingSuspended || !this.followLatest) return;
+        this.messages.scrollTop = this.messages.scrollHeight;
+        this.lastMessagesScrollTop = this.messages.scrollTop;
+        this.updateScrollLatestButton();
+      };
+      if (force) scrollToEnd();
       if (this.scrollFrame) return;
       this.scrollFrame = requestAnimationFrame(() => {
         this.scrollFrame = null;
-        this.messages.scrollTop = this.messages.scrollHeight;
+        scrollToEnd();
+        this.scrollSettleFrame = requestAnimationFrame(() => {
+          this.scrollSettleFrame = null;
+          scrollToEnd();
+        });
+        this.scrollSettleTimer = setTimeout(() => {
+          this.scrollSettleTimer = null;
+          scrollToEnd();
+        }, 80);
       });
     }
 
     scrollBottomAfterLayout() {
-      this.scrollBottom(true);
-      setTimeout(() => this.scrollBottom(true), 80);
-      setTimeout(() => this.scrollBottom(true), 300);
+      this.scrollBottom();
+      setTimeout(() => this.scrollBottom(), 80);
+      setTimeout(() => this.scrollBottom(), 300);
     }
 
     toolKey(payload) {
@@ -2805,7 +3023,6 @@
     }
 
     appendToolCall(payload) {
-      const shouldStick = this.isNearBottom();
       const tool = normalizeToolEvent(payload, 'running');
       const key = this.toolKey(payload);
       tool.key = key;
@@ -2824,20 +3041,18 @@
       else this.messages.appendChild(wrap);
       this.liveToolCards.set(key, wrap);
       this.pruneToolCards();
-      this.scrollBottom(shouldStick);
+      this.scrollBottom();
     }
 
     updateToolCall(payload) {
-      const shouldStick = this.isNearBottom();
       const key = this.toolKey(payload);
       const wrap = this.liveToolCards.get(key);
       if (!wrap) return this.appendToolCall(payload);
       updateToolCallCard(wrap.querySelector('.chat-tool-call'), normalizeToolEvent(payload, 'running'));
-      this.scrollBottom(shouldStick);
+      this.scrollBottom();
     }
 
     finishToolCall(payload) {
-      const shouldStick = this.isNearBottom();
       let key = this.toolKey(payload);
       let wrap = this.liveToolCards.get(key);
       if (!wrap && this.liveToolCards.size) {
@@ -2849,7 +3064,7 @@
       const card = wrap.querySelector('.chat-tool-call');
       updateToolCallCard(card, tool);
       this.liveToolCards.delete(key);
-      this.scrollBottom(shouldStick);
+      this.scrollBottom();
     }
 
     finalizeRunToolCards(runId, runStatus = 'completed', errorText = '') {
@@ -2868,7 +3083,6 @@
     updateLiveThinking(runId, text) {
       const cleaned = String(text || '').trim();
       if (!cleaned) return;
-      const shouldStick = this.isNearBottom();
       const key = runId || this.currentRunId || 'hermes';
       if (!this.liveThinkingEl || this.liveThinkingRunId !== key || !this.liveThinkingEl.isConnected) {
         const wrap = document.createElement('div');
@@ -2889,11 +3103,10 @@
       } else if (this.liveThinkingPre) {
         this.liveThinkingPre.textContent = cleaned;
       }
-      this.scrollBottom(shouldStick);
+      this.scrollBottom();
     }
 
     appendActivity(text) {
-      const shouldStick = this.isNearBottom();
       const existing = this.messages.querySelectorAll('.chat-activity');
       if (existing.length >= 8) existing[0].remove();
       const div = document.createElement('div');
@@ -2902,7 +3115,7 @@
       const ind = this.messages.querySelector('.typing-indicator');
       if (ind) this.messages.insertBefore(div, ind);
       else this.messages.appendChild(div);
-      this.scrollBottom(shouldStick);
+      this.scrollBottom();
     }
   }
 
@@ -3150,7 +3363,7 @@
       panel.dataset.hiddenByUser = 'false';
       windowInstance?.scrollBottom();
       windowInstance?.resumeWhenVisible();
-      windowInstance?.input?.focus();
+      if (!shouldUseSingleWindowMobileLayout()) windowInstance?.input?.focus();
     } else {
       panel.dataset.hiddenByUser = 'true';
       if (windowInstance?.streamingMsg) {
@@ -4065,7 +4278,7 @@
     }
     if (shouldOpen && !ws) connectGateway();
     if (shouldOpen) {
-      primaryWindow.input.focus();
+      if (!shouldUseSingleWindowMobileLayout()) primaryWindow.input.focus();
       primaryWindow.scrollBottom();
       primaryWindow.resumeWhenVisible();
     } else {
