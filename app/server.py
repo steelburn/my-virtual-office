@@ -242,6 +242,34 @@ def _normalize_hermes_connections(hermes_cfg):
         })
     return normalized
 
+
+def _merge_hermes_connection_updates(existing_cfg, incoming_connections):
+    """Merge the compact main-settings editor into full Hermes connections.
+
+    The main menu intentionally edits only id/name/URL/key. Provider Settings
+    also owns mounted-resource fields and presentation metadata, so an ordinary
+    connection test must not erase those hidden values. Blank secret fields
+    keep the configured API key.
+    """
+    saved_connections = _normalize_hermes_connections(existing_cfg)
+    saved_by_id = {str(item.get("id") or ""): item for item in saved_connections}
+    merged_connections = []
+    for index, raw_incoming in enumerate(incoming_connections or []):
+        if not isinstance(raw_incoming, dict):
+            continue
+        incoming = dict(raw_incoming)
+        connection_id = _normalize_hermes_connection_id(
+            incoming.get("id") or incoming.get("name"),
+            index,
+        )
+        saved = saved_by_id.get(connection_id) or {}
+        merged = {**saved, **incoming, "id": connection_id}
+        if not incoming.get("apiKey") and saved.get("apiKey"):
+            merged["apiKey"] = saved.get("apiKey")
+        merged.pop("apiKeyConfigured", None)
+        merged_connections.append(merged)
+    return merged_connections
+
 def _resolve_config_path():
     """Return path to vo-config.json — prefers /data/ (persistent volume) over /app/ (container layer)."""
     if os.environ.get("VO_CONFIG"):
@@ -3745,6 +3773,7 @@ _DISCOVERY_CACHE_FIELDS = {
     "source", "cliAvailable", "apiAvailable", "createdAt", "lastSeenAt", "offlineSince",
     "resourceAccess", "resourceAccessRequested", "resourcesReadable", "resourcesWritable",
     "resourceMountSource", "resourceMountReason", "workspaceTransport",
+    "localProfile", "selectionAliases",
 }
 
 
@@ -8485,9 +8514,18 @@ def _chat_sessions_list_registered_provider(agent_ref, limit=40):
     return {**outcome, "sessions": normalized}
 
 
-def _hermes_agent_ref_has_local_profile(agent_ref):
+def _hermes_agent_ref_uses_local_sessions(agent_ref):
+    """Use Hermes CLI sessions only when the logical slot has no API gateway.
+
+    A configured gateway can be balanced with a differently named local
+    profile when both point at the same Hermes home.  In that case the local
+    profile supplies mounted resources, but the canonical API connection owns
+    chat/session operations.  Passing the API id to the CLI would otherwise
+    fail whenever the two names differ (for example ``aster`` -> ``default``).
+    """
     record = (agent_ref or {}).get("record") or {}
-    return "cli" in set(record.get("connectionModes") or [])
+    modes = set(record.get("connectionModes") or [])
+    return "cli" in modes and "api" not in modes
 
 
 def handle_chat_sessions_list(agent_id, limit=40):
@@ -8498,7 +8536,7 @@ def handle_chat_sessions_list(agent_id, limit=40):
     if kind == "hermes":
         outcome = (
             _chat_sessions_list_registered_provider(agent_ref, limit=limit)
-            if _hermes_agent_ref_has_local_profile(agent_ref)
+            if _hermes_agent_ref_uses_local_sessions(agent_ref)
             else _chat_sessions_list_hermes(agent_ref, limit=limit)
         )
     elif kind == "codex":
@@ -8616,7 +8654,7 @@ def handle_chat_session_delete(agent_id, session_id, body=None):
     kind = agent_ref["providerKind"]
     profile = agent_ref["profile"]
     if kind == "hermes":
-        if _hermes_agent_ref_has_local_profile(agent_ref):
+        if _hermes_agent_ref_uses_local_sessions(agent_ref):
             outcome = _get_provider_registry().invoke(kind, "delete_session", profile, session_id)
             if isinstance(outcome, dict) and outcome.get("ok") and _get_hermes_session_id(profile) == session_id:
                 _save_hermes_state(profile, {"messages": [], "sessionId": ""})
@@ -8674,7 +8712,7 @@ def handle_chat_session_switch(agent_id, session_id, body=None):
     kind = agent_ref["providerKind"]
     profile = agent_ref["profile"]
     if kind == "hermes":
-        if _hermes_agent_ref_has_local_profile(agent_ref):
+        if _hermes_agent_ref_uses_local_sessions(agent_ref):
             outcome = _get_provider_registry().invoke(kind, "export_session", profile, session_id)
             if not isinstance(outcome, dict) or not outcome.get("ok"):
                 return outcome if isinstance(outcome, dict) else {"ok": False, "error": "Invalid Hermes response"}, 502
@@ -15656,6 +15694,7 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
                     "providerType": a.get("providerType", "runtime"),
                     "providerAgentId": a.get("providerAgentId", a["id"]),
                     "providerConnectionId": a.get("providerConnectionId", "default"),
+                    "selectionAliases": a.get("selectionAliases") if isinstance(a.get("selectionAliases"), list) else [],
                     "capabilities": a.get("capabilities") if isinstance(a.get("capabilities"), dict) else {},
                     "emoji": oc.get("emoji") or a["emoji"],
                     "name": oc.get("name") or a["name"],
@@ -16153,15 +16192,33 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
             else:
                 provider_kind = str(agent.get("providerKind") or "openclaw")
                 profile = str(agent.get("providerAgentId") or agent.get("profile") or agent.get("id"))
-                provider_messages = get_provider_agent_messages(provider_kind, profile)
-                self.send_response(200)
-                payload = {
-                    "ok": True,
-                    "providerKind": provider_kind,
-                    "profile": profile,
-                    "activeSessionId": _load_provider_active_session(provider_kind, profile).get("sessionId") or "",
-                    "messages": provider_messages,
-                }
+                requested_session_id = str((query_params.get("sessionId") or [""])[0]).strip()
+                restore_error = None
+                if provider_kind == "hermes" and requested_session_id:
+                    active_id = str(_load_provider_active_session(provider_kind, profile).get("sessionId") or "")
+                    if requested_session_id != active_id:
+                        restored, restore_status = handle_chat_session_switch(
+                            agent.get("id") or agent.get("statusKey") or agent_key,
+                            requested_session_id,
+                            {"source": "browser-reload-restore"},
+                        )
+                        if restore_status != 200 or not restored.get("ok"):
+                            restore_error = restored.get("error") or "Hermes session restoration failed"
+                if restore_error:
+                    self.send_response(502)
+                    payload = {"ok": False, "error": restore_error, "providerKind": provider_kind, "profile": profile}
+                else:
+                    provider_messages = get_provider_agent_messages(provider_kind, profile)
+                    active_session_id = str(_load_provider_active_session(provider_kind, profile).get("sessionId") or "")
+                    self.send_response(200)
+                    payload = {
+                        "ok": True,
+                        "providerKind": provider_kind,
+                        "profile": profile,
+                        "activeSessionId": active_session_id,
+                        "sessionKey": f"{provider_kind}:{profile}:{active_session_id}" if active_session_id else f"{provider_kind}:{profile}",
+                        "messages": provider_messages,
+                    }
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
@@ -17847,21 +17904,10 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
                     if key == "hermes" and isinstance(body[key], dict) and isinstance(existing.get(key), dict):
                         hermes_body = dict(body[key])
                         if isinstance(hermes_body.get("connections"), list):
-                            saved_connections = _normalize_hermes_connections(existing[key])
-                            saved_by_id = {str(item.get("id") or ""): item for item in saved_connections}
-                            merged_connections = []
-                            for index, incoming in enumerate(hermes_body.get("connections") or []):
-                                if not isinstance(incoming, dict):
-                                    continue
-                                incoming = dict(incoming)
-                                connection_id = _normalize_hermes_connection_id(incoming.get("id") or incoming.get("name"), index)
-                                incoming["id"] = connection_id
-                                saved = saved_by_id.get(connection_id) or {}
-                                if not incoming.get("apiKey") and saved.get("apiKey"):
-                                    incoming["apiKey"] = saved.get("apiKey")
-                                incoming.pop("apiKeyConfigured", None)
-                                merged_connections.append(incoming)
-                            hermes_body["connections"] = merged_connections
+                            hermes_body["connections"] = _merge_hermes_connection_updates(
+                                existing[key],
+                                hermes_body.get("connections") or [],
+                            )
                         # Remove the retired container-runtime settings when the
                         # new connection editor saves configuration.
                         for retired in (
@@ -17892,6 +17938,7 @@ class OfficeHandler(http.server.SimpleHTTPRequestHandler):
                 WORKSPACE_BASE = VO_CONFIG["openclaw"]["homePath"]
                 # Always reload gateway globals (URL, host header, config path)
                 _reload_gateway_globals()
+                _reset_provider_registry()
                 _discovered_roster = _discover_roster()
                 _discovered_at = time.time()
                 refresh_agent_maps()

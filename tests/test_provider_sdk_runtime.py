@@ -14,7 +14,9 @@ if APP_ROOT not in sys.path:
 
 import server  # noqa: E402
 from providers.codex import CodexProvider  # noqa: E402
-from providers.builtin import OpenClawOfficeProvider  # noqa: E402
+from providers.builtin import HermesOfficeProvider, OpenClawOfficeProvider  # noqa: E402
+from providers.hermes import HermesProvider  # noqa: E402
+from providers.registry import ProviderManifest  # noqa: E402
 
 
 class ProviderSdkRuntimeTests(unittest.TestCase):
@@ -87,6 +89,117 @@ class ProviderSdkRuntimeTests(unittest.TestCase):
         self.assertTrue(redacted["tokenConfigured"])
         field = {"key": "apiKey", "type": "secret"}
         self.assertEqual(server._validate_provider_setting(field, "", "existing"), "existing")
+
+    def test_main_hermes_save_retains_mounted_profile_metadata_and_api_key(self):
+        existing = {
+            "connections": [{
+                "id": "primary",
+                "name": "Old name",
+                "apiUrl": "http://old.invalid:8642",
+                "apiKey": "existing-secret",
+                "resourcePath": "/data/hermes",
+                "resourceAccess": "read-only",
+                "emoji": "H",
+                "role": "Existing role",
+                "enabled": True,
+            }],
+        }
+        incoming = [{
+            "id": "primary",
+            "name": "Updated name",
+            "apiUrl": "http://new.invalid:8642",
+            "apiKey": "",
+            "apiKeyConfigured": True,
+            "enabled": True,
+        }]
+
+        merged = server._merge_hermes_connection_updates(existing, incoming)
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["name"], "Updated name")
+        self.assertEqual(merged[0]["apiUrl"], "http://new.invalid:8642")
+        self.assertEqual(merged[0]["apiKey"], "existing-secret")
+        self.assertEqual(merged[0]["resourcePath"], "/data/hermes")
+        self.assertEqual(merged[0]["resourceAccess"], "read-only")
+        self.assertEqual(merged[0]["emoji"], "H")
+        self.assertEqual(merged[0]["role"], "Existing role")
+        self.assertNotIn("apiKeyConfigured", merged[0])
+
+    def test_mounted_default_profile_and_api_alias_are_one_canonical_hermes_agent(self):
+        hermes_home = os.path.join(self.temp_dir.name, "hermes-home")
+        os.makedirs(hermes_home)
+        local = {
+            "id": "hermes-default",
+            "statusKey": "hermes-default",
+            "providerAgentId": "default",
+            "profile": "default",
+            "name": "Local default",
+            "workspace": hermes_home,
+            "home": hermes_home,
+            "connectionModes": ["cli"],
+            "cliAvailable": True,
+            "apiAvailable": False,
+        }
+        api = {
+            "id": "hermes-primary",
+            "statusKey": "hermes-primary",
+            "providerAgentId": "primary",
+            "profile": "primary",
+            "connectionId": "primary",
+            "name": "Primary API",
+            "connectionModes": ["api"],
+            "cliAvailable": False,
+            "apiAvailable": True,
+            "capabilityOverrides": {"sessions": True, "sessionSwitch": True},
+        }
+        native = mock.Mock()
+        native.discover_agents.return_value = [local]
+        native.is_available.return_value = True
+        native.inspect_mounted_profile.side_effect = lambda profile, **kwargs: HermesProvider.inspect_mounted_profile(profile, **kwargs)
+        manifest = ProviderManifest(
+            id="hermes",
+            name="Hermes",
+            capabilities={"discover": True, "chat": True, "sessions": True, "resourcesRead": True, "resourcesWrite": True},
+        )
+        context = {"config": {"hermes": {
+            "enabled": True,
+            "localProfilesEnabled": True,
+            "resourceRoot": hermes_home,
+            "resourceAccess": "read-write",
+            "connections": [{
+                "id": "primary",
+                "apiUrl": "http://hermes.invalid:8642",
+                "apiKey": "configured",
+                "resourcePath": hermes_home,
+                "resourceAccess": "inherit",
+                "enabled": True,
+            }],
+        }}}
+        with mock.patch("providers.builtin.discover_api_connections", return_value=[api]):
+            rows = HermesOfficeProvider(native, context, manifest).discover_agents()
+
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["id"], "hermes-primary")
+        self.assertEqual(row["profile"], "primary")
+        self.assertEqual(row["connectionId"], "primary")
+        self.assertEqual(row["localProfile"], "default")
+        self.assertEqual(row["connectionModes"], ["cli", "api"])
+        self.assertEqual(row["workspace"], hermes_home)
+        self.assertTrue(row["resourcesReadable"])
+        self.assertTrue(row["resourcesWritable"])
+        self.assertIn("hermes-default", row["selectionAliases"])
+        self.assertIn("hermes-primary", row["selectionAliases"])
+
+        office_rows = [
+            {"key": "main", "providerKind": "openclaw"},
+            {"key": row["id"], "providerKind": "hermes"},
+            {"key": "codex-main", "providerKind": "codex"},
+            {"key": "hermes-secondary", "providerKind": "hermes"},
+        ]
+        with mock.patch.object(server, "get_agent_limit", return_value=3):
+            balanced = server._apply_agent_limit_balanced(office_rows)
+        self.assertEqual([item["key"] for item in balanced], ["main", "hermes-primary", "codex-main"])
 
     def test_settings_validation_rejects_bad_url_and_unknown_select(self):
         with self.assertRaises(ValueError):

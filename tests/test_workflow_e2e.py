@@ -13,6 +13,10 @@ import json
 import sys
 import os
 import re
+import unittest
+
+if __name__ != "__main__":
+    raise unittest.SkipTest("standalone live-server workflow verification; run this file directly")
 
 BASE = os.environ.get("VO_TEST_URL", "http://127.0.0.1:8090")
 API = f"{BASE}/api/projects"

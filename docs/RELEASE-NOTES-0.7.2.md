@@ -33,4 +33,4 @@ The release was gated by real-model same-session multi-turn recall, session swit
 
 ## Rollback
 
-Pin `ghcr.io/eliautobot/my-virtual-office:0.7.1` (or check out tag `v0.7.1`) and recreate only the Virtual Office service. Do not remove the persistent `vo-data` or Hermes data volume. The separate Hermes container can remain running.
+Pin the actually published prior image `ghcr.io/eliautobot/my-virtual-office:c08c690` (or check out tag `v0.7.1`) and recreate only the Virtual Office service. Do not remove the persistent `vo-data` or Hermes data volume. The separate Hermes container can remain running.

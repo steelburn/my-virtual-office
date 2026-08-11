@@ -47,4 +47,4 @@ def test_jump_control_layout_and_cache_bust():
     assert ".chat-scroll-latest {" in STYLE_CSS
     assert ".chat-scroll-latest[hidden]" in STYLE_CSS
     assert 'style.css?v=20260808-chat-follow-5' in INDEX_HTML
-    assert 'chat.js?v=20260808-chat-follow-5' in INDEX_HTML
+    assert 'chat.js?v=20260811-hermes-session-restore-1' in INDEX_HTML

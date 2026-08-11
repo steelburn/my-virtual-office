@@ -33,4 +33,4 @@ def test_mobile_chat_does_not_autofocus_the_composer():
 
 def test_mobile_scroll_region_assets_are_cache_busted_together():
     assert 'style.css?v=20260808-chat-follow-5' in INDEX_HTML
-    assert 'chat.js?v=20260808-chat-follow-5' in INDEX_HTML
+    assert 'chat.js?v=20260811-hermes-session-restore-1' in INDEX_HTML

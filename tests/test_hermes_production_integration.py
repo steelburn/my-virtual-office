@@ -61,6 +61,24 @@ class ManifestRegistry:
 
 
 class HermesProductionIntegrationTests(unittest.TestCase):
+    def test_balanced_api_slot_uses_gateway_sessions_and_keeps_cli_only_support(self):
+        balanced = {
+            "profile": "aster",
+            "record": {
+                "providerAgentId": "aster",
+                "providerConnectionId": "aster",
+                "localProfile": "default",
+                "connectionModes": ["cli", "api"],
+            },
+        }
+        cli_only = {
+            "profile": "default",
+            "record": {"providerAgentId": "default", "connectionModes": ["cli"]},
+        }
+
+        self.assertFalse(server._hermes_agent_ref_uses_local_sessions(balanced))
+        self.assertTrue(server._hermes_agent_ref_uses_local_sessions(cli_only))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
@@ -351,6 +369,14 @@ class HermesProductionIntegrationTests(unittest.TestCase):
         self.assertIn("selectedHermesSessionId()", source)
         self.assertIn("sessionId:this.isHermesSelected() ? this.selectedHermesSessionId()", source)
         self.assertIn("sessionId: this.selectedHermesSessionId()", source)
+        self.assertIn("canonicalSessionKeyForOption", source)
+        self.assertIn("optionMatchesSelectedAgent", source)
+        self.assertIn("&sessionId=' + encodeURIComponent(selectedSessionId)", source)
+        load_agent_list = source.split("async loadAgentList()", 1)[1].split("isVisibleForPolling()", 1)[0]
+        self.assertIn("this.loadHistory();", load_agent_list)
+        server_source = (APP / "server.py").read_text(encoding="utf-8")
+        self.assertIn('"browser-reload-restore"', server_source)
+        self.assertIn('"sessionKey": f"{provider_kind}:{profile}:{active_session_id}"', server_source)
 
 
 if __name__ == "__main__":

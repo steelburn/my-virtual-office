@@ -135,6 +135,39 @@
     }
   }
 
+  function optionSelectionAliases(opt) {
+    try {
+      const aliases = JSON.parse(opt?.dataset?.selectionAliases || '[]');
+      return Array.isArray(aliases) ? aliases.map(String) : [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function optionMatchesSelectedAgent(opt, selectedAgentKey) {
+    const selected = String(selectedAgentKey || '');
+    return !!opt && (opt.value === selected || optionSelectionAliases(opt).includes(selected));
+  }
+
+  function canonicalSessionKeyForOption(opt, sessionKey, selectedAgentKey) {
+    const base = String(opt?.dataset?.sessionKey || '');
+    const current = String(sessionKey || '');
+    if (!base) return current;
+    if (current === base || current.startsWith(base + ':')) return current;
+
+    // A mounted local profile and its authenticated API connection can be the
+    // same Hermes identity under different labels. Preserve the native session
+    // id while migrating a saved local alias to the canonical API profile.
+    if (optionMatchesSelectedAgent(opt, selectedAgentKey)) {
+      const baseParts = base.split(':');
+      const currentParts = current.split(':');
+      if (baseParts.length === 2 && currentParts.length >= 3 && baseParts[0] === currentParts[0]) {
+        return base + ':' + currentParts.slice(2).join(':');
+      }
+    }
+    return base;
+  }
+
   function formatSessionTimestamp(value) {
     if (value === null || value === undefined || value === '') return '';
     if (typeof value === 'string') {
@@ -486,20 +519,20 @@
     syncAgentSelect() {
       if (!this.agentSelect) return;
       const options = Array.from(this.agentSelect.querySelectorAll('option'));
-      let matched = false;
-      for (const opt of options) {
-        const isMatch = opt.value === this.selectedAgentKey && opt.dataset.sessionKey === this.sessionKey;
-        opt.selected = isMatch;
-        if (isMatch) matched = true;
-      }
-      if (!matched) {
-        const fallback = options.find(opt => opt.value === this.selectedAgentKey) || options.find(opt => opt.dataset.sessionKey === this.sessionKey) || options[0];
-        if (fallback) {
-          fallback.selected = true;
-          this.selectedAgentKey = fallback.value;
-          this.sessionKey = fallback.dataset.sessionKey || this.sessionKey;
-          this.saveSelection();
-        }
+      const selected = options.find(opt => {
+        if (!optionMatchesSelectedAgent(opt, this.selectedAgentKey)) return false;
+        const canonical = canonicalSessionKeyForOption(opt, this.sessionKey, this.selectedAgentKey);
+        return canonical === opt.dataset.sessionKey || canonical.startsWith(opt.dataset.sessionKey + ':');
+      }) || options.find(opt => optionMatchesSelectedAgent(opt, this.selectedAgentKey))
+        || options.find(opt => this.sessionKey === opt.dataset.sessionKey || this.sessionKey.startsWith(opt.dataset.sessionKey + ':'))
+        || options[0];
+      for (const opt of options) opt.selected = opt === selected;
+      if (selected) {
+        const previousAgentKey = this.selectedAgentKey;
+        const previousSessionKey = this.sessionKey;
+        this.sessionKey = canonicalSessionKeyForOption(selected, previousSessionKey, previousAgentKey);
+        this.selectedAgentKey = selected.value;
+        if (this.selectedAgentKey !== previousAgentKey || this.sessionKey !== previousSessionKey) this.saveSelection();
       }
     }
 
@@ -572,6 +605,8 @@
             opt.dataset.providerKind = a.providerKind || 'openclaw';
             opt.dataset.providerType = a.providerType || 'runtime';
             opt.dataset.providerAgentId = a.providerAgentId || a.agentId;
+            opt.dataset.providerConnectionId = a.providerConnectionId || a.providerAgentId || a.agentId;
+            opt.dataset.selectionAliases = JSON.stringify(a.selectionAliases || []);
             opt.dataset.capabilities = JSON.stringify(a.capabilities || {});
             group.appendChild(opt);
           }
@@ -581,7 +616,10 @@
         this.syncCapabilityControls();
         this.syncSelectionStatus();
         if (this.sessionsPanelOpen) this.refreshSessionsList({ showLoading: true });
-        if (connected || this.isProviderAgentSelected()) this.fetchSessionInfo();
+        if (connected || this.isProviderAgentSelected()) {
+          this.loadHistory();
+          this.fetchSessionInfo();
+        }
       } catch (e) {
         console.warn('[chat] Failed to load agent list:', e);
       }
@@ -1017,10 +1055,18 @@
       const historyRequestIsStale = () => historyRefreshSeq !== this.historyRefreshSeq || !this.isVisibleForPolling();
       try {
         if (this.isProviderAgentSelected()) {
-          const res = await fetch('/api/provider-history?agentId=' + encodeURIComponent(this.getSelectedAgentId() || this.selectedAgentKey));
+          const agentId = this.getSelectedAgentId() || this.selectedAgentKey;
+          const selectedSessionId = this.isHermesSelected() ? this.selectedHermesSessionId() : '';
+          let historyUrl = '/api/provider-history?agentId=' + encodeURIComponent(agentId);
+          if (selectedSessionId) historyUrl += '&sessionId=' + encodeURIComponent(selectedSessionId);
+          const res = await fetch(historyUrl);
           const data = await res.json();
           if (historyRequestIsStale()) { this.markHistoryDirty(); return; }
           if (!res.ok || data.ok === false) throw new Error(data.error || res.statusText);
+          if (data.providerKind === 'hermes' && data.sessionKey && data.sessionKey !== this.sessionKey) {
+            this.sessionKey = data.sessionKey;
+            this.saveSelection();
+          }
           this.startProviderHistoryPolling();
           this.providerHistorySignature = this.providerHistorySignatureFor(data.messages || []);
           this.replaceHistoryMessages(() => {

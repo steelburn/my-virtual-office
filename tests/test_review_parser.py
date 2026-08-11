@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Unit tests for _wf_parse_review_response — the review parser."""
 import sys, os
+import unittest
+
+if __name__ != "__main__":
+    raise unittest.SkipTest("standalone review-parser verification; run this file directly")
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 
 # We can't import server.py directly (side effects), so extract the function

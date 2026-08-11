@@ -147,6 +147,8 @@ Then open `http://localhost:8090/setup` to run the setup wizard.
 
 The published Docker image is available at:
 - `ghcr.io/eliautobot/my-virtual-office:latest`
+- `ghcr.io/eliautobot/my-virtual-office:<version>` for release tags, such as `0.7.3`
+- `ghcr.io/eliautobot/my-virtual-office:<commit-sha-prefix>` for exact rollback pins
 
 Multi-arch images are published for:
 - `linux/amd64`
@@ -286,6 +288,9 @@ Or pull the image directly:
 ```bash
 docker pull ghcr.io/eliautobot/my-virtual-office:latest
 ```
+
+For a reproducible deployment, replace `latest` with a published release
+version or commit SHA prefix.
 
 Your license key, office layout, and all settings persist across updates. They're stored in the `vo-data` volume.
 

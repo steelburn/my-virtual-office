@@ -602,17 +602,87 @@ class HermesOfficeProvider(NativeOfficeProvider):
 
     def discover_agents(self) -> list[dict[str, Any]]:
         cfg = (self.context.get("config") or {}).get("hermes") or {}
+        configured_connections = [
+            item for item in (cfg.get("connections") or [])
+            if isinstance(item, dict) and item.get("enabled") is not False
+        ]
         api_agents = discover_api_connections(
-            cfg.get("connections") or [],
+            configured_connections,
             enabled=cfg.get("enabled", True),
             timeout_sec=min(int(cfg.get("timeoutSec") or 600), 10),
         )
         local_agents = self.native.discover_agents() if cfg.get("localProfilesEnabled") else []
+
+        def normalized_path(value: Any) -> str:
+            raw = str(value or "").strip()
+            if not raw or re.match(r"^[A-Za-z]:[\\/]", raw) or raw.startswith("\\\\"):
+                return ""
+            return os.path.realpath(os.path.abspath(os.path.expanduser(raw)))
+
+        local_by_profile = {
+            str(item.get("providerAgentId") or item.get("profile") or "default"): item
+            for item in local_agents
+        }
+        local_profile_by_path = {
+            path: profile
+            for profile, item in local_by_profile.items()
+            for path in [normalized_path(item.get("workspace") or item.get("home"))]
+            if path
+        }
+        connections = {
+            str(item.get("id") or ""): item
+            for item in configured_connections
+            if str(item.get("id") or "")
+        }
+
+        # A configured API connection can intentionally expose the same native
+        # profile as a local CLI mount under a different connection id (for
+        # example, an API label mapped to the default profile directory). Treat
+        # those as one office agent. Otherwise demo balancing can select the
+        # CLI-only alias and hide the functional API-backed identity.
+        connection_local_profiles: dict[str, str] = {}
+        for connection_id, connection in connections.items():
+            explicit_path = normalized_path(connection.get("resourcePath"))
+            local_profile = local_profile_by_path.get(explicit_path, "") if explicit_path else ""
+            if not local_profile and connection_id in local_by_profile:
+                local_profile = connection_id
+            if local_profile:
+                connection_local_profiles[connection_id] = local_profile
+
         merged: dict[str, dict[str, Any]] = {}
-        for item in local_agents + api_agents:
+        for item in local_agents:
             key = str(item.get("providerAgentId") or item.get("profile") or item.get("id") or "default")
+            aliases = {
+                str(value) for value in (
+                    item.get("id"), item.get("statusKey"), item.get("providerAgentId"), item.get("profile")
+                ) if value
+            }
+            merged[key] = {**item, "localProfile": key, "selectionAliases": sorted(aliases)}
+
+        for item in api_agents:
+            connection_id = str(
+                item.get("connectionId")
+                or item.get("providerConnectionId")
+                or item.get("providerAgentId")
+                or item.get("profile")
+                or "default"
+            )
+            local_profile = connection_local_profiles.get(connection_id, "")
+            key = local_profile or connection_id
             existing = merged.get(key, {})
             combined = {**existing, **item}
+            combined["connectionId"] = connection_id
+            combined["providerConnectionId"] = connection_id
+            if local_profile:
+                combined["localProfile"] = local_profile
+            aliases = {
+                str(value) for value in (
+                    *(existing.get("selectionAliases") or []),
+                    existing.get("id"), existing.get("statusKey"), existing.get("providerAgentId"), existing.get("profile"),
+                    item.get("id"), item.get("statusKey"), item.get("providerAgentId"), item.get("profile"),
+                ) if value
+            }
+            combined["selectionAliases"] = sorted(aliases)
             if existing:
                 combined["connectionModes"] = list(dict.fromkeys((existing.get("connectionModes") or []) + (item.get("connectionModes") or [])))
                 prior_caps = existing.get("capabilityOverrides") if isinstance(existing.get("capabilityOverrides"), dict) else {}
@@ -623,34 +693,28 @@ class HermesOfficeProvider(NativeOfficeProvider):
                 }
             merged[key] = combined
 
-        connections = {
-            str(item.get("id") or ""): item
-            for item in (cfg.get("connections") or [])
-            if isinstance(item, dict)
-        }
         global_access = str(cfg.get("resourceAccess") or "read-write").strip().lower()
         if global_access not in {"disabled", "read-only", "read-write"}:
             global_access = "read-write"
-        cli_profiles = {
-            str(item.get("providerAgentId") or item.get("profile") or "default")
-            for item in local_agents
-        }
         for key, item in merged.items():
-            connection = connections.get(key) or {}
+            connection_id = str(item.get("connectionId") or item.get("providerConnectionId") or "")
+            connection = connections.get(connection_id) or connections.get(key) or {}
+            local_profile = str(item.get("localProfile") or "")
             requested_access = str(connection.get("resourceAccess") or "inherit").strip().lower()
             access = global_access if requested_access == "inherit" else requested_access
             if access not in {"disabled", "read-only", "read-write"}:
                 access = global_access
-            discovered_path = str(item.get("workspace") or item.get("home") or "") if key in cli_profiles else ""
+            local_item = local_by_profile.get(local_profile) or {}
+            discovered_path = str(local_item.get("workspace") or local_item.get("home") or "")
             mounted = self.native.inspect_mounted_profile(
-                key,
+                local_profile or key,
                 data_root=cfg.get("resourceRoot") or cfg.get("homePath") or "",
                 profile_path=connection.get("resourcePath") or discovered_path or "",
                 access=access,
             )
             readable = bool(mounted.get("readable"))
             writable = bool(mounted.get("writable"))
-            cli_available = bool(key in cli_profiles and self.native.is_available())
+            cli_available = bool(local_profile and self.native.is_available())
             item["cliAvailable"] = cli_available
             item["resourcesReadable"] = readable
             item["resourcesWritable"] = writable

@@ -15,6 +15,10 @@ Tests:
 """
 
 import sys
+import unittest
+
+if __name__ != "__main__":
+    raise unittest.SkipTest("standalone review-parser verification; run this file directly")
 import os
 import re
 
