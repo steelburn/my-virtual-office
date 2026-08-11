@@ -136,6 +136,28 @@ def _field(key: str, label: str, field_type: str = "text", **extra: Any) -> dict
     return {"key": key, "label": label, "type": field_type, **extra}
 
 
+def _resource_access_field(*, inherit: bool = False) -> dict[str, Any]:
+    options = []
+    if inherit:
+        options.append({"value": "inherit", "label": "Use data-root setting"})
+    options.extend([
+        {"value": "read-write", "label": "Read and write"},
+        {"value": "read-only", "label": "Read only"},
+        {"value": "disabled", "label": "Disabled"},
+    ])
+    return _field(
+        "resourceAccess",
+        "Mounted profile access",
+        "select",
+        default="inherit" if inherit else "read-write",
+        options=options,
+        help=(
+            "Controls allowlisted access to a Hermes profile directory mounted into Virtual Office. "
+            "Runtime chat and sessions continue to use the authenticated Hermes API."
+        ),
+    )
+
+
 def _session_settings() -> dict[str, Any]:
     return {
         "id": "sessions",
@@ -586,22 +608,6 @@ class HermesOfficeProvider(NativeOfficeProvider):
             timeout_sec=min(int(cfg.get("timeoutSec") or 600), 10),
         )
         local_agents = self.native.discover_agents() if cfg.get("localProfilesEnabled") else []
-        for item in local_agents:
-            item["capabilityOverrides"] = {
-                "profileEdit": True,
-                "resourcesRead": True,
-                "resourcesWrite": True,
-                "skills": True,
-                "agentDelete": True,
-            }
-        for item in api_agents:
-            item["capabilityOverrides"] = {
-                "profileEdit": False,
-                "resourcesRead": False,
-                "resourcesWrite": False,
-                "skills": False,
-                "agentDelete": False,
-            }
         merged: dict[str, dict[str, Any]] = {}
         for item in local_agents + api_agents:
             key = str(item.get("providerAgentId") or item.get("profile") or item.get("id") or "default")
@@ -616,7 +622,72 @@ class HermesOfficeProvider(NativeOfficeProvider):
                     for key in set(prior_caps) | set(next_caps)
                 }
             merged[key] = combined
+
+        connections = {
+            str(item.get("id") or ""): item
+            for item in (cfg.get("connections") or [])
+            if isinstance(item, dict)
+        }
+        global_access = str(cfg.get("resourceAccess") or "read-write").strip().lower()
+        if global_access not in {"disabled", "read-only", "read-write"}:
+            global_access = "read-write"
+        cli_profiles = {
+            str(item.get("providerAgentId") or item.get("profile") or "default")
+            for item in local_agents
+        }
+        for key, item in merged.items():
+            connection = connections.get(key) or {}
+            requested_access = str(connection.get("resourceAccess") or "inherit").strip().lower()
+            access = global_access if requested_access == "inherit" else requested_access
+            if access not in {"disabled", "read-only", "read-write"}:
+                access = global_access
+            discovered_path = str(item.get("workspace") or item.get("home") or "") if key in cli_profiles else ""
+            mounted = self.native.inspect_mounted_profile(
+                key,
+                data_root=cfg.get("resourceRoot") or cfg.get("homePath") or "",
+                profile_path=connection.get("resourcePath") or discovered_path or "",
+                access=access,
+            )
+            readable = bool(mounted.get("readable"))
+            writable = bool(mounted.get("writable"))
+            cli_available = bool(key in cli_profiles and self.native.is_available())
+            item["cliAvailable"] = cli_available
+            item["resourcesReadable"] = readable
+            item["resourcesWritable"] = writable
+            item["resourceAccess"] = str(mounted.get("access") or "disabled")
+            item["resourceAccessRequested"] = str(mounted.get("requestedAccess") or access)
+            item["resourceMountSource"] = str(mounted.get("source") or "")
+            item["resourceMountReason"] = str(mounted.get("reason") or "")[:500]
+            if readable and mounted.get("path"):
+                item["workspace"] = str(mounted["path"])
+                item["home"] = str(mounted["path"])
+                item["workspaceTransport"] = "mounted-hermes-profile"
+            else:
+                item["workspace"] = ""
+                item["home"] = ""
+                item["workspaceTransport"] = "hermes-api" if item.get("apiAvailable") else "hermes-cli"
+            overrides = dict(item.get("capabilityOverrides") or {})
+            overrides.update({
+                "profileEdit": writable,
+                "resourcesRead": readable,
+                "resourcesWrite": writable,
+                "skills": readable,
+                "agentCreate": cli_available,
+                "agentDelete": cli_available,
+            })
+            item["capabilityOverrides"] = overrides
         return list(merged.values())
+
+    def update_profile(self, profile: str, patch: dict[str, Any]) -> dict[str, Any]:
+        agent = next((
+            row for row in self.discover_agents()
+            if str(row.get("providerAgentId") or row.get("profile") or "") == str(profile)
+        ), None)
+        workspace = str((agent or {}).get("workspace") or (agent or {}).get("home") or "")
+        overrides = (agent or {}).get("capabilityOverrides") if isinstance((agent or {}).get("capabilityOverrides"), dict) else {}
+        if workspace and overrides.get("profileEdit"):
+            return self.native.update_profile_at_home(workspace, profile, patch)
+        return {"ok": False, "error": "This Hermes connection does not expose a writable mounted profile."}
 
     def send_chat_message(self, profile: str, message: str, **kwargs: Any) -> dict[str, Any]:
         """Route API-connected Hermes agents through their native API transport.
@@ -694,10 +765,10 @@ def build_provider_registry(context: dict[str, Any]) -> ProviderRegistry:
                 "discover": True, "health": True, "chat": True, "streaming": True,
                 "sessions": True, "sessionCreate": True, "sessionDelete": True, "sessionSwitch": True,
                 "interrupt": True, "approvals": True, "agentCreate": bool(hermes_cfg.get("localProfilesEnabled")),
-                "agentDelete": bool(hermes_cfg.get("localProfilesEnabled")), "profileEdit": bool(hermes_cfg.get("localProfilesEnabled")),
-                "resourcesRead": bool(hermes_cfg.get("localProfilesEnabled")), "resourcesWrite": bool(hermes_cfg.get("localProfilesEnabled")),
-                "skills": bool(hermes_cfg.get("localProfilesEnabled")), "models": True, "projects": True, "meetings": True,
-                "agentToAgent": True, "attachments": True, "tools": True,
+                "agentDelete": bool(hermes_cfg.get("localProfilesEnabled")), "profileEdit": True,
+                "resourcesRead": True, "resourcesWrite": True,
+                "skills": True, "models": True, "projects": True, "meetings": True,
+                "agentToAgent": True, "attachments": False, "tools": True,
             },
             [
                 {"id": "soul", "label": "Soul and personality", "paths": ["SOUL.md"], "runtimeActive": True, "writable": True},
@@ -734,15 +805,32 @@ def build_provider_registry(context: dict[str, Any]) -> ProviderRegistry:
                                     _field("name", "Display name", "text", required=True),
                                     _field("apiUrl", "API URL", "url", required=True, placeholder="http://127.0.0.1:8080"),
                                     _field("apiKey", "API key", "secret", secret=True, placeholder="Keep existing key"),
+                                    _field(
+                                        "resourcePath",
+                                        "Mounted profile directory",
+                                        "path",
+                                        help="Optional exact Hermes profile directory visible inside Virtual Office. Leave blank to map the connection ID below the configured data root.",
+                                    ),
+                                    _resource_access_field(inherit=True),
                                     _field("emoji", "Emoji", "text", default="⚕️"),
                                     _field("role", "Role", "text", default="Hermes Agent"),
                                     _field("enabled", "Enabled", "boolean", default=True),
                                 ],
                             ),
-                            _field("localProfilesEnabled", "Discover local Hermes profiles", "boolean", default=False),
-                            _field("homePath", "Local Hermes home", "path"),
+                            _field(
+                                "resourceRoot",
+                                "Mounted Hermes data root",
+                                "path",
+                                help="Hermes data directory visible inside Virtual Office. The default profile lives here and named profiles live below profiles/<id>.",
+                            ),
+                            _resource_access_field(),
+                            _field("localProfilesEnabled", "Discover and run local Hermes CLI profiles", "boolean", default=False),
+                            _field("homePath", "Local Hermes CLI home", "path"),
                             _field("binary", "Local Hermes executable", "path"),
                             _field("timeoutSec", "Turn timeout", "number", default=600, min=30, max=7200, step=30, suffix="seconds"),
+                            _field("runHistoryMaxMessages", "Context message limit", "number", default=120, min=0, max=500, step=1),
+                            _field("runHistoryMaxChars", "Total context character limit", "number", default=120000, min=4000, max=1000000, step=1000),
+                            _field("runHistoryMaxMessageChars", "Per-message character limit", "number", default=32000, min=1000, max=200000, step=1000),
                         ],
                     },
                     {

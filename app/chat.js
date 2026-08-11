@@ -662,6 +662,13 @@
       return this.getSelectedProviderKind() === 'hermes' || String(this.sessionKey || '').startsWith('hermes:');
     }
 
+    selectedHermesSessionId() {
+      const active = this.activeSessionIdForPanel();
+      if (active) return active;
+      const match = String(this.sessionKey || '').match(/^hermes:[^:]+:(.+)$/);
+      return match ? match[1] : '';
+    }
+
     isCodexSelected() {
       return this.getSelectedProviderKind() === 'codex' || String(this.sessionKey || '').startsWith('codex:');
     }
@@ -1256,6 +1263,10 @@
         });
         const data = await res.json();
         if (!res.ok || !data.ok) throw new Error(data.error || res.statusText);
+        if (data.providerKind === 'hermes') {
+          this.sessionKey = data.sessionKey || session.sessionKey || `hermes:${data.profile || 'default'}:${data.sessionId || session.id}`;
+          saveChatSelection(this.slotId, { selectedAgentKey: this.selectedAgentKey, sessionKey: this.sessionKey });
+        }
         this.resetConversation('Switched to session: ' + (session.title || session.id));
         await this.loadHistory();
         this.fetchSessionInfo();
@@ -1279,6 +1290,10 @@
         });
         const data = await res.json();
         if (!res.ok || !data.ok) throw new Error(data.error || res.statusText);
+        if (data.providerKind === 'hermes' && data.sessionId) {
+          this.sessionKey = data.sessionKey || `hermes:${data.profile || 'default'}:${data.sessionId}`;
+          saveChatSelection(this.slotId, { selectedAgentKey: this.selectedAgentKey, sessionKey: this.sessionKey });
+        }
         this.resetConversation('New session started');
         await this.loadHistory();
         this.fetchSessionInfo();
@@ -1473,7 +1488,7 @@
             body:JSON.stringify({
               agentId:this.getSelectedAgentId() || this.selectedAgentKey,
               message:text || '(attached files)',
-              sessionId:this.activeSessionIdForPanel() || '',
+              sessionId:this.isHermesSelected() ? this.selectedHermesSessionId() : (this.activeSessionIdForPanel() || ''),
               fromType:'human',
               fromDisplayName:'User',
               sourceApp:'virtual-office',
@@ -1509,6 +1524,7 @@
         const hermesBody = {
           agentId: this.getSelectedAgentId() || this.selectedAgentKey,
           message: text || '(attached files)',
+          sessionId: this.selectedHermesSessionId(),
           fromType: 'human',
           fromDisplayName: 'User',
           sourceApp: 'virtual-office',

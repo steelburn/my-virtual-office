@@ -149,6 +149,15 @@ def _env_or(key, fallback):
     val = os.environ.get(key)
     return val if val else fallback
 
+
+def _hermes_resource_access(value, fallback="read-write", *, allow_inherit=False):
+    allowed = {"disabled", "read-only", "read-write"}
+    if allow_inherit:
+        allowed.add("inherit")
+    normalized = str(value or fallback or "read-write").strip().lower()
+    fallback_value = str(fallback or "read-write").strip().lower()
+    return normalized if normalized in allowed else (fallback_value if fallback_value in allowed else "read-write")
+
 def _running_in_docker():
     return os.path.exists("/.dockerenv") or bool(os.environ.get("VO_STATUS_DIR") == "/data")
 
@@ -227,6 +236,8 @@ def _normalize_hermes_connections(hermes_cfg):
             "apiKey": str(raw.get("apiKey") or raw.get("key") or ""),
             "emoji": str(raw.get("emoji") or "⚕️"),
             "role": str(raw.get("role") or "Hermes Agent"),
+            "resourcePath": str(raw.get("resourcePath") or "").strip(),
+            "resourceAccess": _hermes_resource_access(raw.get("resourceAccess"), "inherit", allow_inherit=True),
             "enabled": raw.get("enabled") is not False,
         })
     return normalized
@@ -374,8 +385,18 @@ def _load_vo_config():
         "hermes": {
             "enabled": str(_env_or("VO_HERMES_ENABLED", hermes_cfg.get("enabled", True))).lower() not in ("0", "false", "no", "off"),
             "homePath": _env_or("VO_HERMES_HOME", hermes_cfg.get("homePath", os.path.expanduser("~/.hermes"))),
+            "resourceRoot": _env_or(
+                "VO_HERMES_RESOURCE_ROOT",
+                hermes_cfg.get("resourceRoot", hermes_cfg.get("homePath", "/data/hermes")),
+            ),
+            "resourceAccess": _hermes_resource_access(
+                _env_or("VO_HERMES_RESOURCE_ACCESS", hermes_cfg.get("resourceAccess", "read-write"))
+            ),
             "binary": _env_or("VO_HERMES_BIN", hermes_cfg.get("binary", "")),
             "timeoutSec": int(_env_or("VO_HERMES_TIMEOUT_SEC", hermes_cfg.get("timeoutSec", 600))),
+            "runHistoryMaxMessages": int(_env_or("VO_HERMES_CONTEXT_MAX_MESSAGES", hermes_cfg.get("runHistoryMaxMessages", 120))),
+            "runHistoryMaxChars": int(_env_or("VO_HERMES_CONTEXT_MAX_CHARS", hermes_cfg.get("runHistoryMaxChars", 120000))),
+            "runHistoryMaxMessageChars": int(_env_or("VO_HERMES_CONTEXT_MAX_MESSAGE_CHARS", hermes_cfg.get("runHistoryMaxMessageChars", 32000))),
             "connections": hermes_connections,
             "localProfilesEnabled": str(_env_or("VO_HERMES_LOCAL_PROFILES_ENABLED", hermes_cfg.get("localProfilesEnabled", False))).lower() not in ("0", "false", "no", "off"),
             # Read-only aliases keep older internal callers functional during
@@ -813,6 +834,15 @@ def _atomic_write_text(path, content):
         existing_stat = os.stat(path)
     except OSError:
         existing_stat = None
+    owner_stat = existing_stat
+    if owner_stat is None:
+        parent = os.path.dirname(path)
+        while parent and parent != os.path.dirname(parent):
+            try:
+                owner_stat = os.stat(parent)
+                break
+            except OSError:
+                parent = os.path.dirname(parent)
     tmp_path = f"{path}.tmp-{os.getpid()}-{threading.get_ident()}"
     with open(tmp_path, "w", encoding="utf-8") as f:
         f.write(content)
@@ -824,6 +854,11 @@ def _atomic_write_text(path, content):
                 pass
             try:
                 os.fchown(f.fileno(), existing_stat.st_uid, existing_stat.st_gid)
+            except OSError:
+                pass
+        elif owner_stat is not None:
+            try:
+                os.fchown(f.fileno(), owner_stat.st_uid, owner_stat.st_gid)
             except OSError:
                 pass
         os.fsync(f.fileno())
@@ -2461,7 +2496,8 @@ def _agent_workspace_abs_path(agent_key, agent):
 
 def _safe_workspace_relpath(raw_path):
     rel = str(raw_path or "").replace("\\", "/").strip()
-    rel = rel.lstrip("/")
+    if rel.startswith("/") or rel.startswith("//") or re.match(r"^[A-Za-z]:/", rel):
+        return ""
     if not rel or rel in (".", "..") or "\x00" in rel:
         return ""
     parts = [p for p in rel.split("/") if p not in ("", ".")]
@@ -2511,8 +2547,17 @@ def _resource_descriptor(agent, relpath, include_hidden=False):
     for raw in _agent_resource_schema(agent):
         if not isinstance(raw, dict):
             continue
-        if not any(_resource_glob_matches(rel, pattern) for pattern in raw.get("paths") or []):
+        matching_patterns = [pattern for pattern in raw.get("paths") or [] if _resource_glob_matches(rel, pattern)]
+        if not matching_patterns:
             continue
+        hidden_parts = [part for part in rel.split("/") if part.startswith(".")]
+        if hidden_parts:
+            explicitly_declared = any(
+                all(part in str(pattern).replace("\\", "/").split("/") for part in hidden_parts)
+                for pattern in matching_patterns
+            )
+            if not explicitly_declared:
+                return None
         item = dict(raw)
         item.setdefault("id", "resource")
         item.setdefault("label", "Native resource")
@@ -2521,6 +2566,14 @@ def _resource_descriptor(agent, relpath, include_hidden=False):
         item.setdefault("writable", False)
         item.setdefault("deletable", False)
         item.setdefault("creatable", bool(item.get("writable")))
+        capabilities = agent.get("capabilities") if isinstance((agent or {}).get("capabilities"), dict) else {}
+        if "resourcesRead" in capabilities:
+            item["readable"] = bool(item.get("readable") and capabilities.get("resourcesRead"))
+        if "resourcesWrite" in capabilities:
+            writable = bool(item.get("writable") and capabilities.get("resourcesWrite"))
+            item["writable"] = writable
+            item["creatable"] = bool(item.get("creatable") and writable)
+            item["deletable"] = bool(item.get("deletable") and writable)
         item["path"] = rel
         if not include_hidden and not item.get("readable"):
             return None
@@ -3690,6 +3743,8 @@ _DISCOVERY_CACHE_FIELDS = {
     "providerKind", "providerId", "providerType", "providerManifestVersion",
     "providerConnectionId", "capabilities", "nativeCapabilities", "connectionModes",
     "source", "cliAvailable", "apiAvailable", "createdAt", "lastSeenAt", "offlineSince",
+    "resourceAccess", "resourceAccessRequested", "resourcesReadable", "resourcesWritable",
+    "resourceMountSource", "resourceMountReason", "workspaceTransport",
 }
 
 
@@ -5649,9 +5704,9 @@ def _hermes_run_history_limits():
         return max(minimum, min(maximum, value))
 
     return {
-        "maxMessages": _bounded_int("runHistoryMaxMessages", 160, 0, 500),
-        "maxChars": _bounded_int("runHistoryMaxChars", 240000, 10000, 1000000),
-        "maxMessageChars": _bounded_int("runHistoryMaxMessageChars", 24000, 1000, 200000),
+        "maxMessages": _bounded_int("runHistoryMaxMessages", 120, 0, 500),
+        "maxChars": _bounded_int("runHistoryMaxChars", 120000, 4000, 1000000),
+        "maxMessageChars": _bounded_int("runHistoryMaxMessageChars", 32000, 1000, 200000),
     }
 
 
@@ -5660,22 +5715,13 @@ def _flatten_hermes_history_content(content):
         return ""
     if isinstance(content, str):
         return content
+    if isinstance(content, dict):
+        value = content.get("text") or content.get("content") or content.get("output_text")
+        return _flatten_hermes_history_content(value)
     if isinstance(content, list):
-        parts = []
-        for part in content:
-            if isinstance(part, str):
-                parts.append(part)
-            elif isinstance(part, dict):
-                part_type = str(part.get("type") or "").strip().lower()
-                if part_type in {"text", "input_text", "output_text"}:
-                    parts.append(str(part.get("text") or ""))
-                elif isinstance(part.get("content"), str):
-                    parts.append(part.get("content") or "")
-        return "\n".join(p.strip() for p in parts if str(p or "").strip())
-    try:
-        return json.dumps(content, ensure_ascii=False, default=str)
-    except Exception:
-        return str(content)
+        parts = [_flatten_hermes_history_content(part) for part in content]
+        return "\n".join(part.strip() for part in parts if str(part or "").strip())
+    return ""
 
 
 def _normalize_hermes_run_history_message(message, max_message_chars):
@@ -5712,24 +5758,41 @@ def _limit_hermes_run_history(messages, max_messages, max_chars):
     return selected
 
 
-def _load_hermes_run_conversation_history(client, session_id):
+def _load_hermes_run_conversation_history(client, session_id, *, require_history=False, current_prompt=""):
     """Load persisted Hermes context for /v1/runs without reading private state.db."""
     session_id = str(session_id or "").strip()
     if not session_id:
-        return [], ""
+        return None, ""
 
     try:
-        result = client.get_session_messages(session_id)
+        if callable(getattr(client, "session_messages", None)):
+            result = client.session_messages(session_id, limit=500, order="oldest")
+        else:
+            result = client.get_session_messages(session_id)
     except Exception as exc:
-        print(f"[HERMES] Failed to load run history for {session_id}: {exc}")
-        return [], session_id
+        if require_history:
+            raise RuntimeError(f"Hermes session history could not be loaded: {exc}") from exc
+        return None, session_id
 
-    if not result.get("ok"):
-        if not result.get("notFound"):
-            print(f"[HERMES] Failed to load run history for {session_id}: {result.get('error') or 'unknown error'}")
-        return [], session_id
+    if not isinstance(result, dict):
+        if require_history:
+            raise RuntimeError("Hermes Sessions API returned an invalid history response")
+        return None, session_id
+    if result.get("ok") is False:
+        error = str(result.get("error") or "Hermes Sessions API history request failed")
+        if require_history:
+            raise RuntimeError(error)
+        return None, session_id
 
-    raw_messages = result.get("data") if isinstance(result.get("data"), list) else []
+    raw_messages = result.get("data")
+    if raw_messages is None:
+        raw_messages = result.get("messages")
+    if raw_messages is None:
+        raw_messages = []
+    if not isinstance(raw_messages, list):
+        if require_history:
+            raise RuntimeError("Hermes Sessions API returned invalid message data")
+        return None, session_id
     limits = _hermes_run_history_limits()
     normalized = [
         item for item in (
@@ -5739,10 +5802,42 @@ def _load_hermes_run_conversation_history(client, session_id):
         if item
     ]
     history = _limit_hermes_run_history(normalized, limits["maxMessages"], limits["maxChars"])
+    if history and current_prompt and history[-1].get("role") == "user" and history[-1].get("content") == str(current_prompt).strip():
+        history.pop()
     resolved_session_id = str(result.get("session_id") or session_id).strip() or session_id
-    if history:
-        print(f"[HERMES] Loaded {len(history)} prior run-history messages for session {resolved_session_id}")
     return history, resolved_session_id
+
+
+def _hermes_agent_capability(agent, capability):
+    capabilities = agent.get("capabilities") if isinstance((agent or {}).get("capabilities"), dict) else {}
+    return bool(capabilities.get(capability))
+
+
+def _prepare_hermes_run_context(client, agent, profile, requested_session_id="", current_prompt=""):
+    """Resolve a selected session and hydrate it before a run is submitted.
+
+    Hermes uses ``session_id`` for persistence/addressing, but ``/v1/runs`` does
+    not reconstruct prior turns. Existing sessions must therefore be read via
+    the authenticated Sessions API and supplied as ``conversation_history``.
+    """
+    requested = str(requested_session_id or "").strip()
+    tracked = str(_get_hermes_session_id(profile) or "").strip()
+    existing_session_id = requested or tracked
+    safe_profile = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(profile or "default")).strip("-") or "default"
+    session_id = existing_session_id or f"vo-hermes-{safe_profile}-{uuid.uuid4().hex}"
+    conversation_history = None
+    if (
+        existing_session_id
+        and _hermes_agent_capability(agent, "sessionSwitch")
+        and (callable(getattr(client, "session_messages", None)) or callable(getattr(client, "get_session_messages", None)))
+    ):
+        conversation_history, session_id = _load_hermes_run_conversation_history(
+            client,
+            session_id,
+            require_history=True,
+            current_prompt=current_prompt,
+        )
+    return session_id, conversation_history
 
 
 def _hermes_tool_activity_messages(tools, agent_id="", run_id="", base_ts=None, coerce_complete=False):
@@ -6051,7 +6146,7 @@ def _build_hermes_delivery_message(agent, agent_key, message, body):
     }
 
 
-def _handle_hermes_api_chat(agent, profile, delivery_message, original_message, timeout, on_progress=None):
+def _handle_hermes_api_chat(agent, profile, delivery_message, original_message, timeout, on_progress=None, requested_session_id="", prepared_context=None):
     """Run a Hermes turn through the native Hermes API Server + SSE events."""
     agent_id = agent.get("id") or agent.get("statusKey") or "hermes-default"
     status_key = agent.get("statusKey") or agent_id
@@ -6059,18 +6154,39 @@ def _handle_hermes_api_chat(agent, profile, delivery_message, original_message, 
     if not client.is_available():
         return {"ok": False, "fallback": True, "error": "Hermes API Server is not available"}
 
-    session_id = _get_hermes_session_id(profile) or f"vo-hermes-{_normalize_hermes_connection_id(profile)}"
+    try:
+        session_id, conversation_history = prepared_context or _prepare_hermes_run_context(
+            client, agent, profile,
+            requested_session_id=requested_session_id,
+            current_prompt=delivery_message,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "fallback": False,
+            "code": "session_history_unavailable",
+            "error": f"Hermes session history could not be loaded; the run was not started: {exc}",
+            "providerPath": "api",
+        }
     session_key = f"virtual-office:hermes:{profile}"
-    conversation_history, session_id = _load_hermes_run_conversation_history(client, session_id)
-    started = client.start_run(
-        delivery_message,
-        session_id=session_id,
-        session_key=session_key,
-        conversation_history=conversation_history,
-    )
+    try:
+        started = client.start_run(
+            delivery_message,
+            session_id=session_id,
+            session_key=session_key,
+            conversation_history=conversation_history,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "fallback": False,
+            "code": "run_submission_ambiguous",
+            "error": f"Hermes run submission may have been accepted; automatic fallback was stopped: {exc}",
+            "providerPath": "api",
+        }
     run_id = started.get("run_id")
     if not run_id:
-        return {"ok": False, "fallback": True, "error": started.get("error") or "Hermes API did not return a run_id"}
+        return {"ok": False, "fallback": False, "code": "run_submission_ambiguous", "error": started.get("error") or "Hermes API did not return a run_id; automatic fallback was stopped"}
 
     _set_hermes_session_id(profile, session_id)
     gateway_presence.set_provider_event(status_key, "hermes", {"event": "run.started", "run_id": run_id})
@@ -6324,6 +6440,23 @@ def _handle_hermes_run_start(body):
         }
 
     delivery = _build_hermes_delivery_message(agent, agent_key, message, body)
+    requested_session_id = str(body.get("sessionId") or body.get("session_id") or "").strip()
+    try:
+        session_id, conversation_history = _prepare_hermes_run_context(
+            client,
+            agent,
+            profile,
+            requested_session_id=requested_session_id,
+            current_prompt=delivery["deliveryMessage"],
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "fallback": False,
+            "code": "session_history_unavailable",
+            "error": f"Hermes session history could not be loaded; the run was not started: {exc}",
+            "_status": 502,
+        }
     now_ms = int(time.time() * 1000)
     history = _load_hermes_history(profile)
     history.append({
@@ -6340,18 +6473,25 @@ def _handle_hermes_run_start(body):
     })
     _save_hermes_history(profile, history)
 
-    session_id = _get_hermes_session_id(profile) or f"vo-hermes-{_normalize_hermes_connection_id(profile)}"
     session_key = f"virtual-office:hermes:{connection_id}"
-    conversation_history, session_id = _load_hermes_run_conversation_history(client, session_id)
-    started = client.start_run(
-        delivery["deliveryMessage"],
-        session_id=session_id,
-        session_key=session_key,
-        conversation_history=conversation_history,
-    )
+    try:
+        started = client.start_run(
+            delivery["deliveryMessage"],
+            session_id=session_id,
+            session_key=session_key,
+            conversation_history=conversation_history,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "fallback": False,
+            "code": "run_submission_ambiguous",
+            "error": f"Hermes run submission may have been accepted; automatic fallback was stopped: {exc}",
+            "_status": 502,
+        }
     run_id = started.get("run_id") or started.get("runId") or started.get("id")
     if not run_id:
-        return {"ok": False, "fallback": True, "error": started.get("error") or "Hermes API did not return a run_id", "_status": 502}
+        return {"ok": False, "fallback": False, "code": "run_submission_ambiguous", "error": started.get("error") or "Hermes API did not return a run_id; automatic fallback was stopped", "_status": 502}
 
     _set_hermes_session_id(profile, session_id)
     _remember_hermes_active_run({
@@ -6772,6 +6912,24 @@ def _handle_hermes_chat(body):
     if attachment_context:
         delivery_message = f"{delivery_message}\n\n{attachment_context}"
 
+    requested_session_id = str(body.get("sessionId") or body.get("session_id") or _get_hermes_session_id(profile) or "").strip()
+    try:
+        prepared_context = _prepare_hermes_run_context(
+            _hermes_api_client_for_profile(agent),
+            agent,
+            profile,
+            requested_session_id=requested_session_id,
+            current_prompt=delivery_message,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "fallback": False,
+            "code": "session_history_unavailable",
+            "error": f"Hermes session history could not be loaded; the run was not started: {exc}",
+            "_status": 502,
+        }
+
     now_ms = int(time.time() * 1000)
     history = _load_hermes_history(profile)
     history.append({
@@ -6803,7 +6961,7 @@ def _handle_hermes_chat(body):
     _save_hermes_history(profile, history)
 
     try:
-        session_id = _get_hermes_session_id(profile)
+        session_id = requested_session_id
         result = _handle_hermes_api_chat(
             agent,
             profile,
@@ -6811,6 +6969,8 @@ def _handle_hermes_chat(body):
             message,
             timeout,
             on_progress=body.get("_onProgress") if callable(body.get("_onProgress")) else None,
+            requested_session_id=session_id,
+            prepared_context=prepared_context,
         )
         used_api = True
 
@@ -8383,10 +8543,31 @@ def handle_chat_session_create(agent_id, body=None):
     kind = agent_ref["providerKind"]
     profile = agent_ref["profile"]
     if kind == "hermes":
-        _save_hermes_state(profile, {"messages": [], "sessionId": ""})
+        capabilities = (agent_ref.get("record") or {}).get("capabilities") or {}
+        session_id = f"vo-hermes-{re.sub(r'[^A-Za-z0-9_.-]+', '-', str(profile or 'default'))}-{uuid.uuid4().hex}"
+        if capabilities.get("sessionCreate"):
+            try:
+                outcome = _hermes_api_client_for_profile(agent_ref.get("record") or profile).create_session(
+                    session_id=session_id,
+                    title=str((body or {}).get("title") or "Virtual Office chat")[:200],
+                    source="virtual-office",
+                )
+                if isinstance(outcome, dict) and outcome.get("ok") is False:
+                    return {"ok": False, "error": outcome.get("error") or "Hermes session creation failed"}, 502
+                created = outcome.get("session") if isinstance(outcome, dict) and isinstance(outcome.get("session"), dict) else outcome
+                session_id = str((created or {}).get("id") or (created or {}).get("session_id") or session_id)
+            except Exception as exc:
+                return {"ok": False, "error": f"Hermes session creation failed: {exc}"}, 502
+        _save_hermes_state(profile, {"messages": [], "sessionId": session_id})
         _save_provider_history(kind, profile, [])
-        _save_provider_active_session(kind, profile, "", source="new-session", newSessionPending=True)
-        return {"ok": True, "providerKind": kind, "profile": profile, "sessionId": "", "note": "New Hermes session starts with the next message."}, 200
+        _save_provider_active_session(kind, profile, session_id, source="new-session", newSessionPending=False)
+        return {
+            "ok": True,
+            "providerKind": kind,
+            "profile": profile,
+            "sessionId": session_id,
+            "sessionKey": f"hermes:{profile}:{session_id}",
+        }, 200
     if kind == "codex":
         _save_codex_state(profile, {"messages": [], "sessionId": ""})
         _clear_codex_token_usage(profile)
@@ -8502,12 +8683,15 @@ def handle_chat_session_switch(agent_id, session_id, body=None):
             _save_hermes_state(profile, {"messages": messages[-500:], "sessionId": session_id})
             _save_provider_history(kind, profile, messages)
             _save_provider_active_session(kind, profile, session_id, source="manual-switch")
-            return {"ok": True, "providerKind": kind, "sessionId": session_id, "messages": messages}, 200
+            return {"ok": True, "providerKind": kind, "profile": profile, "sessionId": session_id, "sessionKey": f"hermes:{profile}:{session_id}", "messages": messages}, 200
         try:
             client = _hermes_api_client_for_profile(agent_ref.get("record") or profile)
             metadata = client.get_session(session_id)
-            transcript = client.get_session_messages(session_id)
-            if not transcript.get("ok"):
+            if callable(getattr(client, "session_messages", None)):
+                transcript = client.session_messages(session_id, limit=500, order="oldest")
+            else:
+                transcript = client.get_session_messages(session_id)
+            if transcript.get("ok") is False:
                 return {"ok": False, "error": transcript.get("error") or "Hermes session read failed"}, 502
             session = metadata.get("session") if isinstance(metadata.get("session"), dict) else {"id": session_id}
             session = {**session, "id": session.get("id") or session_id, "messages": transcript.get("data") or []}
@@ -8517,7 +8701,7 @@ def handle_chat_session_switch(agent_id, session_id, body=None):
         _save_hermes_state(profile, {"messages": messages, "sessionId": session_id})
         _save_provider_history(kind, profile, messages)
         _save_provider_active_session(kind, profile, session_id, source="manual-switch")
-        return {"ok": True, "providerKind": kind, "sessionId": session_id, "messages": messages}, 200
+        return {"ok": True, "providerKind": kind, "profile": profile, "sessionId": session_id, "sessionKey": f"hermes:{profile}:{session_id}", "messages": messages}, 200
     if kind == "codex":
         outcome = _codex_provider().read_thread(profile, session_id)
         if not outcome.get("ok"):
@@ -8577,8 +8761,7 @@ def _hermes_session_to_chat_messages(session, agent_ref):
         role = str(msg.get("role") or "")
         if role == "tool":
             continue
-        content = msg.get("content")
-        text = content if isinstance(content, str) else json.dumps(content)[:2000] if content else ""
+        text = _flatten_hermes_history_content(msg.get("content")).strip()
         tools = []
         for call in msg.get("tool_calls") or []:
             if isinstance(call, dict):
@@ -10101,10 +10284,11 @@ def _handle_skill_list(agent_key):
                 "relativePath": f"{relative_dir}/SKILL.md",
                 "valid": not validation_error,
                 "validationError": validation_error,
+                "revision": hashlib.sha256(content.encode("utf-8")).hexdigest(),
             })
-            if len(skills) >= 200:
+            if len(skills) >= 500:
                 break
-        if len(skills) >= 200:
+        if len(skills) >= 500:
             break
     return {"skills": skills, "roots": [{k: v for k, v in root.items() if k != "absolutePath"} for root in roots]}
 
@@ -10136,14 +10320,14 @@ def _handle_skill_write(agent_key, skill_name, body):
     if not name:
         return {"error": "Skill name is required", "_status": 400}
 
-    # Sanitize name
-    safe_name = re.sub(r'[^a-zA-Z0-9_-]', '-', name).strip('-')
-    if not safe_name:
+    safe_name = _safe_workspace_relpath(name)
+    parts = safe_name.split("/") if safe_name else []
+    if not parts or len(parts) > 6 or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", part) for part in parts):
         return {"error": "Invalid skill name", "_status": 400}
 
     if not content:
         content = f"---\nname: {safe_name}\ndescription: \"Agent workflow skill.\"\n---\n\n# {name}\n\nUse this skill when...\n"
-    validation_error = _validate_skill_content(content, safe_name)
+    validation_error = _validate_skill_content(content, parts[-1])
     if validation_error:
         return {"error": validation_error, "code": "invalid_skill", "_status": 400}
 
@@ -10162,9 +10346,16 @@ def _handle_skill_write(agent_key, skill_name, body):
         os.makedirs(os.path.dirname(backup_file), exist_ok=True)
         shutil.copy2(skill_file, backup_file)
 
+    expected_revision = str(body.get("revision") or body.get("expectedRevision") or "")
+    if os.path.isfile(skill_file) and expected_revision:
+        with open(skill_file, "rb") as handle:
+            current_revision = hashlib.sha256(handle.read()).hexdigest()
+        if current_revision != expected_revision:
+            return {"error": "This skill changed after it was opened. Reload it before saving.", "code": "revision_conflict", "currentRevision": current_revision, "_status": 409}
     _atomic_write_text(skill_file, content)
 
-    return {"ok": True, "skill": safe_name, "path": skill_file, "rootId": root.get("id")}
+    revision = hashlib.sha256(str(content).encode("utf-8")).hexdigest()
+    return {"ok": True, "skill": safe_name, "path": skill_file, "rootId": root.get("id"), "revision": revision}
 
 
 # ─── SKILLS LIBRARY HANDLERS ─────────────────────────────────────
@@ -14377,10 +14568,19 @@ def _sync_provider_active_session(agent, force=False):
     newest_id = str(newest.get("id") or "")
     newest_epoch = _provider_updated_epoch(newest.get("updatedAt"))
     selected_at = float(state.get("selectedAt") or 0)
+    # A native session list is commonly newest-first but some runtimes (Hermes
+    # included) do not attach a usable updated timestamp.  Do not let that
+    # ambiguous ordering immediately undo an explicit UI selection or a newly
+    # created Virtual Office session.  Automatic/native-follow selections may
+    # still follow newest-first lists when timestamps are unavailable.
+    explicit_selection = str(state.get("source") or "") in {"manual-switch", "new-session", "sdk-run"}
     should_import = not current_id or (
         newest_id
         and newest_id != current_id
-        and (newest_epoch <= 0 or newest_epoch > selected_at)
+        and (
+            newest_epoch > selected_at
+            or (newest_epoch <= 0 and not explicit_selection)
+        )
     ) or (
         newest_id == current_id
         and newest_epoch > float(state.get("nativeUpdatedEpoch") or 0)

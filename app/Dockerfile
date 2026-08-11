@@ -2,8 +2,10 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install dependencies
-RUN pip install --no-cache-dir websockets
+# Install dependencies. Pin the installer above the audited vulnerable base
+# version so the shipped image does not retain known pip advisories.
+RUN python -m pip install --no-cache-dir --upgrade pip==26.2.1 \
+    && python -m pip install --no-cache-dir websockets==17.0.1
 
 # Copy application files
 COPY . .

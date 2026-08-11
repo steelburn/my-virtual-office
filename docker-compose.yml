@@ -1,6 +1,6 @@
 services:
   virtual-office:
-    image: ghcr.io/eliautobot/my-virtual-office:latest
+    image: ${VO_IMAGE:-ghcr.io/eliautobot/my-virtual-office:latest}
     container_name: virtual-office
     ports:
       - "${VO_PORT:-8090}:${VO_PORT:-8090}"
@@ -12,6 +12,9 @@ services:
       - ${VO_OPENCLAW_PATH:-~/.openclaw}:/openclaw
       # Persistent office data (layout, presence snapshots, config)
       - vo-data:/data
+      # Hermes runtime traffic uses its authenticated API. This separate,
+      # narrowly scoped mount is only for declared profile resources/skills.
+      - ${VO_HERMES_HOST_DATA:-~/.hermes}:${VO_HERMES_RESOURCE_ROOT:-/data/hermes}:${VO_HERMES_RESOURCE_VOLUME_MODE:-rw}
     environment:
       - VO_OPENCLAW_PATH=/openclaw
       # Optional host/Gateway namespace for the same mounted directory. The
@@ -31,6 +34,11 @@ services:
       - VO_HERMES_CONNECTIONS_JSON=${VO_HERMES_CONNECTIONS_JSON:-[]}
       - VO_HERMES_LOCAL_PROFILES_ENABLED=${VO_HERMES_LOCAL_PROFILES_ENABLED:-false}
       - VO_HERMES_HOME=${VO_HERMES_HOME:-/data/hermes-home}
+      - VO_HERMES_RESOURCE_ROOT=${VO_HERMES_RESOURCE_ROOT:-/data/hermes}
+      - VO_HERMES_RESOURCE_ACCESS=${VO_HERMES_RESOURCE_ACCESS:-read-write}
+      - VO_HERMES_CONTEXT_MAX_MESSAGES=${VO_HERMES_CONTEXT_MAX_MESSAGES:-120}
+      - VO_HERMES_CONTEXT_MAX_CHARS=${VO_HERMES_CONTEXT_MAX_CHARS:-120000}
+      - VO_HERMES_CONTEXT_MAX_MESSAGE_CHARS=${VO_HERMES_CONTEXT_MAX_MESSAGE_CHARS:-32000}
       - VO_HERMES_BIN=${VO_HERMES_BIN:-hermes}
       # Optional native Codex support. Install codex in the image/container PATH
       # or set VO_CODEX_BIN to an absolute path available inside the container.
@@ -75,12 +83,37 @@ services:
       - VO_ANTIGRAVITY_WORKSPACE_ROOT=${VO_ANTIGRAVITY_WORKSPACE_ROOT:-/data/antigravity-agents}
       - VO_ANTIGRAVITY_PRINT_TIMEOUT=${VO_ANTIGRAVITY_PRINT_TIMEOUT:-5m}
     restart: unless-stopped
+    networks:
+      - default
+      - hermes-internal
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${VO_PORT:-8090}/health')"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  # Optional dedicated Hermes runtime. Enable with `--profile hermes` only
+  # after setting a strong VO_HERMES_API_KEY and configuring Virtual Office's
+  # gateway URL as http://hermes:8642. Port 8642 is never published to the host.
+  hermes:
+    profiles: ["hermes"]
+    image: ${VO_HERMES_IMAGE:-nousresearch/hermes-agent:v2026.8.3}
+    container_name: virtual-office-hermes
+    volumes:
+      - ${VO_HERMES_HOST_DATA:-~/.hermes}:/opt/data
+    environment:
+      - HERMES_UID=${VO_HERMES_UID:-10000}
+      - HERMES_GID=${VO_HERMES_GID:-10000}
+      - API_SERVER_ENABLED=true
+      - API_SERVER_HOST=0.0.0.0
+      - API_SERVER_KEY=${VO_HERMES_API_KEY:-}
+    expose:
+      - "8642"
+    command: ["gateway", "run"]
+    restart: unless-stopped
+    networks:
+      - hermes-internal
 
   # Optional: Agent Browser (uncomment to enable)
   # Gives AI agents a real Google Chrome browser they can control via CDP.
@@ -124,3 +157,7 @@ services:
 volumes:
   vo-data:
   # browser-data:  # Uncomment if using agent-browser
+
+networks:
+  hermes-internal:
+    internal: true

@@ -12,6 +12,11 @@
   "hermes": {
     "enabled": true,
     "timeoutSec": 600,
+    "resourceRoot": "/data/hermes",
+    "resourceAccess": "read-write",
+    "runHistoryMaxMessages": 120,
+    "runHistoryMaxChars": 120000,
+    "runHistoryMaxMessageChars": 32000,
     "connections": []
   },
   "presence": {

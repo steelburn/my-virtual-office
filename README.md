@@ -22,9 +22,13 @@ For Docker deployments, mount your OpenClaw home directory into the container an
 
 ### Hermes Agents
 
-Virtual Office connects to Hermes as an external client of Hermes' authenticated API Server. Hermes itself owns each profile, gateway process, tools, sessions, credentials, model configuration, and terminal environment. Virtual Office uses `/v1/runs`, SSE events, approvals, stops, and the documented session API; it never starts Hermes or runs the Hermes CLI inside the Virtual Office container.
+Virtual Office connects to Hermes as an external client of Hermes' authenticated API Server. Hermes itself owns each profile, gateway process, tools, sessions, credentials, model configuration, and terminal environment. Virtual Office uses `/v1/runs`, SSE events, approvals, stops, models, and the documented session API. Runtime traffic and profile-resource access are separate: an optional, narrowly scoped profile-data mount exposes declared SOUL/profile/workspace/skill sources without installing a duplicate Hermes CLI or mounting the Docker socket.
 
-Run one native Hermes gateway per profile and add one connection per gateway in **Settings → Integrations → Hermes**. Each connection has a stable ID, display name, API URL, and `API_SERVER_KEY`. Docker deployments commonly use `http://host.docker.internal:<port>`; host-network deployments can use `http://127.0.0.1:<port>`. You may also supply the repeatable connection list through `VO_HERMES_CONNECTIONS_JSON`. Do not mount the Hermes home directory or CLI into Virtual Office.
+Run one native Hermes gateway per profile and add one connection per gateway in **Settings → Integrations → Hermes**. Each connection has a stable ID, display name, API URL, `API_SERVER_KEY`, optional exact mounted profile path, and inherited/read-write/read-only/disabled resource policy. Docker deployments commonly use `http://host.docker.internal:<port>`; host-network deployments can use `http://127.0.0.1:<port>`. You may also supply the repeatable connection list through `VO_HERMES_CONNECTIONS_JSON`.
+
+Hermes `/v1/runs` does not automatically hydrate older turns from `session_id`. On every continuing session, Virtual Office reads authenticated session history, removes tool-protocol/internal rows, applies bounded context limits, and supplies `conversation_history`. If a selected existing session cannot be hydrated, the run is rejected before submission instead of silently losing context. The native Hermes and universal Provider SDK paths share this behavior.
+
+The optional Compose `hermes` profile runs the pinned `nousresearch/hermes-agent:v2026.8.3` image as a separate container on an internal-only network. It exposes port 8642 only to Virtual Office, keeps `/opt/data` persistent, and is not recreated when only the Virtual Office service is rebuilt. See [Hermes Provider Adapter](docs/HERMES_PROVIDER_ADAPTER.md) for setup and migration details.
 
 Virtual Office also ships a Hermes Messaging Gateway platform plugin under `integrations/hermes-platform/my_virtual_office/`. This is a different mode: Hermes gateway connects to Virtual Office as a messaging platform, so the `Hermes Gateway` office agent can receive queued Virtual Office messages and post replies back into visible office chat. Configure `VO_HERMES_PLATFORM_TOKEN` on Virtual Office, copy the plugin into `~/.hermes/plugins/my_virtual_office/`, set `MY_VIRTUAL_OFFICE_URL` and `MY_VIRTUAL_OFFICE_TOKEN` for Hermes, then run `hermes gateway`.
 
@@ -239,10 +243,18 @@ All settings live in `vo-config.json`. Environment variables override config val
 | `VO_OPENCLAW_GATEWAY_PATH` | auto-detected | OpenClaw home path in the external Gateway's filesystem namespace |
 | `VO_HERMES_ENABLED` | true | Enable native Hermes API connections |
 | `VO_HERMES_CONNECTIONS_JSON` | `[]` | JSON list of native gateway connections (`id`, `name`, `apiUrl`, `apiKey`) |
+| `VO_HERMES_HOST_DATA` | ~/.hermes | Host Hermes data/profile root mounted only for declared resources |
+| `VO_HERMES_RESOURCE_ROOT` | /data/hermes | Hermes data root as visible inside Virtual Office |
+| `VO_HERMES_RESOURCE_ACCESS` | read-write | Mounted resource policy: `read-write`, `read-only`, or `disabled` |
+| `VO_HERMES_RESOURCE_VOLUME_MODE` | rw | Docker bind mode; use `ro` for Docker-enforced read-only access |
+| `VO_HERMES_CONTEXT_MAX_MESSAGES` | 120 | Maximum recent user/assistant rows replayed to a continuing run |
+| `VO_HERMES_CONTEXT_MAX_CHARS` | 120000 | Total replayed Hermes context characters |
+| `VO_HERMES_CONTEXT_MAX_MESSAGE_CHARS` | 32000 | Per-message replay limit |
 | `VO_HERMES_TIMEOUT_SEC` | 600 | Timeout for Hermes API runs |
 | `VO_HERMES_LOCAL_PROFILES_ENABLED` | false | Discover local Hermes profiles in `VO_HERMES_HOME` |
 | `VO_HERMES_HOME` | /data/hermes-home | Hermes native home visible inside the container |
 | `VO_HERMES_BIN` | hermes | Hermes executable visible inside the container |
+| `VO_HERMES_IMAGE` | nousresearch/hermes-agent:v2026.8.3 | Deliberately pinned optional Hermes sidecar image |
 | `VO_HERMES_PLATFORM_ENABLED` | false unless token is set | Enable the separate Hermes Messaging Gateway platform bridge |
 | `VO_HERMES_PLATFORM_TOKEN` | *(none)* | Shared token required by the Hermes `my_virtual_office` platform plugin |
 | `VO_HERMES_PLATFORM_AGENT_ID` | hermes-gateway | Office agent ID for the Hermes Messaging Gateway platform |

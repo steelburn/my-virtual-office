@@ -50,14 +50,160 @@ class HermesProvider:
             or shutil.which("hermes")
             or "~/.local/bin/hermes"
         )
+        if self.binary and not os.path.isabs(self.binary):
+            self.binary = shutil.which(self.binary) or self.binary
         self.home_path = os.path.expanduser(
             self.home_path
             or os.environ.get("VO_HERMES_HOME")
             or "~/.hermes"
         )
 
+    def _binary_problem(self) -> str:
+        if not self.binary:
+            return "Hermes CLI is not configured"
+        if not os.path.exists(self.binary):
+            return f"Hermes CLI not found at {self.binary}"
+        if not os.path.isfile(self.binary):
+            return f"Hermes CLI path is not a file: {self.binary}"
+        if not os.access(self.binary, os.X_OK):
+            return f"Hermes CLI is not executable inside the Linux container: {self.binary}"
+        if str(self.binary).lower().endswith((".exe", ".cmd", ".bat", ".ps1")):
+            return "A Windows Hermes launcher cannot run inside the Linux container; use the authenticated Hermes API"
+        try:
+            with open(self.binary, "rb") as handle:
+                if handle.read(2) == b"MZ":
+                    return "A Windows Hermes executable cannot run inside the Linux container; use the authenticated Hermes API"
+        except OSError as exc:
+            return f"Hermes CLI cannot be read: {exc}"
+        return ""
+
     def is_available(self) -> bool:
-        return bool(self.enabled and self.binary and os.path.exists(self.binary) and self.home_path and os.path.isdir(self.home_path))
+        return bool(self.enabled and not self._binary_problem() and self.home_path and os.path.isdir(self.home_path))
+
+    @classmethod
+    def inspect_mounted_profile(
+        cls,
+        profile: str,
+        *,
+        data_root: str | None = None,
+        profile_path: str | None = None,
+        access: str = "read-write",
+    ) -> dict[str, Any]:
+        """Inspect an explicitly mounted Hermes profile independently of the CLI."""
+        requested_access = str(access or "read-write").strip().lower()
+        if requested_access not in {"disabled", "read-only", "read-write"}:
+            requested_access = "read-write"
+        result: dict[str, Any] = {
+            "available": False,
+            "readable": False,
+            "writable": False,
+            "path": "",
+            "access": requested_access,
+            "requestedAccess": requested_access,
+            "source": "explicit-profile" if str(profile_path or "").strip() else "data-root",
+            "reason": "",
+        }
+        if requested_access == "disabled":
+            result["reason"] = "Mounted Hermes profile resources are disabled for this connection."
+            return result
+
+        raw_profile = str(profile or "default").strip() or "default"
+        raw_path = str(profile_path or "").strip()
+        raw_root = str(data_root or "").strip()
+        configured = raw_path or raw_root
+        if not configured:
+            result["reason"] = "No Hermes profile data directory is configured."
+            return result
+        if re.match(r"^[A-Za-z]:[\\/]", configured) or configured.startswith("\\\\"):
+            result["reason"] = "The Hermes profile path must be visible inside the Linux server or container."
+            return result
+        configured = os.path.expanduser(configured)
+        if not os.path.isabs(configured):
+            result["reason"] = "The Hermes profile path must be an absolute server/container path."
+            return result
+
+        if raw_path:
+            candidate = os.path.abspath(configured)
+        else:
+            root = os.path.abspath(configured)
+            if raw_profile == "default":
+                candidate = root
+            else:
+                if (
+                    raw_profile in {".", ".."}
+                    or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", raw_profile)
+                    or cls._safe_suffix(raw_profile) != raw_profile
+                ):
+                    result["reason"] = "The Hermes profile id cannot be mapped safely below the data root."
+                    return result
+                candidate = os.path.abspath(os.path.join(root, "profiles", raw_profile))
+                try:
+                    if os.path.commonpath([root, candidate]) != root:
+                        result["reason"] = "The Hermes profile path escapes the configured data root."
+                        return result
+                    if os.path.exists(candidate) and os.path.commonpath([
+                        os.path.realpath(root), os.path.realpath(candidate)
+                    ]) != os.path.realpath(root):
+                        result["reason"] = "The Hermes profile directory resolves outside the configured data root."
+                        return result
+                except ValueError:
+                    result["reason"] = "The Hermes profile path is incompatible with the configured data root."
+                    return result
+
+        result["path"] = candidate
+        if not os.path.isdir(candidate):
+            result["reason"] = "The mounted Hermes profile directory was not found inside Virtual Office."
+            return result
+        if not os.access(candidate, os.R_OK | os.X_OK):
+            result["reason"] = "The mounted Hermes profile directory is not readable by Virtual Office."
+            return result
+
+        result["available"] = True
+        result["readable"] = True
+        try:
+            volume_read_only = bool(os.statvfs(candidate).f_flag & getattr(os, "ST_RDONLY", 1))
+        except OSError:
+            volume_read_only = True
+        result["writable"] = bool(
+            requested_access == "read-write"
+            and not volume_read_only
+            and os.access(candidate, os.W_OK | os.X_OK)
+        )
+        if not result["writable"]:
+            result["access"] = "read-only"
+        if requested_access == "read-only":
+            result["reason"] = "The mounted Hermes profile is configured for read-only access."
+        elif volume_read_only:
+            result["reason"] = "The mounted Hermes profile filesystem is read-only."
+        elif not result["writable"]:
+            result["reason"] = "The mounted Hermes profile is readable but not writable by Virtual Office."
+        return result
+
+    @staticmethod
+    def _atomic_owned_text(path: str, content: str, profile_home: str) -> None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            reference = os.stat(path)
+        except OSError:
+            reference = os.stat(profile_home)
+        tmp = f"{path}.tmp-{os.getpid()}-{threading.get_ident()}"
+        try:
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(content)
+                handle.flush()
+                try:
+                    os.fchmod(handle.fileno(), reference.st_mode & 0o777)
+                    os.fchown(handle.fileno(), reference.st_uid, reference.st_gid)
+                except OSError:
+                    pass
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+        finally:
+            try:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+            except OSError:
+                pass
 
     def _subprocess_env(self) -> dict[str, str]:
         """Environment for Hermes CLI calls.
@@ -404,14 +550,13 @@ class HermesProvider:
             "message": f"Hermes profile '{safe_profile}' created successfully",
         }
 
-    def update_profile(self, profile: str, patch: dict[str, Any]) -> dict[str, Any]:
+    def update_profile_at_home(self, profile_home: str, profile: str, patch: dict[str, Any]) -> dict[str, Any]:
         safe_profile = self._safe_profile_name(profile)
-        profile_home = self.home_path if safe_profile == "default" else os.path.join(self.home_path, "profiles", safe_profile)
         if not os.path.isdir(profile_home):
             return {"ok": False, "error": f"Hermes profile '{safe_profile}' was not found"}
         identity_path = os.path.join(profile_home, "IDENTITY.md")
-        profile_yaml = os.path.join(profile_home, "profile.yaml")
-        backup_id, backups = backup_files(profile_home, [identity_path, profile_yaml])
+        agents_path = os.path.join(profile_home, "AGENTS.md")
+        backup_id, backups = backup_files(profile_home, [identity_path, agents_path])
         current = {"name": safe_profile.replace("-", " ").title(), "role": "Hermes Agent", "emoji": "⚕️"}
         try:
             text = open(identity_path, "r", encoding="utf-8", errors="replace").read()
@@ -424,15 +569,20 @@ class HermesProvider:
         for key in current:
             if key in patch:
                 current[key] = str(patch.get(key) or "").strip()
-        with open(identity_path, "w", encoding="utf-8") as handle:
-            handle.write(
-                "# IDENTITY.md\n\n"
-                f"- **Name:** {current['name']}\n"
-                f"- **Creature:** {current['role']} — Hermes profile\n"
-                "- **Vibe:** Helpful, direct, ready to work\n"
-                f"- **Emoji:** {current['emoji']}\n"
-            )
-        if "role" in patch and safe_profile != "default":
+        self._atomic_owned_text(
+            identity_path,
+            "# IDENTITY.md\n\n"
+            f"- **Name:** {current['name']}\n"
+            f"- **Creature:** {current['role']} — Hermes profile\n"
+            "- **Vibe:** Helpful, direct, ready to work\n"
+            f"- **Emoji:** {current['emoji']}\n",
+            profile_home,
+        )
+        changed = ["IDENTITY.md"]
+        if "instructions" in patch:
+            self._atomic_owned_text(agents_path, str(patch.get("instructions") or ""), profile_home)
+            changed.append("AGENTS.md")
+        if "role" in patch and safe_profile != "default" and not self._binary_problem():
             subprocess.run(
                 [self.binary, "profile", "describe", safe_profile, "--text", str(current["role"])[:500]],
                 capture_output=True,
@@ -440,7 +590,12 @@ class HermesProvider:
                 timeout=30,
                 env=self._subprocess_env(),
             )
-        return {"ok": True, "profile": safe_profile, "backupId": backup_id, "backups": backups}
+        return {"ok": True, "profile": safe_profile, "changed": changed, "backupId": backup_id, "backups": backups}
+
+    def update_profile(self, profile: str, patch: dict[str, Any]) -> dict[str, Any]:
+        safe_profile = self._safe_profile_name(profile)
+        profile_home = self.home_path if safe_profile == "default" else os.path.join(self.home_path or "", "profiles", safe_profile)
+        return self.update_profile_at_home(profile_home or "", safe_profile, patch)
 
     def delete_agent(self, profile: str) -> dict[str, Any]:
         """Delete a Hermes profile through the public CLI."""
@@ -701,6 +856,16 @@ class HermesApiClient:
     def models(self) -> dict[str, Any]:
         return self._json_request("GET", "/v1/models")
 
+    def skills(self) -> dict[str, Any]:
+        return self._json_request("GET", "/v1/skills")
+
+    @staticmethod
+    def _session_path(session_id: str, suffix: str = "") -> str:
+        value = str(session_id or "").strip()
+        if not value:
+            raise ValueError("session_id is required")
+        return f"/api/sessions/{quote(value, safe='')}{suffix}"
+
     def is_available(self) -> bool:
         try:
             health = self.health()
@@ -754,6 +919,21 @@ class HermesApiClient:
                 "data": [],
             }
 
+    def session_messages(
+        self,
+        session_id: str,
+        *,
+        limit: int = 500,
+        offset: int = 0,
+        order: str = "oldest",
+    ) -> dict[str, Any]:
+        query = urllib.parse.urlencode({
+            "limit": max(1, min(int(limit), 500)),
+            "offset": max(0, int(offset)),
+            "order": "latest" if str(order).lower() == "latest" else "oldest",
+        })
+        return self._json_request("GET", self._session_path(session_id, f"/messages?{query}"))
+
     def list_sessions(self, limit: int = 40, offset: int = 0) -> dict[str, Any]:
         """List sessions through Hermes' documented REST session surface."""
         query = urllib.parse.urlencode({
@@ -767,6 +947,23 @@ class HermesApiClient:
         if not session_id:
             raise ValueError("session_id is required")
         return self._json_request("GET", f"/api/sessions/{quote(session_id, safe='')}")
+
+    def create_session(
+        self,
+        *,
+        session_id: str | None = None,
+        title: str | None = None,
+        model: str | None = None,
+        source: str = "api_server",
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"source": str(source or "api_server")[:80]}
+        if session_id:
+            body["session_id"] = str(session_id)
+        if title is not None:
+            body["title"] = str(title)[:200]
+        if model:
+            body["model"] = str(model)[:300]
+        return self._json_request("POST", "/api/sessions", body)
 
     def delete_session(self, session_id: str) -> dict[str, Any]:
         session_id = str(session_id or "").strip()
@@ -1387,6 +1584,7 @@ def discover_api_agents(
             return []
         caps = client.capabilities()
         features = caps.get("features") if isinstance(caps.get("features"), dict) else {}
+        endpoints = caps.get("endpoints") if isinstance(caps.get("endpoints"), dict) else {}
         if not (features.get("run_submission") and features.get("run_events_sse")):
             return []
         model = caps.get("model") or caps.get("model_name") or ""
@@ -1407,6 +1605,8 @@ def discover_api_agents(
     display_name = str(name or "").strip()
     if not display_name:
         display_name = "Hermes" if model == "hermes-agent" else model.replace("-", " ").replace("_", " ").title()
+    sessions = bool(features.get("session_resources") or endpoints.get("sessions"))
+    session_messages = bool(endpoints.get("session_messages"))
     return [{
         "id": f"hermes-{safe_connection_id}",
         "statusKey": f"hermes-{safe_connection_id}",
@@ -1431,6 +1631,19 @@ def discover_api_agents(
         "connectionModes": ["api"],
         "cliAvailable": False,
         "apiAvailable": True,
+        "capabilityOverrides": {
+            "sessions": sessions,
+            "sessionCreate": sessions and bool(endpoints.get("session_create")),
+            "sessionDelete": sessions and bool(endpoints.get("session_delete")),
+            "sessionSwitch": sessions and session_messages,
+            "skills": bool(features.get("skills_api") or endpoints.get("skills")),
+            "models": bool(endpoints.get("models", True)),
+            "profileEdit": False,
+            "resourcesRead": False,
+            "resourcesWrite": False,
+            "agentCreate": False,
+            "agentDelete": False,
+        },
     }]
 
 
