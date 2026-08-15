@@ -67,6 +67,7 @@ class ProviderManifest:
     provider_type: str = "runtime"
     enabled: bool = True
     capabilities: dict[str, bool] = field(default_factory=dict)
+    connection_schema: dict[str, Any] = field(default_factory=dict)
     creation_schema: dict[str, Any] = field(default_factory=dict)
     settings_schema: dict[str, Any] = field(default_factory=dict)
     resource_schema: list[dict[str, Any]] = field(default_factory=list)
@@ -91,6 +92,7 @@ class ProviderManifest:
             "providerType": self.provider_type,
             "enabled": self.enabled,
             "capabilities": dict(self.capabilities),
+            "connectionSchema": dict(self.connection_schema),
             "creationSchema": dict(self.creation_schema),
             "settingsSchema": dict(self.settings_schema),
             "resourceSchema": [dict(item) for item in self.resource_schema],
@@ -134,7 +136,7 @@ class ProviderRegistry:
 
     def discover_agents(self) -> list[dict[str, Any]]:
         agents: list[dict[str, Any]] = []
-        seen: set[tuple[str, str]] = set()
+        seen: set[tuple[str, str, str]] = set()
         for provider_id, provider in self._providers.items():
             manifest = self._manifest(provider)
             if not manifest.enabled or not manifest.capabilities.get("discover"):
@@ -147,7 +149,11 @@ class ProviderRegistry:
                 if not isinstance(row, dict):
                     continue
                 normalized = self._normalize_agent(provider_id, manifest, row)
-                stable_key = (provider_id, normalized["providerAgentId"])
+                stable_key = (
+                    provider_id,
+                    normalized["providerConnectionId"],
+                    normalized["providerAgentId"],
+                )
                 if stable_key in seen:
                     continue
                 seen.add(stable_key)
@@ -195,8 +201,38 @@ class ProviderRegistry:
             for capability, method_name in method_by_capability.items():
                 if manifest.capabilities.get(capability) and not callable(getattr(provider, method_name, None)):
                     errors.append(f"{capability} requires {method_name}()")
+            if manifest.capabilities.get("approvals"):
+                for method_name in ("pending_approval", "respond_approval"):
+                    if not callable(getattr(provider, method_name, None)):
+                        errors.append(f"approvals requires {method_name}()")
             if manifest.category != "agent-runtime":
                 errors.append("provider category must be agent-runtime")
+            transports = manifest.connection_schema.get("transports") if isinstance(manifest.connection_schema, dict) else None
+            if isinstance(transports, list) and transports:
+                transport_ids: set[str] = set()
+                for transport in transports:
+                    if not isinstance(transport, dict):
+                        errors.append("connectionSchema transports must be objects")
+                        continue
+                    transport_id = safe_provider_id(transport.get("id"))
+                    kind = str(transport.get("kind") or "")
+                    if not transport_id or transport_id in transport_ids:
+                        errors.append("connectionSchema transport ids must be unique and non-empty")
+                    transport_ids.add(transport_id)
+                    if kind == "network":
+                        if not transport.get("modeKey") or not transport.get("urlKey"):
+                            errors.append(f"network transport '{transport_id}' requires modeKey and urlKey")
+                        schemes = transport.get("schemes")
+                        if not isinstance(schemes, list) or not schemes:
+                            errors.append(f"network transport '{transport_id}' requires schemes")
+                        defaults = transport.get("defaultEndpoints")
+                        if not isinstance(defaults, list) or not defaults:
+                            errors.append(f"network transport '{transport_id}' requires defaultEndpoints")
+                    elif kind == "process":
+                        if not transport.get("executableKey"):
+                            errors.append(f"process transport '{transport_id}' requires executableKey")
+                    else:
+                        errors.append(f"unsupported connection transport kind: {kind or '(empty)'}")
             if not manifest.settings_schema:
                 errors.append("provider must declare settingsSchema for connection integration")
             if manifest.capabilities.get("agentCreate") and not (manifest.creation_schema.get("fields") or []):
@@ -259,7 +295,11 @@ class ProviderRegistry:
             directory = os.path.abspath(os.path.expanduser(str(raw_dir or "").strip()))
             if not directory or not os.path.isdir(directory):
                 continue
-            for path in sorted(Path(directory).glob("vo_provider_*.py")):
+            extension_paths = {
+                *Path(directory).glob("vo_provider_*.py"),
+                *Path(directory).glob("vw_provider_*.py"),
+            }
+            for path in sorted(extension_paths):
                 module_name = f"vo_provider_extension_{safe_provider_id(path.stem)}_{abs(hash(str(path)))}"
                 try:
                     spec = importlib.util.spec_from_file_location(module_name, path)
@@ -293,6 +333,8 @@ class ProviderRegistry:
                 normalized["provider_type"] = normalized.pop("providerType")
             if "creationSchema" in normalized and "creation_schema" not in normalized:
                 normalized["creation_schema"] = normalized.pop("creationSchema")
+            if "connectionSchema" in normalized and "connection_schema" not in normalized:
+                normalized["connection_schema"] = normalized.pop("connectionSchema")
             if "settingsSchema" in normalized and "settings_schema" not in normalized:
                 normalized["settings_schema"] = normalized.pop("settingsSchema")
             if "resourceSchema" in normalized and "resource_schema" not in normalized:

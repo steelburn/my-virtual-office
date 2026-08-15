@@ -235,17 +235,20 @@
         themesSection.setAttribute('aria-label', 'Theme studio');
         body.appendChild(themesSection);
         var categories = [
-            { id: 'general', label: 'General', indices: [2, 3, 7] },
-            { id: 'themes', label: 'Themes', indices: [] },
-            { id: 'connections', label: 'Connections', indices: [0, 1] },
-            { id: 'performance', label: 'Usage & Performance', indices: [4, 5] },
-            { id: 'integrations', label: 'Browser & Integrations', indices: [6] },
-            { id: 'data', label: 'Data & Reset', indices: [8] },
-            { id: 'help', label: 'Help', indices: [9] }
+            { id: 'general', label: 'General', titles: ['Office', 'Display', 'Preview Bubbles', 'Weather'] },
+            { id: 'themes', label: 'Themes', titles: [] },
+            { id: 'connections', label: 'Connections', titles: ['Provider SDK', 'OpenClaw Connection', 'Hermes Connections'] },
+            { id: 'performance', label: 'Usage & Performance', titles: ['API Usage', 'PC Performance'] },
+            { id: 'integrations', label: 'Browser & Integrations', titles: ['Agent Browser'] },
+            { id: 'data', label: 'Data & Reset', titles: ['Actions'] },
+            { id: 'help', label: 'Help', titles: ['Help'] }
         ];
         categories.forEach(function (category) {
-            category.indices.forEach(function (index) {
-                if (sections[index]) sections[index].dataset.category = category.id;
+            sections.forEach(function (section) {
+                var title = (section.querySelector('.mm-section-title') || {}).textContent || '';
+                if (category.titles.some(function (wanted) { return title.indexOf(wanted) !== -1; })) {
+                    section.dataset.category = category.id;
+                }
             });
         });
 

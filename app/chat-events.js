@@ -89,7 +89,14 @@
     }
 
     return prepared
-      .filter((item) => asText(item.text).trim() || item.media?.length || item.thinking || item.approval || item.tools.length)
+      .filter((item) => (
+        asText(item.text).trim()
+        || item.media?.length
+        || item.thinking
+        || item.approval
+        || item.meta?.approval
+        || item.tools.length
+      ))
       .map(({ _inputIndex, _timeMs, ...item }) => item);
   }
 
@@ -117,6 +124,7 @@
           fullText: '',
           committedText: '',
           segmentText: '',
+          segmentTs: 0,
           segmentOpen: false,
           afterBoundary: false,
           thinkingText: '',
@@ -132,19 +140,21 @@
     _freezeText(run, actions) {
       const text = asText(run.segmentText);
       if (run.segmentOpen && text.trim()) {
-        actions.push({ kind: 'text.finalize', runId: run.runId, text });
+        actions.push({ kind: 'text.finalize', runId: run.runId, text, ts: run.segmentTs || 0 });
         run.lastFinalizedText = text;
       } else if (run.segmentOpen) {
         actions.push({ kind: 'text.discard', runId: run.runId });
       }
       run.committedText = run.fullText;
       run.segmentText = '';
+      run.segmentTs = 0;
       run.segmentOpen = false;
       run.afterBoundary = true;
     }
 
     _applyText(run, event, actions) {
       const incoming = asText(event.text);
+      const eventTs = timestampMs(event.epochMs || event.ts || event.timestamp);
       if (event.kind === 'text.replace' && run.terminal && !run.segmentOpen) {
         const previousSegment = asText(run.lastFinalizedText);
         if (previousSegment && incoming === previousSegment) return;
@@ -188,6 +198,7 @@
         segment = run.fullText.slice(run.committedText.length);
       }
       run.segmentText = segment;
+      if (!run.segmentOpen && eventTs) run.segmentTs = eventTs;
       run.afterBoundary = false;
       run.terminal = false;
       run.status = 'running';
@@ -195,7 +206,8 @@
       actions.push({
         kind: run.segmentOpen ? 'text.update' : 'text.open',
         runId: run.runId,
-        text: segment
+        text: segment,
+        ts: run.segmentTs || eventTs || 0
       });
       run.segmentOpen = true;
     }
@@ -261,7 +273,7 @@
         const text = asText(event.text);
         if (!text.trim()) return actions;
         if (run.segmentOpen) this._freezeText(run, actions);
-        this._applyText(run, { kind: 'text.delta', text }, actions);
+        this._applyText(run, { kind: 'text.delta', text, ts: event.ts || event.epochMs || event.timestamp }, actions);
         this._freezeText(run, actions);
         return actions;
       }

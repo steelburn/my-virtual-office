@@ -1,7 +1,12 @@
 // Virtual Office Chat — Gateway WebSocket Client (Multi-Window)
 (() => {
   let GATEWAY_TOKEN = '';
+  let GATEWAY_URL = '';
+  let GATEWAY_TRANSPORT = 'proxy';
+  let GATEWAY_RPC_URL = '/api/openclaw/rpc';
+  let GATEWAY_EVENTS_URL = '/api/openclaw/events';
   let ws = null;
+  let gatewayEvents = null;
   let reqId = 0;
   let connected = false;
   let pendingCallbacks = {};
@@ -11,6 +16,26 @@
   let _modelBarInterval = null;
   let _sessionsListCache = { at: 0, promise: null, payload: null };
   const runOwners = new Map();
+  const LOCAL_GATEWAY_HOSTS = new Set(['127.0.0.1', 'localhost', '0.0.0.0', 'host.docker.internal']);
+
+  async function loadGatewayInfo() {
+    try {
+      const response = await fetch('/gateway-info', { cache: 'no-store', credentials: 'same-origin' });
+      const data = await response.json();
+      if (data.wsPort) _chatWsPort = data.wsPort;
+      GATEWAY_URL = typeof data.gatewayUrl === 'string' ? data.gatewayUrl.trim() : '';
+      GATEWAY_TRANSPORT = data.transport === 'direct' ? 'direct' : 'proxy';
+      GATEWAY_RPC_URL = typeof data.rpcUrl === 'string' && data.rpcUrl ? data.rpcUrl : '/api/openclaw/rpc';
+      GATEWAY_EVENTS_URL = typeof data.eventsUrl === 'string' && data.eventsUrl ? data.eventsUrl : '/api/openclaw/events';
+      GATEWAY_TOKEN = typeof data.token === 'string' ? data.token : '';
+      if (data.openclawVersion) GATEWAY_CLIENT_VERSION = data.openclawVersion;
+      if (data.gatewayProtocol) GATEWAY_PROTOCOL_VERSION = Number(data.gatewayProtocol) || 4;
+      return data;
+    } catch (error) {
+      console.warn('[chat] Failed to load Gateway info:', error);
+      return null;
+    }
+  }
 
   const MAX_INPUT_LINES = 15;
   const CHAT_STACK_GAP = 12;
@@ -161,6 +186,15 @@
     if (optionMatchesSelectedAgent(opt, selectedAgentKey)) {
       const baseParts = base.split(':');
       const currentParts = current.split(':');
+      // OpenClaw roster options advertise the agent's main session, while an
+      // explicit window may own any validated child session for that same
+      // agent. Preserve it across roster refreshes without ever carrying a
+      // session key across agent ids.
+      if (
+        baseParts[0] === 'agent' && currentParts[0] === 'agent'
+        && baseParts.length >= 3 && currentParts.length >= 3
+        && baseParts[1] === currentParts[1]
+      ) return current;
       if (baseParts.length === 2 && currentParts.length >= 3 && baseParts[0] === currentParts[0]) {
         return base + ':' + currentParts.slice(2).join(':');
       }
@@ -182,6 +216,26 @@
     const date = new Date(numeric > 1e12 ? numeric : numeric * 1000);
     if (Number.isNaN(date.getTime())) return '';
     return date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+
+  function providerHistorySessionIdFromKey(sessionKey, providerKind) {
+    const kind = String(providerKind || '').trim();
+    const value = String(sessionKey || '');
+    if (!kind || !value.startsWith(kind + ':')) return '';
+    const parts = value.split(':');
+    if (parts.length < 3) return '';
+    return parts.slice(2).join(':');
+  }
+
+  function providerSessionIdFromKey(sessionKey, providerKind) {
+    const sessionId = providerHistorySessionIdFromKey(sessionKey, providerKind);
+    return sessionId.startsWith('@new:') ? '' : sessionId;
+  }
+
+  function isPendingProviderSessionKey(sessionKey, providerKind) {
+    const kind = String(providerKind || '').trim();
+    if (!kind || !String(sessionKey || '').startsWith(kind + ':')) return false;
+    return String(sessionKey || '').split(':').slice(2).join(':').startsWith('@new:');
   }
 
   class ChatWindow {
@@ -568,7 +622,7 @@
       this.syncSelectionStatus();
       this.resetConversation(`${systemPrefix} ${opt.textContent.trim()}`);
       if (this.sessionsPanelOpen) this.refreshSessionsList({ showLoading: true });
-      const isHermes = this.isHermesSelected();
+      const isHermes = this.isNativeHermesSelected();
       const isCodex = this.isCodexSelected();
       const isClaudeCode = this.isClaudeCodeSelected();
       if (isHermes && this.isVisibleForPolling()) this.startHermesApprovalPolling();
@@ -606,6 +660,9 @@
             opt.dataset.providerType = a.providerType || 'runtime';
             opt.dataset.providerAgentId = a.providerAgentId || a.agentId;
             opt.dataset.providerConnectionId = a.providerConnectionId || a.providerAgentId || a.agentId;
+            opt.dataset.apiAvailable = a.apiAvailable ? 'true' : 'false';
+            opt.dataset.cliAvailable = a.cliAvailable ? 'true' : 'false';
+            opt.dataset.connectionModes = JSON.stringify(a.connectionModes || []);
             opt.dataset.selectionAliases = JSON.stringify(a.selectionAliases || []);
             opt.dataset.capabilities = JSON.stringify(a.capabilities || {});
             group.appendChild(opt);
@@ -658,6 +715,85 @@
       return opt?.dataset?.providerKind || 'openclaw';
     }
 
+    getSelectedProviderProfile() {
+      const opt = this.agentSelect?.selectedOptions?.[0];
+      return opt?.dataset?.providerAgentId || opt?.dataset?.agentId || 'main';
+    }
+
+    selectedProviderSessionId() {
+      return providerSessionIdFromKey(this.sessionKey, this.getSelectedProviderKind());
+    }
+
+    selectedProviderHistorySessionId() {
+      return providerHistorySessionIdFromKey(this.sessionKey, this.getSelectedProviderKind());
+    }
+
+    isPendingProviderSession() {
+      return isPendingProviderSessionKey(this.sessionKey, this.getSelectedProviderKind());
+    }
+
+    selectedProviderBaseSessionKey() {
+      const opt = this.agentSelect?.selectedOptions?.[0];
+      return opt?.dataset?.sessionKey || `${this.getSelectedProviderKind()}:${this.getSelectedProviderProfile()}`;
+    }
+
+    setSelectedSessionKey(sessionKey) {
+      const next = String(sessionKey || '').trim();
+      if (!next || next === this.sessionKey) return false;
+      this.sessionKey = next;
+      this.saveSelection();
+      return true;
+    }
+
+    adoptProviderSessionId(sessionId) {
+      const value = String(sessionId || '').trim();
+      const kind = this.getSelectedProviderKind();
+      if (!value || kind === 'openclaw') return false;
+      return this.setSelectedSessionKey(`${kind}:${this.getSelectedProviderProfile()}:${value}`);
+    }
+
+    registerRunOwner(runId, sessionKey = this.sessionKey) {
+      const value = String(runId || '').trim();
+      if (!value) return;
+      runOwners.set(value, {
+        slotId: this.slotId,
+        sessionKey: String(sessionKey || ''),
+        agentId: String(this.getSelectedAgentId() || this.selectedAgentKey || '')
+      });
+    }
+
+    registerProviderRun(runId, sessionKey = this.sessionKey) {
+      this.registerRunOwner(runId, sessionKey);
+    }
+
+    previewOwnerForRun(runId) {
+      const owner = runOwners.get(String(runId || '').trim());
+      return owner || {
+        slotId: this.slotId,
+        sessionKey: String(this.sessionKey || ''),
+        agentId: String(this.getSelectedAgentId() || this.selectedAgentKey || '')
+      };
+    }
+
+    acceptsProviderRunEvent(runId, data, eventName) {
+      const value = String(runId || '').trim();
+      const eventSessionId = String(data?.sessionId || '').trim();
+      const owner = value ? runOwners.get(value) : null;
+      let accepted = !owner || (owner.slotId === this.slotId && owner.sessionKey === this.sessionKey);
+      if (!owner && eventSessionId) {
+        const selectedSessionId = this.selectedProviderSessionId();
+        accepted = this.isPendingProviderSession() || !selectedSessionId || selectedSessionId === eventSessionId;
+      }
+      if (accepted && eventSessionId) {
+        this.adoptProviderSessionId(eventSessionId);
+        if (owner) owner.sessionKey = this.sessionKey;
+      }
+      if (!accepted && value && ['run.completed', 'run.failed', 'run.cancelled', 'run.canceled'].includes(eventName)) {
+        runOwners.delete(value);
+      }
+      return accepted;
+    }
+
     getSelectedCapabilities() {
       const opt = this.agentSelect?.selectedOptions?.[0];
       try {
@@ -700,6 +836,11 @@
       return this.getSelectedProviderKind() === 'hermes' || String(this.sessionKey || '').startsWith('hermes:');
     }
 
+    isNativeHermesSelected() {
+      const opt = this.agentSelect?.selectedOptions?.[0];
+      return this.isHermesSelected() && opt?.dataset?.apiAvailable === 'true';
+    }
+
     selectedHermesSessionId() {
       const active = this.activeSessionIdForPanel();
       if (active) return active;
@@ -721,11 +862,12 @@
 
     isGenericProviderSelected() {
       const kind = this.getSelectedProviderKind();
-      return kind !== 'openclaw' && kind !== 'hermes' && kind !== 'codex' && kind !== 'claude-code';
+      if (kind === 'hermes') return !this.isNativeHermesSelected();
+      return kind !== 'openclaw' && kind !== 'codex' && kind !== 'claude-code';
     }
 
     startHermesApprovalPolling() {
-      if (!this.isHermesSelected() || this.hermesApprovalPollTimer) return;
+      if (!this.isNativeHermesSelected() || this.hermesApprovalPollTimer) return;
       this.pollHermesApproval().catch(() => {});
       this.hermesApprovalPollTimer = setInterval(() => {
         this.pollHermesApproval().catch(() => {});
@@ -741,9 +883,12 @@
     }
 
     async pollHermesApproval() {
-      if (!this.isHermesSelected() || !this.isVisibleForPolling()) return;
+      if (!this.isNativeHermesSelected() || !this.isVisibleForPolling()) return;
       const agentId = this.getSelectedAgentId() || this.selectedAgentKey;
-      const res = await fetch('/api/hermes/approval/pending?agentId=' + encodeURIComponent(agentId));
+      const params = new URLSearchParams({ agentId });
+      const sessionId = this.selectedProviderSessionId();
+      if (sessionId) params.set('sessionId', sessionId);
+      const res = await fetch('/api/hermes/approval/pending?' + params.toString());
       const data = await res.json();
       if (!data.ok || !data.pending) return;
       this.appendHermesPendingApproval(data.pending, data.pending_count || 1);
@@ -907,6 +1052,9 @@
               meta: { ...meta, thinking: msg.thinking, reasoningTokens: msg.reasoningTokens || 0 }
             });
           }
+          if (msg.commentary) {
+            output.push({ role: 'assistant', text: msg.commentary, ts, meta });
+          }
           normalizeHermesTools(msg.tools || [], !isProgress).forEach((tool) => {
             output.push({ role: 'assistant', text: '', tools: [tool], ts, meta });
           });
@@ -1054,19 +1202,21 @@
       const historyRefreshSeq = ++this.historyRefreshSeq;
       const historyRequestIsStale = () => historyRefreshSeq !== this.historyRefreshSeq || !this.isVisibleForPolling();
       try {
-        if (this.isProviderAgentSelected()) {
+        if (this.isGenericProviderSelected()) {
           const agentId = this.getSelectedAgentId() || this.selectedAgentKey;
-          const selectedSessionId = this.isHermesSelected() ? this.selectedHermesSessionId() : '';
+          const selectedSessionId = this.selectedProviderSessionId();
+          const selectedHistorySessionId = this.selectedProviderHistorySessionId();
           let historyUrl = '/api/provider-history?agentId=' + encodeURIComponent(agentId);
-          if (selectedSessionId) historyUrl += '&sessionId=' + encodeURIComponent(selectedSessionId);
+          if (selectedHistorySessionId) historyUrl += '&sessionId=' + encodeURIComponent(selectedHistorySessionId);
           const res = await fetch(historyUrl);
           const data = await res.json();
           if (historyRequestIsStale()) { this.markHistoryDirty(); return; }
           if (!res.ok || data.ok === false) throw new Error(data.error || res.statusText);
-          if (data.providerKind === 'hermes' && data.sessionKey && data.sessionKey !== this.sessionKey) {
-            this.sessionKey = data.sessionKey;
-            this.saveSelection();
-          }
+          if (data.sessionKey && (
+            !selectedHistorySessionId
+            || data.requestedSessionId === selectedHistorySessionId
+            || data.activeSessionId === selectedHistorySessionId
+          )) this.setSelectedSessionKey(data.sessionKey);
           this.startProviderHistoryPolling();
           this.providerHistorySignature = this.providerHistorySignatureFor(data.messages || []);
           this.replaceHistoryMessages(() => {
@@ -1090,18 +1240,24 @@
           this.historyDirty = false;
           return;
         }
-        if (this.isHermesSelected() || this.isCodexSelected() || this.isClaudeCodeSelected()) {
-          const isHermes = this.isHermesSelected();
+        if (this.isNativeHermesSelected() || this.isCodexSelected() || this.isClaudeCodeSelected()) {
+          const isHermes = this.isNativeHermesSelected();
           const isCodex = this.isCodexSelected();
           const isClaudeCode = this.isClaudeCodeSelected();
           const providerPath = isHermes ? 'hermes' : (isClaudeCode ? 'claude-code' : 'codex');
           const progressMarker = isHermes ? 'hermes-progress' : (isClaudeCode ? 'claude-code-progress' : 'codex-progress');
           if (isHermes) this.startHermesApprovalPolling();
           if (isCodex) this.startCodexApprovalPolling();
-          const res = await fetch('/api/' + providerPath + '/history?agentId=' + encodeURIComponent(this.getSelectedAgentId() || this.selectedAgentKey));
+          const historyParams = new URLSearchParams({ agentId: this.getSelectedAgentId() || this.selectedAgentKey });
+          const selectedSessionId = this.selectedProviderSessionId();
+          if (selectedSessionId) historyParams.set('sessionId', selectedSessionId);
+          const res = await fetch('/api/' + providerPath + '/history?' + historyParams.toString());
           const data = await res.json();
           if (historyRequestIsStale()) { this.markHistoryDirty(); return; }
           if (data.ok && Array.isArray(data.messages)) {
+            if (data.sessionKey && (!selectedSessionId || data.requestedSessionId === selectedSessionId)) {
+              this.setSelectedSessionKey(data.sessionKey);
+            }
             this.applySessionMetrics(data);
             this.renderHistoryItems(this.providerHistoryItems(data.messages, progressMarker));
             this.scrollBottomAfterLayout();
@@ -1143,7 +1299,7 @@
 
     async newSession() {
       const agentName = this.agentSelect.selectedOptions[0]?.textContent.trim() || 'this agent';
-      if (!confirm(`Start a new session for ${agentName}? This clears the conversation history.`)) return;
+      if (!confirm(`Start a new session for ${agentName}? The current session will stay saved.`)) return;
       try {
         await this.createSessionFromPanel({ skipConfirm: true });
       } catch (e) {
@@ -1210,6 +1366,9 @@
 
     activeSessionIdForPanel() {
       if (this.getSelectedProviderKind() === 'openclaw' && !this.isProviderAgentSelected()) return this.sessionKey;
+      if (this.isPendingProviderSession()) return '@pending';
+      const selected = this.selectedProviderSessionId();
+      if (selected) return selected;
       const active = this.currentSessions.find(s => s.active);
       return active ? active.id : '';
     }
@@ -1235,13 +1394,16 @@
         const item = existingItems.get(sessionId) || document.createElement('div');
         item.className = 'chat-session-item';
         item.dataset.sessionId = sessionId;
-        if (session.id === selectedId || (session.active && data.providerKind !== 'openclaw')) item.classList.add('selected');
+        if (session.id === selectedId || (!selectedId && session.active && data.providerKind !== 'openclaw')) item.classList.add('selected');
         const renderKey = JSON.stringify([
           session.title || session.id,
           session.preview || '',
           !!session.liveMode,
           !!session.active,
           session.updatedAt || '',
+          session.messageCount || 0,
+          session.toolCallCount || 0,
+          session.model || '',
           !!session.deletable
         ]);
         if (item._chatSessionRenderKey !== renderKey) {
@@ -1271,6 +1433,21 @@
             const when = document.createElement('span');
             when.textContent = formatSessionTimestamp(session.updatedAt);
             meta.appendChild(when);
+          }
+          if (Number(session.messageCount || 0) > 0) {
+            const count = document.createElement('span');
+            count.textContent = `${Number(session.messageCount)} messages`;
+            meta.appendChild(count);
+          }
+          if (Number(session.toolCallCount || 0) > 0) {
+            const tools = document.createElement('span');
+            tools.textContent = `${Number(session.toolCallCount)} tools`;
+            meta.appendChild(tools);
+          }
+          if (session.model) {
+            const model = document.createElement('span');
+            model.textContent = String(session.model);
+            meta.appendChild(model);
           }
           if (meta.childNodes.length) content.push(meta);
 
@@ -1309,12 +1486,10 @@
         });
         const data = await res.json();
         if (!res.ok || !data.ok) throw new Error(data.error || res.statusText);
-        if (data.providerKind === 'hermes') {
-          this.sessionKey = data.sessionKey || session.sessionKey || `hermes:${data.profile || 'default'}:${data.sessionId || session.id}`;
-          saveChatSelection(this.slotId, { selectedAgentKey: this.selectedAgentKey, sessionKey: this.sessionKey });
-        }
+        this.setSelectedSessionKey(data.sessionKey || session.sessionKey || `${this.getSelectedProviderKind()}:${this.getSelectedProviderProfile()}:${data.sessionId || session.id}`);
         this.resetConversation('Switched to session: ' + (session.title || session.id));
-        await this.loadHistory();
+        if (Array.isArray(data.messages)) this.renderHistoryItems(this.providerHistoryItems(data.messages));
+        else await this.loadHistory();
         this.fetchSessionInfo();
         this.refreshSessionsList();
       } catch (e) {
@@ -1336,11 +1511,8 @@
         });
         const data = await res.json();
         if (!res.ok || !data.ok) throw new Error(data.error || res.statusText);
-        if (data.providerKind === 'hermes' && data.sessionId) {
-          this.sessionKey = data.sessionKey || `hermes:${data.profile || 'default'}:${data.sessionId}`;
-          saveChatSelection(this.slotId, { selectedAgentKey: this.selectedAgentKey, sessionKey: this.sessionKey });
-        }
-        this.resetConversation('New session started');
+        if (data.sessionKey) this.setSelectedSessionKey(data.sessionKey);
+        this.resetConversation('New session started — the previous session is still saved');
         await this.loadHistory();
         this.fetchSessionInfo();
         this.refreshSessionsList();
@@ -1360,7 +1532,12 @@
         });
         const data = await res.json();
         if (!res.ok || !data.ok) throw new Error(data.error || res.statusText);
-        if (session.sessionKey === this.sessionKey || session.active) {
+        const deletingCurrent = session.sessionKey === this.sessionKey
+          || session.id === this.selectedProviderSessionId()
+          || (this.getSelectedProviderKind() === 'openclaw' && session.id === this.sessionKey)
+          || (!this.selectedProviderSessionId() && !this.isPendingProviderSession() && session.active);
+        if (deletingCurrent) {
+          this.setSelectedSessionKey(this.selectedProviderBaseSessionKey());
           this.resetConversation('Session deleted');
           await this.loadHistory();
         }
@@ -1521,10 +1698,11 @@
       const params = { sessionKey: this.sessionKey, message: text || '(attached files)', idempotencyKey: `office-${Date.now()}-${Math.random().toString(36).slice(2)}` };
       if (attachments?.length) params.attachments = attachments;
 
-      if (this.isProviderAgentSelected()) {
+      if (this.isGenericProviderSelected()) {
         const providerKind = this.getSelectedProviderKind();
         const providerLabel = this.agentSelect.selectedOptions[0]?.textContent.trim() || providerKind;
         const sendStartedAt = Date.now();
+        const providerOriginSessionKey = this.sessionKey;
         this.updateTypingIndicator(providerLabel + ' is starting…');
         this.setStatus(providerLabel + ' running…', 'connecting');
         try {
@@ -1534,7 +1712,9 @@
             body:JSON.stringify({
               agentId:this.getSelectedAgentId() || this.selectedAgentKey,
               message:text || '(attached files)',
-              sessionId:this.isHermesSelected() ? this.selectedHermesSessionId() : (this.activeSessionIdForPanel() || ''),
+              sessionId:this.selectedProviderSessionId(),
+              sessionKey:providerOriginSessionKey,
+              newSessionPending:this.isPendingProviderSession(),
               fromType:'human',
               fromDisplayName:'User',
               sourceApp:'virtual-office',
@@ -1546,31 +1726,44 @@
           const data = await response.json();
           if (!response.ok || data.ok === false) throw new Error(data.error || data.reply || response.statusText);
           this.currentRunId = data.runId || null;
+          this.registerProviderRun(data.runId, providerOriginSessionKey);
+          if (data.sessionId && this.sessionKey === providerOriginSessionKey) {
+            this.adoptProviderSessionId(data.sessionId);
+            const owner = runOwners.get(data.runId);
+            if (owner) owner.sessionKey = this.sessionKey;
+          }
           await this.streamProviderRunEvents(data.runId);
           await this.loadHistory({ recoverFinal:true, startedAt:sendStartedAt });
           await this.fetchSessionInfo();
           await this.refreshSessionsList();
-          if (this.isHermesSelected()) await this.pollHermesApproval().catch(() => {});
+          if (this.isNativeHermesSelected()) await this.pollHermesApproval().catch(() => {});
           if (this.isCodexSelected()) await this.pollCodexApproval().catch(() => {});
           this.setStatus(providerLabel + ' ready', 'connected');
         } catch (error) {
           this.closeProviderEventSource();
           this.removeTypingIndicator();
+          if (error.lateRunIgnored) return;
+          if (!error.turnReducerHandled) {
+            this.applyTurnEvent({ kind: 'run.failed', runId: this.currentRunId || `provider-failed-${sendStartedAt}`, error: error.message });
+          }
           await this.loadHistory({ recoverFinal:true, startedAt:sendStartedAt }).catch(() => {});
           this.appendSystemIfMissing(providerLabel + ' send failed: ', error.message);
-          this.setStatus(providerLabel + ' error', 'disconnected');
+          this.setStatus(providerLabel + ' run failed', '');
         }
         return;
       }
 
-      if (this.isHermesSelected()) {
+      if (this.isNativeHermesSelected()) {
         const hermesLabel = this.agentSelect.selectedOptions[0]?.textContent.trim() || 'Hermes';
         const hermesProgress = this.startHermesProgress(hermesLabel);
         const hermesSendStartedAt = Date.now();
+        const hermesOriginSessionKey = this.sessionKey;
         const hermesBody = {
           agentId: this.getSelectedAgentId() || this.selectedAgentKey,
           message: text || '(attached files)',
-          sessionId: this.selectedHermesSessionId(),
+          sessionId: this.selectedProviderSessionId(),
+          sessionKey: hermesOriginSessionKey,
+          newSessionPending: this.isPendingProviderSession(),
           fromType: 'human',
           fromDisplayName: 'User',
           sourceApp: 'virtual-office',
@@ -1593,6 +1786,12 @@
             throw new Error(data.error || data.reply || resp.statusText);
           }
           this.currentRunId = data.runId || null;
+          this.registerProviderRun(data.runId, hermesOriginSessionKey);
+          if (data.sessionId && this.sessionKey === hermesOriginSessionKey) {
+            this.adoptProviderSessionId(data.sessionId);
+            const owner = runOwners.get(data.runId);
+            if (owner) owner.sessionKey = this.sessionKey;
+          }
           await this.streamHermesRunEvents(data.runId, hermesProgress);
           this.removeTypingIndicator();
           this.finishHermesProgress(hermesProgress, true);
@@ -1620,9 +1819,13 @@
       if (this.isCodexSelected()) {
         const codexLabel = this.agentSelect.selectedOptions[0]?.textContent.trim() || 'Codex';
         const codexSendStartedAt = Date.now();
+        const codexOriginSessionKey = this.sessionKey;
         const codexBody = {
           agentId: this.getSelectedAgentId() || this.selectedAgentKey,
           message: text || '(attached files)',
+          sessionId: this.selectedProviderSessionId(),
+          sessionKey: codexOriginSessionKey,
+          newSessionPending: this.isPendingProviderSession(),
           fromType: 'human',
           fromDisplayName: 'User',
           sourceApp: 'virtual-office',
@@ -1647,6 +1850,12 @@
             throw new Error(data.error || data.reply || resp.statusText);
           }
           this.currentRunId = data.runId || null;
+          this.registerProviderRun(data.runId, codexOriginSessionKey);
+          if (data.sessionId && this.sessionKey === codexOriginSessionKey) {
+            this.adoptProviderSessionId(data.sessionId);
+            const owner = runOwners.get(data.runId);
+            if (owner) owner.sessionKey = this.sessionKey;
+          }
           await this.fetchSessionInfo();
           await this.streamCodexRunEvents(data.runId);
           this.removeTypingIndicator();
@@ -1667,9 +1876,13 @@
       if (this.isClaudeCodeSelected()) {
         const claudeLabel = this.agentSelect.selectedOptions[0]?.textContent.trim() || 'Claude Code';
         const claudeSendStartedAt = Date.now();
+        const claudeOriginSessionKey = this.sessionKey;
         const claudeBody = {
           agentId: this.getSelectedAgentId() || this.selectedAgentKey,
           message: text || '(attached files)',
+          sessionId: this.selectedProviderSessionId(),
+          sessionKey: claudeOriginSessionKey,
+          newSessionPending: this.isPendingProviderSession(),
           fromType: 'human',
           fromDisplayName: 'User',
           sourceApp: 'virtual-office',
@@ -1694,6 +1907,12 @@
             throw new Error(data.error || data.reply || resp.statusText);
           }
           this.currentRunId = data.runId || null;
+          this.registerProviderRun(data.runId, claudeOriginSessionKey);
+          if (data.sessionId && this.sessionKey === claudeOriginSessionKey) {
+            this.adoptProviderSessionId(data.sessionId);
+            const owner = runOwners.get(data.runId);
+            if (owner) owner.sessionKey = this.sessionKey;
+          }
           await this.fetchSessionInfo();
           await this.streamClaudeCodeRunEvents(data.runId);
           this.removeTypingIndicator();
@@ -1749,7 +1968,7 @@
           this.currentRunId = res.payload.runId;
           this.markLiveEvent();
           this.ensureRecoveryWatchdog();
-          runOwners.set(res.payload.runId, { slotId: this.slotId, sessionKey: sendSessionKey });
+          this.registerRunOwner(res.payload.runId, sendSessionKey);
         }
       }).catch(e => {
         this.applyTurnEvent({ kind: 'run.failed', runId: this.currentRunId || `openclaw-failed-${Date.now()}`, error: e.message });
@@ -1759,7 +1978,7 @@
 
     async sendStop() {
       try {
-        if (this.isProviderAgentSelected()) {
+        if (this.isGenericProviderSelected()) {
           if (this.getSelectedCapabilities().interrupt === false) throw new Error(this.getSelectedProviderKind() + ' does not support interruption');
           const response = await fetch('/api/provider-interrupt', {
             method:'POST',
@@ -1774,7 +1993,7 @@
           this.setStatus(this.getSelectedProviderKind() + ' stopping…', 'connecting');
           return;
         }
-        if (this.isHermesSelected()) {
+        if (this.isNativeHermesSelected()) {
           const resp = await fetch('/api/hermes/interrupt', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1925,7 +2144,7 @@
         this.pendingStreamContent = action.text || this.pendingStreamContent || '';
         this.flushStreamingRender(true);
         if (this.streamingMsg) {
-          this.finalizeStreamingMessage(this.pendingStreamContent, undefined, runId);
+          this.finalizeStreamingMessage(this.pendingStreamContent, undefined, runId, action.ts || Date.now());
           this.streamingMsg = null;
         }
         this.pendingStreamContent = '';
@@ -1952,11 +2171,13 @@
 
       if (action.kind === 'tool.start' || action.kind === 'tool.update' || action.kind === 'tool.result') {
         const tool = action.tool || {};
+        const phase = action.kind === 'tool.start' ? 'start' : (action.kind === 'tool.update' ? 'update' : 'result');
+        const previewOwner = this.previewOwnerForRun(runId);
         const payload = {
           runId,
           data: {
             toolCallId: tool.id || tool.key || '',
-            phase: action.kind === 'tool.start' ? 'start' : (action.kind === 'tool.update' ? 'update' : 'result'),
+            phase,
             name: tool.name || 'tool',
             args: tool.arguments || {},
             result: tool.result || '',
@@ -1964,6 +2185,23 @@
             error: tool.error || ''
           }
         };
+        window.dispatchEvent(new CustomEvent('vo:agent-tool-preview', {
+          detail: {
+            agentId: previewOwner.agentId,
+            sessionKey: previewOwner.sessionKey,
+            slotId: previewOwner.slotId,
+            runId,
+            phase,
+            tool: {
+              id: tool.id || tool.key || '',
+              name: tool.name || 'tool',
+              arguments: tool.arguments || {},
+              result: tool.result || '',
+              status: tool.status || (phase === 'result' ? 'completed' : 'running'),
+              error: tool.error || ''
+            }
+          }
+        }));
         if (action.kind === 'tool.start') this.appendToolCall(payload);
         else if (action.kind === 'tool.update') this.updateToolCall(payload);
         else this.finishToolCall(payload);
@@ -2153,6 +2391,7 @@
     appendMessage(role, content, ts, mediaItems, meta = {}, toolItems = []) {
       const div = document.createElement('div');
       div.className = `chat-msg ${role}`;
+      if (role === 'assistant') div.dataset.providerKind = this.getSelectedProviderKind() || 'openclaw';
       const bubble = document.createElement('div');
       bubble.className = 'chat-bubble';
       let displayContent = content || '';
@@ -2188,8 +2427,8 @@
       }
       if (displayContent.trim()) {
         const textDiv = document.createElement('div');
-        textDiv.className = 'chat-message-content';
-        textDiv.innerHTML = formatContent(displayContent);
+        textDiv.className = 'chat-message-content chat-markdown';
+        renderMarkdownInto(textDiv, displayContent);
         bubble.appendChild(textDiv);
       }
       for (const tool of toolItems) bubble.appendChild(renderToolCallCard(tool, { historical: true }));
@@ -2212,9 +2451,16 @@
       const div = document.createElement('div');
       div.className = 'chat-msg assistant streaming-msg';
       div.dataset.runId = runId || this.currentRunId || '';
+      div.dataset.providerKind = this.getSelectedProviderKind() || 'openclaw';
       const bubble = document.createElement('div');
       bubble.className = 'chat-bubble streaming';
-      bubble.innerHTML = '<span class="cursor">▊</span>';
+      const text = document.createElement('div');
+      text.className = 'chat-message-content chat-markdown streaming-text';
+      const cursor = document.createElement('span');
+      cursor.className = 'cursor';
+      cursor.textContent = '▊';
+      bubble.appendChild(text);
+      bubble.appendChild(cursor);
       div.appendChild(bubble);
       this.messages.appendChild(div);
       this.scrollBottom();
@@ -2224,10 +2470,20 @@
       const div = this.messages.querySelector('.streaming-msg');
       if (!div) return;
       const bubble = div.querySelector('.chat-bubble');
-      bubble.innerHTML = formatContent(content) + '<span class="cursor">▊</span>';
+      let text = bubble.querySelector('.streaming-text');
+      if (!text) {
+        text = document.createElement('div');
+        text.className = 'chat-message-content chat-markdown streaming-text';
+        const cursor = document.createElement('span');
+        cursor.className = 'cursor';
+        cursor.textContent = '▊';
+        bubble.appendChild(text);
+        bubble.appendChild(cursor);
+      }
+      renderMarkdownInto(text, content || '');
     }
 
-    finalizeStreamingMessage(content, mediaItems, runId = '') {
+    finalizeStreamingMessage(content, mediaItems, runId = '', ts = Date.now()) {
       const div = this.messages.querySelector('.streaming-msg');
       if (!div) {
         const appended = this.appendMessage('assistant', content, Date.now(), mediaItems);
@@ -2239,20 +2495,30 @@
       }
       const bubble = div.querySelector('.chat-bubble');
       bubble.classList.remove('streaming');
-      bubble.innerHTML = '';
+      let textDiv = bubble.querySelector('.streaming-text');
+      const cursor = bubble.querySelector('.cursor');
+      const finalContent = content || '';
+      if (textDiv) renderMarkdownInto(textDiv, finalContent);
+      cursor?.remove();
+      textDiv?.classList.remove('streaming-text');
       const senderHeader = renderSenderHeader(normalizeSenderMeta({}, 'assistant', this), 'assistant');
-      if (senderHeader) bubble.appendChild(senderHeader);
+      if (senderHeader) bubble.insertBefore(senderHeader, textDiv || bubble.firstChild);
       const media = normalizeChatMedia(mediaItems || extractMedia({ content }, content));
-      if (media.length) bubble.appendChild(renderChatMedia(media));
-      if ((content || '').trim()) {
-        const textDiv = document.createElement('div');
-        textDiv.className = 'chat-message-content';
-        textDiv.innerHTML = formatContent(content || '');
+      if (media.length) {
+        const renderedMedia = renderChatMedia(media);
+        bubble.insertBefore(renderedMedia, textDiv || bubble.querySelector('.chat-time'));
+      }
+      if (!finalContent.trim()) {
+        textDiv?.remove();
+      } else if (!textDiv) {
+        textDiv = document.createElement('div');
+        textDiv.className = 'chat-message-content chat-markdown';
+        renderMarkdownInto(textDiv, finalContent);
         bubble.appendChild(textDiv);
       }
       const time = document.createElement('span');
       time.className = 'chat-time';
-      time.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      time.textContent = new Date(ts || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       bubble.appendChild(time);
       div.classList.remove('streaming-msg');
       div.classList.add('chat-stream-segment');
@@ -2266,14 +2532,14 @@
       if (!div) return this.finalizeStreamingMessage(content, undefined, runId);
       const bubble = div.querySelector('.chat-bubble');
       if (!bubble) return;
-      let textDiv = bubble.querySelector('.chat-message-content');
+      let textDiv = bubble.querySelector('.chat-markdown, .chat-message-content');
       if (!textDiv) {
         textDiv = document.createElement('div');
-        textDiv.className = 'chat-message-content';
+        textDiv.className = 'chat-message-content chat-markdown';
         const time = bubble.querySelector('.chat-time');
         bubble.insertBefore(textDiv, time || null);
       }
-      textDiv.innerHTML = formatContent(content || '');
+      renderMarkdownInto(textDiv, content || '');
       div.classList.remove('chat-stream-segment-settling');
       void div.offsetWidth;
       div.classList.add('chat-stream-segment-settling');
@@ -2345,7 +2611,7 @@
     }
 
     startProviderHistoryPolling() {
-      if (!this.isProviderAgentSelected() || this.providerHistoryPollTimer) return;
+      if (!this.isGenericProviderSelected() || this.providerHistoryPollTimer) return;
       this.providerHistoryPollTimer = setInterval(() => this.pollProviderActiveSession().catch(() => {}), 3000);
     }
 
@@ -2356,8 +2622,11 @@
     }
 
     async pollProviderActiveSession() {
-      if (!this.isProviderAgentSelected() || !this.isVisibleForPolling() || this.currentRunId) return;
-      const response = await fetch('/api/provider-history?agentId=' + encodeURIComponent(this.getSelectedAgentId() || this.selectedAgentKey), { cache:'no-store' });
+      if (!this.isGenericProviderSelected() || !this.isVisibleForPolling() || this.currentRunId) return;
+      const params = new URLSearchParams({ agentId: this.getSelectedAgentId() || this.selectedAgentKey });
+      const selectedHistorySessionId = this.selectedProviderHistorySessionId();
+      if (selectedHistorySessionId) params.set('sessionId', selectedHistorySessionId);
+      const response = await fetch('/api/provider-history?' + params.toString(), { cache:'no-store' });
       const data = await response.json();
       if (!response.ok || !data.ok) return;
       const signature = this.providerHistorySignatureFor(data.messages || []);
@@ -2392,23 +2661,38 @@
         const handle = (eventName, event) => {
           let data = {};
           try { data = JSON.parse(event.data || '{}'); } catch (_) {}
-          this.handleProviderSdkEvent(eventName, data);
+          const accepted = this.handleProviderSdkEvent(eventName, data);
           if (['run.completed', 'run.failed', 'run.cancelled', 'run.canceled'].includes(eventName)) {
-            finish(eventName === 'run.completed', eventName === 'run.completed' ? data : new Error(data.error || eventName));
+            if (eventName === 'run.completed') finish(true, data);
+            else {
+              const error = new Error(data.error || eventName);
+              error.turnReducerHandled = true;
+              error.lateRunIgnored = accepted === false;
+              finish(false, error);
+            }
           }
         };
         ['run.started', 'turn.progress', 'run.completed', 'run.failed', 'run.cancelled', 'run.canceled']
           .forEach(name => source.addEventListener(name, event => handle(name, event)));
         source.onerror = () => {
-          if (!settled) finish(false, new Error('Provider SDK stream disconnected'));
+          if (!settled) {
+            const message = 'Provider SDK stream disconnected';
+            const accepted = this.acceptsProviderRunEvent(runId, {}, 'stream.error');
+            if (accepted) this.applyTurnEvent({ kind: 'run.failed', runId, error: message });
+            const error = new Error(message);
+            error.turnReducerHandled = true;
+            error.lateRunIgnored = !accepted;
+            finish(false, error);
+          }
         };
       });
     }
 
     handleProviderSdkEvent(eventName, data) {
+      const runId = data?.runId || this.currentRunId || '';
+      if (!this.acceptsProviderRunEvent(runId, data, eventName)) return false;
       this.markLiveEvent();
       this.applySessionMetrics(data || {});
-      const runId = data?.runId || this.currentRunId || '';
       if (runId) this.currentRunId = runId;
       const providerKind = this.getSelectedProviderKind();
       const providerLabel = this.agentSelect?.selectedOptions?.[0]?.textContent.trim() || this.getSelectedProviderKind();
@@ -2424,6 +2708,15 @@
         this.updateTypingIndicator(providerLabel + ' is working…');
       }
 
+      const commentary = String(data?.commentary || '').trim();
+      if (commentary) {
+        const commentaryKey = `sdk:${runId}:${commentary}`;
+        if (!this.seenOpenClawCommentary.has(commentaryKey)) {
+          this.seenOpenClawCommentary.add(commentaryKey);
+          this.applyTurnEvent({ kind: 'commentary', runId, text: commentary });
+        }
+      }
+
       for (const [index, card] of (Array.isArray(data?.tools) ? data.tools : []).entries()) {
         if (!card || typeof card !== 'object') continue;
         const status = String(card.status || '').toLowerCase();
@@ -2437,9 +2730,12 @@
           result: card.result || card.output || '',
           error: card.error || ''
         };
+        const key = ChatEvents.toolIdentity(tool);
+        const existing = key ? this.turnEvents.get(runId)?.tools?.get(key) : null;
+        const toolEventKind = terminal ? 'tool.result' : (existing ? 'tool.update' : 'tool.start');
         const label = formatToolLabel(tool.name, coerceToolArgs(tool.arguments));
         this.updateTypingIndicator(terminal ? 'Processing...' : label);
-        this.applyTurnEvent({ kind: terminal ? 'tool.result' : 'tool.start', runId, tool });
+        this.applyTurnEvent({ kind: toolEventKind, runId, tool });
       }
 
       const reply = String(data?.reply || '');
@@ -2463,6 +2759,7 @@
         this.fetchSessionInfo().catch(() => {});
         this.refreshSessionsList().catch(() => {});
       }
+      return true;
     }
 
     async sendHermesBlockingMessage(hermesBody, hermesProgress, hermesSendStartedAt) {
@@ -2567,9 +2864,15 @@
         const handle = (eventName, evt) => {
           let data = {};
           try { data = JSON.parse(evt.data || '{}'); } catch (_) {}
-          this.handleNativeRunEvent(provider, eventName, data);
+          const accepted = this.handleNativeRunEvent(provider, eventName, data);
           if (terminalEvents.has(eventName)) {
-            finish(eventName === 'run.completed', eventName === 'run.completed' ? data : new Error(data.error || eventName));
+            if (eventName === 'run.completed') finish(true, data);
+            else {
+              const error = new Error(data.error || eventName);
+              error.turnReducerHandled = true;
+              error.lateRunIgnored = accepted === false;
+              finish(false, error);
+            }
           }
         };
         [
@@ -2578,6 +2881,7 @@
           'message.delta',
           'reasoning.available',
           'tool.started',
+          'tool.updated',
           'tool.completed',
           'tool.failed',
           'approval.request',
@@ -2590,8 +2894,12 @@
         source.onerror = () => {
           if (!settled) {
             const error = cfg.label + ' native stream disconnected';
-            this.applyTurnEvent({ kind: 'run.failed', runId, error });
-            finish(false, new Error(error));
+            const accepted = this.acceptsProviderRunEvent(runId, {}, 'stream.error');
+            if (accepted) this.applyTurnEvent({ kind: 'run.failed', runId, error });
+            const failure = new Error(error);
+            failure.turnReducerHandled = true;
+            failure.lateRunIgnored = !accepted;
+            finish(false, failure);
           }
         };
       });
@@ -2611,24 +2919,25 @@
 
     handleNativeRunEvent(provider, eventName, data) {
       const cfg = NATIVE_PROVIDER_UI[provider];
-      if (!cfg) return;
+      if (!cfg) return false;
+      const runId = data?.runId || this.currentRunId || '';
+      if (!this.acceptsProviderRunEvent(runId, data, eventName)) return false;
       this.markLiveEvent();
       this.applySessionMetrics(data);
-      const runId = data?.runId || this.currentRunId || '';
       if (runId) this.currentRunId = runId;
 
       if (eventName === 'run.started') {
         this.applyTurnEvent({ kind: 'run.start', runId, label: cfg.label + ' is running...' });
         if (provider !== 'hermes') this.fetchSessionInfo().catch(() => {});
-        return;
+        return true;
       }
 
-      if (eventName === 'session.metrics') return;
+      if (eventName === 'session.metrics') return true;
 
       if (eventName === 'message.delta') {
         if (data.reply) this.applyTurnEvent({ kind: 'text.replace', runId, text: data.reply });
         else if (data.delta) this.applyTurnEvent({ kind: 'text.delta', runId, text: data.delta });
-        return;
+        return true;
       }
 
       if (eventName === 'reasoning.available') {
@@ -2636,7 +2945,7 @@
         if (this.applyDistinctThinking(runId, thinking)) {
           this.updateTypingIndicator(cfg.label + ' is reasoning...');
         }
-        return;
+        return true;
       }
 
       if (eventName === 'approval.request') {
@@ -2645,12 +2954,12 @@
           this.applyTurnEvent({ kind: 'approval', runId, approval, provider: cfg.approval || provider });
         }
         this.updateTypingIndicator(cfg.label + ' is waiting for approval...');
-        return;
+        return true;
       }
 
-      if (eventName === 'tool.started' || eventName === 'tool.completed' || eventName === 'tool.failed') {
+      if (['tool.started', 'tool.updated', 'tool.completed', 'tool.failed'].includes(eventName)) {
         const card = data.toolCard || {};
-        const isTerminal = eventName !== 'tool.started';
+        const isTerminal = eventName === 'tool.completed' || eventName === 'tool.failed';
         const tool = {
           id: card.id || data.toolCallId || data.id || '',
           runId,
@@ -2662,9 +2971,9 @@
         };
         const label = formatToolLabel(tool.name, coerceToolArgs(tool.arguments));
         this.updateTypingIndicator(isTerminal ? 'Processing...' : label);
-        this.applyTurnEvent({ kind: isTerminal ? 'tool.result' : 'tool.start', runId, tool });
+        this.applyTurnEvent({ kind: isTerminal ? 'tool.result' : (eventName === 'tool.updated' ? 'tool.update' : 'tool.start'), runId, tool });
         if (isTerminal) this[cfg.completedKeysProperty].add(`${runId}:${tool.id}`);
-        return;
+        return true;
       }
 
       if (eventName === 'run.completed' || eventName === 'run.failed' || eventName === 'run.cancelled' || eventName === 'run.canceled') {
@@ -2676,6 +2985,7 @@
         this.applyTurnEvent({ kind, runId, error: data.error || '' });
         if (provider !== 'hermes') this.fetchSessionInfo().catch(() => {});
       }
+      return true;
     }
 
     handleHermesNativeEvent(eventName, data) {
@@ -2700,7 +3010,7 @@
       this.hermesCompletedToolKeys = new Set();
       this.pollHermesLiveActivity().catch(() => {});
       this.hermesHistoryPollTimer = setInterval(() => {
-        if (this.isHermesSelected()) this.pollHermesLiveActivity().catch(() => {});
+        if (this.isNativeHermesSelected()) this.pollHermesLiveActivity().catch(() => {});
       }, HERMES_HISTORY_POLL_MS);
     }
 
@@ -2741,7 +3051,10 @@
       const cfg = NATIVE_PROVIDER_UI[provider];
       if (!cfg) return;
       const agentId = this.getSelectedAgentId() || this.selectedAgentKey;
-      const res = await fetch('/api/' + cfg.path + '/history?agentId=' + encodeURIComponent(agentId));
+      const params = new URLSearchParams({ agentId });
+      const sessionId = this.selectedProviderSessionId();
+      if (sessionId) params.set('sessionId', sessionId);
+      const res = await fetch('/api/' + cfg.path + '/history?' + params.toString());
       const data = await res.json();
       if (!data.ok || !Array.isArray(data.messages)) return;
       const progress = [...data.messages].reverse().find(msg =>
@@ -2798,11 +3111,14 @@
       return this.pollNativeLiveActivity('claude-code');
     }
     async recoverHermesFinalFromHistory(startedAt, timeoutMs = 45000) {
-      if (!this.isHermesSelected()) return false;
+      if (!this.isNativeHermesSelected()) return false;
       const deadline = Date.now() + timeoutMs;
       const agentId = this.getSelectedAgentId() || this.selectedAgentKey;
       while (Date.now() < deadline) {
-        const res = await fetch('/api/hermes/history?agentId=' + encodeURIComponent(agentId));
+        const params = new URLSearchParams({ agentId });
+        const sessionId = this.selectedProviderSessionId();
+        if (sessionId) params.set('sessionId', sessionId);
+        const res = await fetch('/api/hermes/history?' + params.toString());
         const data = await res.json();
         if (data.ok && Array.isArray(data.messages)) {
           const finalMsg = [...data.messages].reverse().find(msg =>
@@ -2843,7 +3159,7 @@
     }
 
     async respondHermesApproval(approval, choice, card) {
-      if (!approval || !this.isHermesSelected()) return;
+      if (!approval || !this.isNativeHermesSelected()) return;
       const buttons = card ? [...card.querySelectorAll('button')] : [];
       buttons.forEach(btn => btn.disabled = true);
       if (card) {
@@ -3390,11 +3706,25 @@
     if (!windowInstance || windowInstance.hasExplicitAgentSelection) return;
     const primaryOpt = primaryWindow.agentSelect?.selectedOptions?.[0];
     if (!primaryOpt) return;
+    if (!primaryOpt.dataset.sessionKey) return;
     windowInstance.applySelection(primaryOpt, { markExplicit: false, systemPrefix: 'Ready to chat with' });
   }
 
   function shouldUseSingleWindowMobileLayout() {
     return window.innerWidth <= 900;
+  }
+
+  function enforceSingleWindowMobileLayout() {
+    if (!shouldUseSingleWindowMobileLayout()) return;
+    // A desktop layout can be resized while several secondary windows are
+    // open. Mobile intentionally exposes one full-width chat surface, so do
+    // not leave desktop panels layered over the primary conversation.
+    Object.keys(secondaryChatPanels).forEach((slotNum) => {
+      if (secondaryChatPanels[slotNum]?.classList.contains('open')) {
+        setSecondaryPanelOpen(slotNum, false);
+      }
+    });
+    setActiveSecondarySlot(null);
   }
 
   function setSecondaryPanelOpen(slotNum, shouldOpen) {
@@ -3462,7 +3792,24 @@
 
   function nextId() { return `office-${++reqId}-${Date.now()}`; }
 
+  function browserGatewayUrlFromConfig(rawUrl) {
+    if (!rawUrl) return '';
+    try {
+      const parsed = new URL(rawUrl);
+      if (!['ws:', 'wss:'].includes(parsed.protocol)) return '';
+      const browserHost = window.location.hostname || '127.0.0.1';
+      if (LOCAL_GATEWAY_HOSTS.has(parsed.hostname)) parsed.hostname = browserHost;
+      if (window.location.protocol === 'https:' && parsed.protocol === 'ws:') parsed.protocol = 'wss:';
+      return parsed.toString();
+    } catch (error) {
+      console.warn('[chat] Invalid Gateway URL:', rawUrl, error);
+      return '';
+    }
+  }
+
   function getGatewayUrl() {
+    const configured = browserGatewayUrlFromConfig(GATEWAY_URL);
+    if (configured) return configured;
     const host = window.location.hostname || '127.0.0.1';
     if (window.location.protocol === 'https:') return `wss://${host}:8443/ws-gateway`;
     return `ws://${host}:${_chatWsPort}`;
@@ -3488,17 +3835,46 @@
     windowInstance.setStatus(message, 'disconnected');
   }
 
-  function connectGateway() {
-    if (ws) return;
-    ws = new WebSocket(getGatewayUrl());
+  function markGatewayConnected() {
+    connected = true;
+    chatWindows.forEach(w => {
+      w.syncSelectionStatus();
+      if (w.isPrimary || w.root.classList.contains('open')) {
+        w.fetchSessionInfo();
+        w.loadHistory();
+      }
+    });
+    startModelBarRefresh();
+  }
+
+  async function connectGateway() {
+    if (ws || gatewayEvents) return;
     chatWindows.forEach(w => {
       if (w.getSelectedProviderKind() === 'openclaw') w.setStatus('Connecting...', 'connecting');
       else w.syncSelectionStatus();
     });
-    ws.onmessage = (evt) => {
+    await loadGatewayInfo();
+    if (ws || gatewayEvents) return;
+    if (GATEWAY_TRANSPORT === 'proxy') {
+      connectGatewayProxy();
+      return;
+    }
+    const gatewayUrl = getGatewayUrl();
+    if (!gatewayUrl) {
+      chatWindows.forEach(w => setGatewayDisconnectedStatus(w, 'Gateway unavailable'));
+      return;
+    }
+    try {
+      ws = new WebSocket(gatewayUrl);
+    } catch (_) {
+      chatWindows.forEach(w => setGatewayDisconnectedStatus(w, 'Gateway unavailable'));
+      return;
+    }
+    const socket = ws;
+    socket.onmessage = (evt) => {
       let msg;
       try { msg = JSON.parse(evt.data); } catch { return; }
-      if (msg.type === 'event' && msg.event === 'connect.challenge') return sendConnect();
+      if (msg.type === 'event' && msg.event === 'connect.challenge') return sendConnect(socket);
       if (msg.type === 'res') {
         const cb = pendingCallbacks[msg.id];
         if (cb) { delete pendingCallbacks[msg.id]; cb(msg); }
@@ -3506,16 +3882,59 @@
       }
       if (msg.type === 'event') handleEvent(msg);
     };
-    ws.onclose = (evt) => {
+    socket.onclose = (evt) => {
+      if (ws !== socket) return;
       connected = false;
       ws = null;
       chatWindows.forEach(w => setGatewayDisconnectedStatus(w, `Disconnected (${evt.code})`));
       if (chatWindows.some(w => w.root.classList.contains('open') || w.currentRunId || w.streamingMsg)) setTimeout(connectGateway, 3000);
     };
-    ws.onerror = () => chatWindows.forEach(w => setGatewayDisconnectedStatus(w, 'Connection error'));
+    socket.onerror = () => {
+      if (ws === socket) chatWindows.forEach(w => setGatewayDisconnectedStatus(w, 'Connection error'));
+    };
   }
 
-  function sendConnect() {
+  function connectGatewayProxy() {
+    if (gatewayEvents) return;
+    let source;
+    try {
+      source = new EventSource(GATEWAY_EVENTS_URL, { withCredentials: true });
+    } catch (_) {
+      chatWindows.forEach(w => setGatewayDisconnectedStatus(w, 'Gateway proxy unavailable'));
+      return;
+    }
+    gatewayEvents = source;
+    source.onmessage = (evt) => {
+      let msg;
+      try { msg = JSON.parse(evt.data); } catch { return; }
+      if (msg.type === 'proxy.ready') {
+        markGatewayConnected();
+        return;
+      }
+      if (msg.type === 'proxy.error') {
+        connected = false;
+        chatWindows.forEach(w => setGatewayDisconnectedStatus(w, msg.payload?.message || 'Gateway proxy unavailable'));
+        source.close();
+        if (gatewayEvents === source) gatewayEvents = null;
+        if (chatWindows.some(w => w.root.classList.contains('open') || w.currentRunId || w.streamingMsg)) setTimeout(connectGateway, 3000);
+        return;
+      }
+      if (msg.type === 'event') handleEvent(msg);
+    };
+    source.onerror = () => {
+      if (gatewayEvents !== source) return;
+      connected = false;
+      const terminal = source.readyState === EventSource.CLOSED;
+      chatWindows.forEach(w => setGatewayDisconnectedStatus(w, terminal ? 'Gateway proxy unavailable' : 'Reconnecting...'));
+      if (terminal) {
+        gatewayEvents = null;
+        if (chatWindows.some(w => w.root.classList.contains('open') || w.currentRunId || w.streamingMsg)) setTimeout(connectGateway, 3000);
+      }
+    };
+  }
+
+  function sendConnect(socket = ws) {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
     const id = nextId();
     const msg = {
       type: 'req', id, method: 'connect',
@@ -3528,23 +3947,27 @@
     };
     pendingCallbacks[id] = (res) => {
       if (res.ok) {
-        connected = true;
-        chatWindows.forEach(w => {
-          w.syncSelectionStatus();
-          if (w.isPrimary || w.root.classList.contains('open')) {
-            w.fetchSessionInfo();
-            w.loadHistory();
-          }
-        });
-        startModelBarRefresh();
+        markGatewayConnected();
       } else {
         chatWindows.forEach(w => w.setStatus(`Auth failed: ${res.error?.message || 'unknown'}`, 'disconnected'));
       }
     };
-    ws.send(JSON.stringify(msg));
+    socket.send(JSON.stringify(msg));
   }
 
-  function rpc(method, params) {
+  async function rpc(method, params) {
+    if (GATEWAY_TRANSPORT === 'proxy') {
+      if (!connected) throw new Error('Not connected');
+      const response = await fetch(GATEWAY_RPC_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ method, params })
+      });
+      const result = await response.json().catch(() => ({ ok: false, error: { message: `Gateway proxy HTTP ${response.status}` } }));
+      if (!response.ok && result.ok !== false) result.ok = false;
+      return result;
+    }
     return new Promise((resolve, reject) => {
       if (!ws || !connected) return reject(new Error('Not connected'));
       const id = nextId();
@@ -4141,49 +4564,13 @@
     overlay.classList.add('active');
   }
 
-  const _SAFE_TAGS = new Set(['p','br','strong','b','em','i','u','s','del','mark','h1','h2','h3','h4','h5','h6','ul','ol','li','blockquote','hr','pre','code','span','a','img','table','thead','tbody','tr','th','td','sup','sub','small','details','summary']);
-  const _SAFE_ATTRS = { 'a': ['href','title','target','rel'], 'img': ['src','alt','title','class','width','height'], 'code': ['class'], 'span': ['class'], 'pre': ['class'], 'td': ['align'], 'th': ['align'] };
-  function _sanitizeHtml(html) {
-    return html.replace(/<\/?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*\/?>/g, function(match, tag) {
-      var lower = tag.toLowerCase();
-      if (!_SAFE_TAGS.has(lower)) return '';
-      var allowed = _SAFE_ATTRS[lower];
-      if (!allowed) {
-        if (match.charAt(1) === '/') return '</' + lower + '>';
-        if (match.slice(-2) === '/>') return '<' + lower + ' />';
-        return '<' + lower + '>';
-      }
-      var attrsStr = '';
-      var attrRe = /\s([a-zA-Z\-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|(\S+))/g;
-      var m;
-      while ((m = attrRe.exec(match)) !== null) {
-        var attrName = m[1].toLowerCase();
-        var attrVal = m[2] !== undefined ? m[2] : (m[3] !== undefined ? m[3] : m[4]);
-        if (allowed.indexOf(attrName) !== -1) {
-          if ((attrName === 'href' || attrName === 'src') && /^\s*javascript\s*:/i.test(attrVal)) continue;
-          attrsStr += ' ' + attrName + '="' + attrVal.replace(/"/g, '&quot;') + '"';
-        }
-      }
-      if (match.charAt(1) === '/') return '</' + lower + '>';
-      if (match.slice(-2) === '/>') return '<' + lower + attrsStr + ' />';
-      return '<' + lower + attrsStr + '>';
-    });
-  }
   function formatContent(text) {
-    if (!text) return '';
-    const safeText = escHtml(text);
-    let html;
-    if (typeof marked !== 'undefined') {
-      marked.setOptions({ breaks: true, gfm: true, sanitize: false });
-      html = marked.parse(safeText);
-    } else {
-      html = safeText.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\*(.+?)\*/g, '<em>$1</em>').replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\n/g, '<br>');
-    }
-    html = _sanitizeHtml(html);
-    html = html.replace(/<img ([^>]*)>/g, '<img $1 class="chat-image-thumb chat-image-clickable">');
-    return html;
+    return globalThis.VirtualOfficeChatMarkdown.renderMarkdown(text);
   }
-  function escHtml(s) { return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+  function renderMarkdownInto(target, text) {
+    return globalThis.VirtualOfficeChatMarkdown.renderMarkdownInto(target, text);
+  }
+  function escHtml(value) { return globalThis.VirtualOfficeChatMarkdown.escapeHtml(value); }
 
   function formatToolLabel(name, args) {
     const truncate = (s, n) => s && s.length > n ? s.slice(0, n) + '...' : (s || '');
@@ -4333,9 +4720,15 @@
     if (shouldOpen) {
       requestAnimationFrame(_positionExteriorTabs);
       // The panel opens with a transform transition, so the first geometry
-      // read still sees it off-screen. Re-anchor the tabs once that finishes.
+      // read still sees it off-screen. Re-tile secondary windows and re-anchor
+      // the tabs once that finishes; otherwise a secondary opened during the
+      // transition can retain the primary panel's intermediate top position
+      // and leave its composer below the viewport.
       setTimeout(() => {
-        if (primaryWindow.root.classList.contains('open')) _positionExteriorTabs();
+        if (!primaryWindow.root.classList.contains('open')) return;
+        _tileSecondaryPanelsNow();
+        _clampOpenChatPanelsToViewport();
+        _positionExteriorTabs();
       }, 320);
     }
     if (shouldOpen && !ws) connectGateway();
@@ -4361,6 +4754,7 @@
       setSecondaryPanelOpen('1', true);
       setSecondaryPanelOpen('2', true);
       setSecondaryPanelOpen('3', true);
+      enforceSingleWindowMobileLayout();
       setTimeout(applyQueryAgentAssignments, 400);
     }, 50);
   } else if (chatUrlParams.get('chatAgents')) {
@@ -4413,13 +4807,9 @@
     };
   }
 
-  fetch('/gateway-info').then(r => r.json()).then(d => {
-    if (d.wsPort) _chatWsPort = d.wsPort;
-    if (d.token) GATEWAY_TOKEN = d.token;
-    if (d.openclawVersion) GATEWAY_CLIENT_VERSION = d.openclawVersion;
-    if (d.gatewayProtocol) GATEWAY_PROTOCOL_VERSION = Number(d.gatewayProtocol) || 4;
+  loadGatewayInfo().then(() => {
     if (primaryWindow.root.classList.contains('open') && !ws) connectGateway();
-  }).catch(() => {});
+  });
 
   // --- DIRECT TITLE-BAR MOVE / SNAP SYSTEM (primary window only) ---
   const chatPanel = primaryWindow.root;
@@ -4508,6 +4898,7 @@
   let _chatViewportResizeTimer = 0;
   function _syncChatLayoutAfterViewportResize() {
     const applyViewportLayout = () => {
+      enforceSingleWindowMobileLayout();
       updateChatStackLayout();
       _chatUpdateSnapPosition();
       _clampOpenChatPanelsToViewport();

@@ -226,10 +226,22 @@ def main():
         check("OpenClaw main session is listed", any(s.get("id") == "agent:adam:main" for s in openclaw_sessions))
         check("OpenClaw file-backed session is listed", any(s.get("id") == "agent:adam:file-only" for s in openclaw_sessions))
         check("OpenClaw live mode row is titled", any(s.get("title") == "Live Agent Mode" and s.get("liveMode") for s in openclaw_sessions))
+        gateway_count = len(gateway_calls)
         created, status = server.handle_chat_session_create("adam", {"sessionKey": "agent:adam:main"})
-        check("OpenClaw create/reset uses gateway sessions.reset", status == 200 and created.get("ok") and gateway_calls[-1][0] == "sessions.reset")
-        rejected, status = server.handle_chat_session_create("adam", {"sessionKey": "agent:other:main"})
-        check("OpenClaw create rejects cross-agent session key", status == 400 and not rejected.get("ok"))
+        check(
+            "OpenClaw create is non-destructive and allocates a fresh key",
+            status == 200 and created.get("ok")
+            and created.get("sessionKey", "").startswith("agent:adam:vo-")
+            and len(gateway_calls) == gateway_count,
+        )
+        created_again, status = server.handle_chat_session_create("adam", {"sessionKey": "agent:other:main"})
+        check(
+            "OpenClaw create ignores an untrusted requested key",
+            status == 200 and created_again.get("ok")
+            and created_again.get("sessionKey", "").startswith("agent:adam:vo-")
+            and created_again.get("sessionKey") != created.get("sessionKey")
+            and len(gateway_calls) == gateway_count,
+        )
         switched, status = server.handle_chat_session_switch("adam", "agent:adam:vw-live-mode-planner")
         check("OpenClaw switch returns requested session key", status == 200 and switched.get("sessionKey") == "agent:adam:vw-live-mode-planner")
         rejected, status = server.handle_chat_session_switch("adam", "agent:other:main")
@@ -249,6 +261,18 @@ def main():
         check("Hermes switch reads API messages", status == 200 and len(switched.get("messages") or []) == 2 and server._get_hermes_session_id("default") == "hermes-session-1")
         deleted, status = server.handle_chat_session_delete("hermes-default", "hermes-session-1")
         check("Hermes delete clears active session", status == 200 and deleted.get("deleted") and server._get_hermes_session_id("default") == "")
+        hermes_record = next(row for row in server._discovered_roster if row.get("id") == "hermes-default")
+        hermes_record["connectionModes"] = ["cli"]
+        hermes_record["capabilities"] = {"chat": True, "sessionCreate": True, "sessions": True}
+        cli_created, status = server.handle_chat_session_create("hermes-default", {"title": "CLI-only session"})
+        check(
+            "CLI-only Hermes creates a lazy session without contacting HTTP API",
+            status == 200 and cli_created.get("ok")
+            and cli_created.get("sessionId") == ""
+            and cli_created.get("sessionKey", "").startswith("hermes:default:@new:")
+            and server._get_hermes_session_id("default") == ""
+            and server._load_provider_active_session("hermes", "default").get("newSessionPending") is True,
+        )
 
         codex_payload, codex_status = server.handle_chat_sessions_list("codex-main")
         codex_sessions = codex_payload.get("sessions") or []

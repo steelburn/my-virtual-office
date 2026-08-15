@@ -164,6 +164,16 @@ for (const provider of ['hermes', 'codex', 'claude-code']) {
   check('All fallback pollers use one progress adapter', /pollNativeLiveActivity\(provider\)/.test(chat));
   check('Provider SDK stream enters the shared reducer', /handleProviderSdkEvent\(eventName, data\)[\s\S]*applyTurnEvent/.test(chat));
   check('Provider SDK terminal cleanup uses the shared reducer', /handleProviderSdkEvent\(eventName, data\)[\s\S]*kind = eventName === 'run\.completed'[\s\S]*applyTurnEvent/.test(chat));
+  check('Provider runs retain explicit window and session ownership', /registerProviderRun\(runId, sessionKey/.test(chat) && /acceptsProviderRunEvent\(runId, data, eventName\)/.test(chat));
+  check('OpenClaw child sessions survive roster refresh for the same agent only', /baseParts\[0\] === 'agent'[\s\S]*baseParts\[1\] === currentParts\[1\][\s\S]*return current/.test(chat));
+  check('Provider sends never transmit a pending-session sentinel', /sessionId:this\.selectedProviderSessionId\(\)/.test(chat) && !/sessionId:this\.isHermesSelected\(\)/.test(chat));
+  check('Provider sends preserve explicit pending-window identity', /sessionKey:providerOriginSessionKey/.test(chat) && /newSessionPending:this\.isPendingProviderSession\(\)/.test(chat));
+  check('Pending provider history stays scoped to its window key', /selectedProviderHistorySessionId\(\)/.test(chat) && /params\.set\('sessionId', selectedHistorySessionId\)/.test(chat));
+  check('API Hermes uses the dedicated native transport', /isNativeHermesSelected\(\)/.test(chat) && /fetch\('\/api\/hermes\/runs'/.test(chat));
+  check('CLI-only Hermes stays on generic provider transport', /if \(kind === 'hermes'\) return !this\.isNativeHermesSelected\(\)/.test(chat));
+  check('Native history requests the exact selected session', /const selectedSessionId = this\.selectedProviderSessionId\(\);[\s\S]*historyParams\.set\('sessionId', selectedSessionId\)/.test(chat));
+  check('Native stop routes bypass the generic interrupter', /if \(this\.isGenericProviderSelected\(\)\)[\s\S]*if \(this\.isNativeHermesSelected\(\)\)/.test(chat));
+  check('Late provider failures are ignored by their former window', /lateRunIgnored/.test(chat) && /if \(error\.lateRunIgnored\) return/.test(chat));
   check('OpenClaw live events enter the shared reducer', /handleChatEvent[\s\S]*applyTurnEvent/.test(chat));
   check('OpenClaw events recover safe Codex commentary in sequence', /queueOpenClawEvent\(eventName, payload\)[\s\S]*syncOpenClawCommentary/.test(chat));
   check('Duplicate reasoning is suppressed after visible text', /applyDistinctThinking\(runId, value\)[\s\S]*thinking === visibleText/.test(chat) && (chat.match(/applyDistinctThinking\(runId, thinking\)/g) || []).length >= 2);
@@ -171,6 +181,7 @@ for (const provider of ['hermes', 'codex', 'claude-code']) {
   check('Native history preserves provider message boundaries', /Provider history is already in transcript order/.test(chat) && !/let assistantTurn = \[\]/.test(chat));
   check('Tool-result roles normalize as assistant activity', /function isToolResultRole/.test(chat) && /isToolResultRole\(rawRole\)/.test(chat));
   check('Terminal cleanup is centralized', /finishRunUi\(runId, status/.test(chat));
+  check('Secondary chats retile after the primary open transition', /setTimeout\(\(\) => \{[\s\S]*_tileSecondaryPanelsNow\(\);[\s\S]*_clampOpenChatPanelsToViewport\(\);[\s\S]*_positionExteriorTabs\(\);[\s\S]*\}, 320\)/.test(chat));
   check('Chat event model loads before renderer', index.indexOf('chat-events.js') > -1 && index.indexOf('chat-events.js') < index.indexOf('chat.js'));
   check('Provider toolbar link survives UI modernization', /providersLink = toolbar\.querySelector\(':scope > a\[href="\/providers\.html"\]'\)/.test(modernUi) && /providersLink.*'🧩 Providers'/.test(modernUi));
 }

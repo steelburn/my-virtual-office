@@ -22,9 +22,9 @@
         }
     })();
     </script>
-    <link rel="stylesheet" href="style.css?v=20260808-chat-follow-5">
+    <link rel="stylesheet" href="style.css?v=20260814-provider-markdown-1">
     <link rel="stylesheet" href="projects.css?v=20260722-1">
-    <link rel="stylesheet" href="ui-modern.css?v=20260808-mobile-ui-scroll-3">
+    <link rel="stylesheet" href="ui-modern.css?v=20260814-agent-preview-r2">
     <link rel="stylesheet" href="ui-themes.css?v=20260805-workspace-chat-1">
     <link rel="stylesheet" href="office-layouts.css?v=20260722-2">
     <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
@@ -107,6 +107,28 @@
                             <label class="mm-label" style="display:flex;align-items:center;gap:6px;">
                                 <input type="checkbox" id="mm-show-names" checked> Show agent names
                             </label>
+                        </div>
+                        <!-- Live agent previews -->
+                        <div class="mm-section">
+                            <div class="mm-section-title">🖥️ Preview Bubbles</div>
+                            <div style="font-size:10px;color:#777;margin:0 0 9px;line-height:1.45;">
+                                Show live files, media, webpages, and Agent Browser activity above each agent's assigned desk.
+                            </div>
+                            <label class="mm-label" for="mm-preview-display">Display size</label>
+                            <select id="mm-preview-display" class="mm-input" title="Consistent stays the same screen size. World-scaled changes with office zoom.">
+                                <option value="consistent">Consistent size</option>
+                                <option value="world">World-scaled</option>
+                            </select>
+                            <label class="mm-label" for="mm-preview-size">Bubble size</label>
+                            <select id="mm-preview-size" class="mm-input">
+                                <option value="large">Large</option>
+                                <option value="medium">Medium</option>
+                                <option value="small">Small</option>
+                            </select>
+                            <label class="mm-label" for="mm-preview-zoom" style="display:flex;justify-content:space-between;gap:8px;">
+                                <span>Content zoom</span><output id="mm-preview-zoom-value" for="mm-preview-zoom">100%</output>
+                            </label>
+                            <input type="range" id="mm-preview-zoom" min="50" max="200" step="10" value="100" style="width:100%;accent-color:#ffd600;">
                         </div>
                         <!-- API Usage -->
                         <div class="mm-section">
@@ -755,6 +777,33 @@
         </div>
     </div>
 
+    <!-- Shared live agent preview window -->
+    <div id="agentPreviewPanel" class="agent-preview-panel" style="display:none" role="dialog" aria-modal="false" aria-labelledby="agentPreviewPanelTitle">
+        <div class="browser-resize-handle top" data-resize="n"></div>
+        <div class="browser-resize-handle bottom" data-resize="s"></div>
+        <div class="browser-resize-handle left" data-resize="w"></div>
+        <div class="browser-resize-handle right" data-resize="e"></div>
+        <div class="browser-resize-handle top-left" data-resize="nw"></div>
+        <div class="browser-resize-handle top-right" data-resize="ne"></div>
+        <div class="browser-resize-handle bottom-left" data-resize="sw"></div>
+        <div class="browser-resize-handle bottom-right" data-resize="se"></div>
+        <div class="agent-preview-panel-header">
+            <span id="agentPreviewPanelTitle">🖥️ Agent Preview</span>
+            <div class="agent-preview-panel-controls">
+                <button type="button" data-preview-action="refresh" title="Refresh current preview" aria-label="Refresh current preview">↻</button>
+                <button type="button" data-preview-action="open" title="Open original" aria-label="Open original">↗</button>
+                <button type="button" class="agent-preview-snap-control" data-preview-action="snap-left" title="Snap left" aria-label="Snap left">◧</button>
+                <button type="button" class="agent-preview-snap-control" data-preview-action="snap-right" title="Snap right" aria-label="Snap right">◨</button>
+                <button type="button" data-preview-action="maximize" title="Maximize or restore" aria-label="Maximize or restore">□</button>
+                <button type="button" class="agent-preview-close" data-preview-action="close" title="Close preview window" aria-label="Close preview window">×</button>
+            </div>
+        </div>
+        <div class="agent-preview-tabs" role="tablist" aria-label="Open agent previews"></div>
+        <div class="agent-preview-meta" role="status" aria-live="polite">Waiting for agent work</div>
+        <div class="agent-preview-stage"></div>
+    </div>
+    <div id="previewBubbleContainer" aria-label="Live agent preview bubbles"></div>
+
     <!-- Agent Workspace Window -->
     <div id="agent-workspace-menu" class="agent-workspace-menu hidden">
         <button id="agent-workspace-open-btn" type="button">Open agent workspace</button>
@@ -841,7 +890,7 @@
         setTimeout(resizeCanvas, 320);
     }
     </script>
-    <script src="game.js?v=20260808-mobile-ui-scroll-3"></script>
+    <script src="game.js?v=20260814-agent-preview-r1"></script>
     <script src="office-layouts.js?v=20260723-place-only-1"></script>
     <script src="browser-panel.js?v=20260722-ui-perf-1"></script>
     <script src="projects.js?v=20260722-ui-perf-1"></script>
@@ -1068,12 +1117,14 @@
     </script>
     <!-- marked.js v15.0.12 - bundled locally for airgapped/offline use -->
     <script src="marked.min.js"></script>
+    <script src="chat-markdown.js?v=20260814-provider-markdown-1"></script>
     <script src="chat-events.js?v=20260807-provider-sdk-1"></script>
-    <script src="chat.js?v=20260811-hermes-session-restore-1"></script>
+    <script src="chat.js?v=20260814-agent-preview-r1"></script>
+    <script type="module" src="agent-preview-bootstrap.mjs?v=20260814-agent-preview-r1"></script>
     <script src="sms-panel.js?v=20260722-ui-perf-1"></script>
     <script src="pc-monitor.js?v=0"></script>
     <script src="api-usage.js?v=20260610-native-usage"></script>
-    <script src="ui-modern.js?v=20260807-provider-sdk-2"></script>
+    <script src="ui-modern.js?v=20260814-agent-preview-r2"></script>
     <script src="ui-themes.js?v=20260722-5"></script>
     <script>
     // License check — demo watermark + feature gates

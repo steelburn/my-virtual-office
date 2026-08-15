@@ -367,6 +367,96 @@ class CodexProvider:
             self._clear_auth_error()
         return result
 
+    def start_chat_stream(
+        self,
+        profile: str,
+        message: str,
+        session_id: str | None = None,
+        timeout_sec: int | None = None,
+    ) -> "CodexAppStreamRun":
+        """Start a Codex app-server turn and return a live event reader."""
+        if not self.prefer_app_server:
+            raise RuntimeError("Codex streaming requires the app-server protocol")
+        if not self.is_available():
+            raise RuntimeError(f"Codex CLI is not available at {self.binary}")
+        if not message.strip():
+            raise ValueError("message is required")
+
+        self._ensure_paths()
+        safe_profile = self._safe_profile_name(profile)
+        agent_dir = self._runtime_workspace(safe_profile)
+        if not os.path.isdir(agent_dir):
+            raise FileNotFoundError(f"Codex agent workspace not found: {agent_dir}")
+
+        timeout = int(timeout_sec or self.timeout_sec)
+        client = CodexAppServerClient(self, cwd=agent_dir, timeout_sec=timeout + 30)
+        state = CodexAppRunState()
+        buffered_events: list[dict[str, Any]] = []
+
+        def capture_initial(msg: dict[str, Any]) -> None:
+            state.handle_message(msg)
+            event = state.event_from_message(msg)
+            if event:
+                buffered_events.append(event)
+
+        client.profile = safe_profile
+        client.approval_callback = state.set_approval
+
+        try:
+            client.initialize()
+            thread_params = {
+                "cwd": agent_dir,
+                "approvalPolicy": self.approval_policy,
+                "sandbox": self.sandbox,
+                "threadSource": "user",
+            }
+            developer_instructions = self._thread_instructions(agent_dir, safe_profile)
+            if developer_instructions:
+                thread_params["developerInstructions"] = developer_instructions
+            if self.model:
+                thread_params["model"] = self.model
+            if session_id:
+                thread_params["threadId"] = session_id
+                thread_response = client.request("thread/resume", thread_params, event_handler=capture_initial)
+            else:
+                thread_response = client.request("thread/start", thread_params, event_handler=capture_initial)
+            thread = ((thread_response.get("result") or {}).get("thread") or {}) if isinstance(thread_response, dict) else {}
+            state.thread_id = str(thread.get("id") or thread.get("sessionId") or session_id or "")
+            if not state.thread_id:
+                raise RuntimeError("Codex app-server did not return a thread id")
+
+            turn_response = client.request(
+                "turn/start",
+                {
+                    "threadId": state.thread_id,
+                    "input": [{"type": "text", "text": message, "text_elements": []}],
+                    "cwd": agent_dir,
+                    "approvalPolicy": self.approval_policy,
+                    "model": self.model or None,
+                },
+                event_handler=capture_initial,
+            )
+            turn = ((turn_response.get("result") or {}).get("turn") or {}) if isinstance(turn_response, dict) else {}
+            state.turn_id = str(turn.get("id") or state.turn_id or "")
+            client.thread_id = state.thread_id
+            client.turn_id = state.turn_id
+            with _ACTIVE_RUNS_LOCK:
+                _ACTIVE_RUNS[safe_profile] = client
+            return CodexAppStreamRun(
+                provider=self,
+                profile=safe_profile,
+                client=client,
+                state=state,
+                timeout_sec=timeout,
+                buffered_events=buffered_events,
+            )
+        except Exception:
+            with _ACTIVE_RUNS_LOCK:
+                if _ACTIVE_RUNS.get(safe_profile) is client:
+                    _ACTIVE_RUNS.pop(safe_profile, None)
+            client.close()
+            raise
+
     def _auth_file_mtime(self) -> float:
         try:
             return os.path.getmtime(os.path.join(self.home_path or "", "auth.json"))
@@ -1350,6 +1440,8 @@ class CodexAppServerClient:
         if self._closed:
             return
         self._closed = True
+        with self._approval_lock:
+            self._approval_lock.notify_all()
         try:
             if self.proc.poll() is None:
                 self.proc.terminate()
@@ -1357,15 +1449,38 @@ class CodexAppServerClient:
                     self.proc.wait(timeout=3)
                 except subprocess.TimeoutExpired:
                     self.proc.kill()
+                    self.proc.wait(timeout=3)
         except Exception:
             pass
+        for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
+            try:
+                if stream is not None and not stream.closed:
+                    stream.close()
+            except Exception:
+                pass
 
     def _handle_or_forward(self, msg: dict[str, Any], event_handler: Callable[[dict[str, Any]], None] | None = None) -> None:
-        if "id" in msg and msg.get("method"):
-            self._answer_server_request(msg)
+        if self.handle_server_request(msg):
             return
         if event_handler:
             event_handler(msg)
+
+    def handle_server_request(self, msg: dict[str, Any]) -> bool:
+        if "id" not in msg or not msg.get("method"):
+            return False
+        method = str(msg.get("method") or "")
+        if self._is_approval_request(method):
+            # Keep the stream reader free to publish the approval while the
+            # JSON-RPC response waits for the browser's decision.
+            threading.Thread(
+                target=self._answer_server_request,
+                args=(msg,),
+                daemon=True,
+                name=f"codex-approval-{msg.get('id')}",
+            ).start()
+        else:
+            self._answer_server_request(msg)
+        return True
 
     def _answer_server_request(self, msg: dict[str, Any]) -> None:
         request_id = msg.get("id")
@@ -1446,6 +1561,9 @@ class CodexAppServerClient:
                 self.approval_callback(dict(approval))
             except Exception:
                 pass
+
+    def approval_from_request(self, msg: dict[str, Any]) -> dict[str, Any]:
+        return self._approval_from_request(msg)
 
     def _approval_from_request(self, msg: dict[str, Any]) -> dict[str, Any]:
         method = str(msg.get("method") or "")
@@ -1674,6 +1792,68 @@ class CodexAppRunState:
                     self._handle_item(item, completed=True)
             self.completed = True
 
+    def event_from_message(self, msg: dict[str, Any]) -> dict[str, Any] | None:
+        method = str(msg.get("method") or "")
+        params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+        base = {
+            "threadId": self.thread_id,
+            "sessionId": self.thread_id,
+            "turnId": self.turn_id,
+            "runId": self.turn_id,
+            "reply": self.reply_text(),
+            "tools": self.tools(),
+            "thinking": self.thinking(),
+            "status": self.status,
+            "error": self.error_text(),
+            "approval": self.approval(),
+            "tokenUsage": self.token_usage(),
+        }
+        if method == "turn/started":
+            return {"event": "run.started", **base}
+        if method == "item/agentMessage/delta":
+            return {"event": "message.delta", **base, "delta": str(params.get("delta") or "")}
+        if method in {"item/reasoning/summaryTextDelta", "item/reasoning/textDelta", "turn/plan/updated"}:
+            return {"event": "reasoning.available", **base}
+        if method == "thread/tokenUsage/updated":
+            return {"event": "usage.updated", **base}
+        if method in {"item/started", "item/completed"}:
+            item = params.get("item") if isinstance(params.get("item"), dict) else {}
+            tool = self._tool_from_app_item(item, completed=(method == "item/completed"))
+            if tool:
+                status = str(tool.get("status") or "")
+                event_name = "tool.completed" if status == "done" else "tool.failed" if status == "error" else "tool.started"
+                return {
+                    "event": event_name,
+                    **base,
+                    "toolCard": tool,
+                    "toolCallId": tool.get("id") or "",
+                    "tool": tool.get("name") or "tool",
+                    "name": tool.get("name") or "tool",
+                    "preview": tool.get("arguments") or {},
+                    "output": tool.get("result") or "",
+                }
+        if method == "item/commandExecution/outputDelta":
+            item_id = str(params.get("itemId") or "")
+            tool = dict(self._tools.get(item_id) or {})
+            if tool:
+                return {
+                    "event": "tool.updated",
+                    **base,
+                    "toolCard": tool,
+                    "toolCallId": tool.get("id") or item_id,
+                    "tool": tool.get("name") or "shell",
+                    "name": tool.get("name") or "shell",
+                    "delta": str(params.get("delta") or ""),
+                    "output": tool.get("result") or "",
+                }
+        if method == "error":
+            return {"event": "run.failed", **base, "error": self.error_text() or "Codex turn failed"}
+        if method == "turn/completed":
+            ok = self.status in {"completed", "interrupted"} and not (self.status == "completed" and self.error_text())
+            event_name = "run.cancelled" if self.status == "interrupted" else "run.completed" if ok else "run.failed"
+            return {"event": event_name, **base, "ok": ok}
+        return None
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "threadId": self.thread_id,
@@ -1810,3 +1990,98 @@ class CodexAppRunState:
         if completed:
             return "done"
         return "running"
+
+
+class CodexAppStreamRun:
+    """Reads one live Codex app-server turn as normalized stream events."""
+
+    def __init__(
+        self,
+        *,
+        provider: CodexProvider,
+        profile: str,
+        client: CodexAppServerClient,
+        state: CodexAppRunState,
+        timeout_sec: int,
+        buffered_events: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.provider = provider
+        self.profile = profile
+        self.client = client
+        self.state = state
+        self.timeout_sec = int(timeout_sec)
+        self.started_at = time.time()
+        self._buffered_events = list(buffered_events or [])
+        self._closed = False
+        self._timeout_emitted = False
+
+    @property
+    def thread_id(self) -> str:
+        return self.state.thread_id
+
+    @property
+    def turn_id(self) -> str:
+        return self.state.turn_id
+
+    def next_event(self, timeout: float = 0.5) -> dict[str, Any] | None:
+        if self._buffered_events:
+            return self._buffered_events.pop(0)
+        if self.state.completed:
+            return None
+        if time.time() > self.started_at + self.timeout_sec:
+            if not self._timeout_emitted:
+                self._timeout_emitted = True
+                self.client.interrupt()
+                self.state.status = "failed"
+                self.state.completed = True
+                self.state._errors.append("Codex app-server call timed out")
+                return {"event": "run.failed", **self.state.snapshot(), "ok": False}
+            return None
+
+        msg = self.client.next_message(timeout=timeout)
+        if msg is None:
+            if self.client.poll() is not None:
+                stderr = self.client.stderr_text()
+                self.state.status = "failed"
+                self.state.completed = True
+                if stderr:
+                    self.state._errors.append(stderr)
+                return {"event": "run.failed", **self.state.snapshot(), "ok": False}
+            return None
+        if self.client.handle_server_request(msg):
+            return self._event_from_server_request(msg)
+        self.state.handle_message(msg)
+        return self.state.event_from_message(msg)
+
+    def snapshot(self) -> dict[str, Any]:
+        return self.state.snapshot()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        with _ACTIVE_RUNS_LOCK:
+            if _ACTIVE_RUNS.get(self.profile) is self.client:
+                _ACTIVE_RUNS.pop(self.profile, None)
+        self.client.close()
+
+    def _event_from_server_request(self, msg: dict[str, Any]) -> dict[str, Any] | None:
+        method = str(msg.get("method") or "")
+        params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+        item = params.get("item") if isinstance(params.get("item"), dict) else {}
+        if self.client._is_approval_request(method):
+            approval = self.client.approval_from_request(msg)
+            self.state.set_approval(approval)
+            return {"event": "approval.request", **self.state.snapshot(), "approval": approval}
+        if method in {"item/tool/requestUserInput", "mcpServer/elicitation/request"}:
+            return {
+                "event": "approval.request",
+                "approval": {
+                    "id": str(msg.get("id") or ""),
+                    "kind": method,
+                    "title": item.get("title") or params.get("title") or "Codex input requested",
+                    "description": item.get("description") or params.get("message") or "",
+                    "status": "auto-answered",
+                },
+            }
+        return None

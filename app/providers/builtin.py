@@ -18,6 +18,7 @@ from .claude_code import ClaudeCodeProvider
 from .codex import CodexProvider
 from .file_safety import backup_files
 from .hermes import HermesProvider, discover_api_connections
+from .path_mapping import is_windows_absolute, map_host_path_to_container, normalize_host_path
 from .registry import ProviderManifest, ProviderRegistry
 
 try:
@@ -136,6 +137,84 @@ def _field(key: str, label: str, field_type: str = "text", **extra: Any) -> dict
     return {"key": key, "label": label, "type": field_type, **extra}
 
 
+def _endpoint_mode_field(key: str = "endpointMode", label: str = "Endpoint location") -> dict[str, Any]:
+    return _field(
+        key,
+        label,
+        "select",
+        default="auto",
+        options=[
+            {"value": "auto", "label": "Auto-detect"},
+            {"value": "host", "label": "Docker host"},
+            {"value": "container", "label": "Container local"},
+            {"value": "custom", "label": "Custom URL only"},
+        ],
+        help="Auto-detect probes one endpoint at a time and selects one authenticated connection before submitting work.",
+    )
+
+
+def _network_transport(
+    transport_id: str,
+    label: str,
+    *,
+    mode_key: str,
+    url_key: str,
+    schemes: list[str],
+    host_url: str,
+    container_url: str,
+) -> dict[str, Any]:
+    return {
+        "id": transport_id,
+        "label": label,
+        "kind": "network",
+        "modeKey": mode_key,
+        "urlKey": url_key,
+        "schemes": schemes,
+        "selection": "single-before-run",
+        "defaultEndpoints": [
+            {"url": host_url, "location": "host", "label": "Docker host"},
+            {"url": container_url, "location": "container", "label": "Container local"},
+        ],
+    }
+
+
+def _process_transport(label: str, *, executable_key: str = "binary", home_key: str = "homePath") -> dict[str, Any]:
+    return {
+        "id": "cli",
+        "label": label,
+        "kind": "process",
+        "executionBoundary": "server-runtime",
+        "executableKey": executable_key,
+        "homeKey": home_key,
+        "hostEndpointFallback": False,
+    }
+
+
+def _connection_schema(*transports: dict[str, Any]) -> dict[str, Any]:
+    return {"version": 1, "transports": [dict(item) for item in transports]}
+
+
+OPENCLAW_GATEWAY_TRANSPORT = _network_transport(
+    "gateway",
+    "OpenClaw Gateway",
+    mode_key="endpointMode",
+    url_key="gatewayUrl",
+    schemes=["ws", "wss"],
+    host_url="ws://host.docker.internal:18789",
+    container_url="ws://127.0.0.1:18789",
+)
+
+HERMES_API_TRANSPORT = _network_transport(
+    "api",
+    "Hermes API",
+    mode_key="apiEndpointMode",
+    url_key="apiUrl",
+    schemes=["http", "https"],
+    host_url="http://host.docker.internal:8642",
+    container_url="http://127.0.0.1:8642",
+)
+
+
 def _resource_access_field(*, inherit: bool = False) -> dict[str, Any]:
     options = []
     if inherit:
@@ -198,7 +277,13 @@ def _cli_settings_schema(
     upper_name = display_name or provider_id.replace("-", " ").title()
     connection_fields = [
         _field("enabled", "Enabled", "boolean", default=True),
-        _field("binary", "Executable", "path", placeholder=provider_id),
+        _field(
+            "binary",
+            "Executable",
+            "path",
+            placeholder=provider_id,
+            help="This CLI must be executable by the Virtual Office server runtime. A URL cannot substitute for a process provider without a real bridge.",
+        ),
         _field("homePath", f"{upper_name} home/config directory", "path"),
         _field("workspaceRoot", "Managed agent workspace root", "path"),
     ]
@@ -276,9 +361,7 @@ class OpenClawOfficeProvider:
     def __init__(self, context: dict[str, Any]) -> None:
         self.context = context
         self.home_path = os.path.abspath(os.path.expanduser(str(context.get("workspaceBase") or "~/.openclaw")))
-        self.gateway_home_path = os.path.abspath(os.path.expanduser(str(
-            context.get("gatewayWorkspaceBase") or self.home_path
-        )))
+        self.gateway_home_path = normalize_host_path(str(context.get("gatewayWorkspaceBase") or self.home_path))
         self.manifest = ProviderManifest(
             id="openclaw",
             name="OpenClaw",
@@ -293,6 +376,7 @@ class OpenClawOfficeProvider:
                 "models": True, "projects": True, "meetings": True, "agentToAgent": True,
                 "attachments": True, "tools": True,
             },
+            connection_schema=_connection_schema(OPENCLAW_GATEWAY_TRANSPORT),
             # OpenClaw's Gateway derives the native agent id from the name.
             # Do not present an editable id that the Gateway cannot honor.
             creation_schema=_creation_schema(model_field=True, include_native_id=False),
@@ -305,7 +389,8 @@ class OpenClawOfficeProvider:
                         "label": "Connection",
                         "fields": [
                             _field("homePath", "OpenClaw home", "path", required=True),
-                            _field("gatewayUrl", "Gateway WebSocket URL", "url", required=True, placeholder="ws://127.0.0.1:18789"),
+                            _endpoint_mode_field(),
+                            _field("gatewayUrl", "Preferred or custom Gateway WebSocket URL", "url", required=True, placeholder="ws://host.docker.internal:18789"),
                             _field("gatewayHttp", "Gateway HTTP URL", "url", placeholder="http://127.0.0.1:18789"),
                             _field("gatewayToken", "Gateway token", "secret", secret=True, placeholder="Keep existing token"),
                         ],
@@ -339,7 +424,13 @@ class OpenClawOfficeProvider:
     def test(self) -> dict[str, Any]:
         config = os.path.join(self.home_path, "openclaw.json")
         gateway_test = self.context.get("gatewayTest")
-        result = gateway_test() if callable(gateway_test) else {"ok": os.path.isfile(config)}
+        if callable(gateway_test):
+            try:
+                result = gateway_test((self.context.get("config") or {}).get("openclaw") or {})
+            except TypeError:
+                result = gateway_test()
+        else:
+            result = {"ok": os.path.isfile(config)}
         result = dict(result or {})
         result.setdefault("ok", os.path.isfile(config))
         result.update({"homePath": self.home_path, "configPath": config, "installed": os.path.isfile(config)})
@@ -384,14 +475,14 @@ class OpenClawOfficeProvider:
 
     def _local_workspace(self, workspace: str) -> str:
         """Translate a Gateway/host workspace path into the mounted path."""
-        normalized = os.path.abspath(os.path.expanduser(workspace))
-        try:
-            relative = os.path.relpath(normalized, self.gateway_home_path)
-        except ValueError:
-            return normalized
-        if relative == os.pardir or relative.startswith(os.pardir + os.sep):
-            return normalized
-        return os.path.abspath(os.path.join(self.home_path, relative))
+        mapped = map_host_path_to_container(
+            workspace,
+            host_root=self.gateway_home_path,
+            container_root=self.home_path,
+        )
+        if is_windows_absolute(workspace) and not mapped:
+            return ""
+        return mapped
 
     def create_agent(self, **body: Any) -> dict[str, Any]:
         callback = self.context.get("openclawCreate")
@@ -422,6 +513,27 @@ class OpenClawOfficeProvider:
         if not callable(callback):
             return {"ok": False, "error": "OpenClaw interrupt service is unavailable"}
         return callback(profile)
+
+    def pending_approval(self, profile: str) -> dict[str, Any]:
+        callback = self.context.get("openclawApprovalPending")
+        if callable(callback):
+            return callback(profile)
+        return {
+            "ok": True,
+            "pending": None,
+            "pending_count": 0,
+            "providerPath": "gateway-native",
+        }
+
+    def respond_approval(self, profile: str, approval_id: str, choice: str = "cancel") -> dict[str, Any]:
+        callback = self.context.get("openclawApprovalRespond")
+        if callable(callback):
+            return callback(profile, approval_id, choice)
+        return {
+            "ok": False,
+            "code": "native_transport_required",
+            "error": "OpenClaw approvals use the authenticated Gateway stream.",
+        }
 
     def update_profile(self, profile: str, patch: dict[str, Any]) -> dict[str, Any]:
         agent = next((row for row in self.discover_agents() if row.get("providerAgentId") == profile), None)
@@ -629,6 +741,16 @@ class HermesOfficeProvider(NativeOfficeProvider):
             for path in [normalized_path(item.get("workspace") or item.get("home"))]
             if path
         }
+
+        def normalized_identity(value: Any) -> str:
+            return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+        local_profiles_by_identity: dict[str, list[str]] = {}
+        for profile, item in local_by_profile.items():
+            for value in (profile, item.get("name")):
+                identity = normalized_identity(value)
+                if identity:
+                    local_profiles_by_identity.setdefault(identity, []).append(profile)
         connections = {
             str(item.get("id") or ""): item
             for item in configured_connections
@@ -646,6 +768,14 @@ class HermesOfficeProvider(NativeOfficeProvider):
             local_profile = local_profile_by_path.get(explicit_path, "") if explicit_path else ""
             if not local_profile and connection_id in local_by_profile:
                 local_profile = connection_id
+            if not local_profile:
+                identity_matches = {
+                    profile
+                    for value in (connection_id, connection.get("name"))
+                    for profile in local_profiles_by_identity.get(normalized_identity(value), [])
+                }
+                if len(identity_matches) == 1:
+                    local_profile = identity_matches.pop()
             if local_profile:
                 connection_local_profiles[connection_id] = local_profile
 
@@ -739,6 +869,16 @@ class HermesOfficeProvider(NativeOfficeProvider):
                 "agentCreate": cli_available,
                 "agentDelete": cli_available,
             })
+            if not item.get("apiAvailable"):
+                # The legacy CLI is a buffered compatibility transport. It can
+                # chat and manage sessions, but it cannot truthfully provide
+                # native live tools, reasoning, approvals, or interruption.
+                overrides.update({
+                    "streaming": False,
+                    "tools": False,
+                    "approvals": False,
+                    "interrupt": False,
+                })
             item["capabilityOverrides"] = overrides
         return list(merged.values())
 
@@ -776,6 +916,18 @@ class HermesOfficeProvider(NativeOfficeProvider):
             return callback(profile)
         return super().interrupt(profile)
 
+    def pending_approval(self, profile: str) -> dict[str, Any]:
+        callback = self.context.get("hermesApprovalPending")
+        if callable(callback):
+            return callback(profile)
+        return {"ok": True, "pending": None, "pending_count": 0}
+
+    def respond_approval(self, profile: str, approval_id: str, choice: str = "deny", **kwargs: Any) -> dict[str, Any]:
+        callback = self.context.get("hermesApprovalRespond")
+        if callable(callback):
+            return callback(profile, approval_id, choice, **kwargs)
+        return {"ok": False, "error": "Hermes approval service is unavailable"}
+
 
 def _manifest(
     provider_id: str,
@@ -789,6 +941,7 @@ def _manifest(
     provider_type: str = "harness",
     metadata: dict[str, Any] | None = None,
     settings_schema: dict[str, Any] | None = None,
+    connection_schema: dict[str, Any] | None = None,
 ) -> ProviderManifest:
     normalized_metadata = dict(metadata or {})
     normalized_metadata.setdefault("configKey", provider_id)
@@ -799,6 +952,7 @@ def _manifest(
         description=description,
         provider_type=provider_type,
         capabilities=capabilities,
+        connection_schema=connection_schema or _connection_schema(_process_transport(f"{name} CLI")),
         creation_schema=_creation_schema(model_field=True, directory_modes=directory_modes),
         settings_schema=settings_schema or {},
         resource_schema=resource_schema,
@@ -848,6 +1002,7 @@ def build_provider_registry(context: dict[str, Any]) -> ProviderRegistry:
             skill_schema=_skill_root("skills", "Hermes profile skills"),
             directory_modes=False,
             provider_type="runtime",
+            connection_schema=_connection_schema(HERMES_API_TRANSPORT, _process_transport("Hermes CLI")),
             settings_schema={
                 "version": 1,
                 "configKey": "hermes",
@@ -857,6 +1012,7 @@ def build_provider_registry(context: dict[str, Any]) -> ProviderRegistry:
                         "label": "Connections",
                         "fields": [
                             _field("enabled", "Enabled", "boolean", default=True),
+                            _endpoint_mode_field("apiEndpointMode", "Default API endpoint location"),
                             _field(
                                 "connections",
                                 "Native Hermes gateways",
@@ -867,7 +1023,8 @@ def build_provider_registry(context: dict[str, Any]) -> ProviderRegistry:
                                 itemFields=[
                                     _field("id", "Connection ID", "slug", required=True),
                                     _field("name", "Display name", "text", required=True),
-                                    _field("apiUrl", "API URL", "url", required=True, placeholder="http://127.0.0.1:8080"),
+                                    _endpoint_mode_field("endpointMode", "Endpoint location"),
+                                    _field("apiUrl", "Preferred or custom API URL", "url", required=True, placeholder="http://host.docker.internal:8642"),
                                     _field("apiKey", "API key", "secret", secret=True, placeholder="Keep existing key"),
                                     _field(
                                         "resourcePath",
@@ -1049,7 +1206,7 @@ def build_provider_registry(context: dict[str, Any]) -> ProviderRegistry:
                 {
                     "discover": True, "health": True, "chat": True, "streaming": True, "sessions": True,
                     "sessionCreate": True, "sessionDelete": True, "sessionSwitch": True, "interrupt": True,
-                    "approvals": True, "agentCreate": True, "agentDelete": True, "profileEdit": True,
+                    "approvals": False, "agentCreate": True, "agentDelete": True, "profileEdit": True,
                     "resourcesRead": True, "resourcesWrite": True, "skills": True, "models": True,
                     "projects": True, "meetings": True, "agentToAgent": True, "attachments": True, "tools": True,
                 },

@@ -201,6 +201,69 @@ class ProviderSdkRuntimeTests(unittest.TestCase):
             balanced = server._apply_agent_limit_balanced(office_rows)
         self.assertEqual([item["key"] for item in balanced], ["main", "hermes-primary", "codex-main"])
 
+    def test_named_api_connection_merges_with_matching_default_profile_without_resource_path(self):
+        hermes_home = os.path.join(self.temp_dir.name, "hermes-aster-home")
+        os.makedirs(hermes_home)
+        local = {
+            "id": "hermes-default", "statusKey": "hermes-default",
+            "providerAgentId": "default", "profile": "default", "name": "Aster",
+            "workspace": hermes_home, "home": hermes_home,
+            "connectionModes": ["cli"], "cliAvailable": True, "apiAvailable": False,
+        }
+        api = {
+            "id": "hermes-aster", "statusKey": "hermes-aster",
+            "providerAgentId": "aster", "profile": "aster", "connectionId": "aster",
+            "name": "Aster", "connectionModes": ["api"],
+            "cliAvailable": False, "apiAvailable": True,
+            "capabilityOverrides": {"streaming": True, "tools": True, "interrupt": True},
+        }
+        native = mock.Mock()
+        native.discover_agents.return_value = [local]
+        native.is_available.return_value = True
+        native.inspect_mounted_profile.side_effect = lambda profile, **kwargs: HermesProvider.inspect_mounted_profile(profile, **kwargs)
+        manifest = ProviderManifest(
+            id="hermes", name="Hermes",
+            capabilities={"discover": True, "chat": True, "sessions": True, "resourcesRead": True, "resourcesWrite": True},
+        )
+        context = {"config": {"hermes": {
+            "enabled": True, "localProfilesEnabled": True,
+            "resourceRoot": hermes_home, "resourceAccess": "read-write",
+            "connections": [{
+                "id": "aster", "name": "Aster", "apiUrl": "http://hermes.invalid:8642",
+                "apiKey": "configured", "resourcePath": "", "enabled": True,
+            }],
+        }}}
+        with mock.patch("providers.builtin.discover_api_connections", return_value=[api]):
+            rows = HermesOfficeProvider(native, context, manifest).discover_agents()
+
+        self.assertEqual(1, len(rows))
+        row = rows[0]
+        self.assertEqual("hermes-aster", row["id"])
+        self.assertEqual("default", row["localProfile"])
+        self.assertEqual(["cli", "api"], row["connectionModes"])
+        self.assertTrue(row["apiAvailable"])
+        self.assertIn("hermes-default", row["selectionAliases"])
+        self.assertIn("hermes-aster", row["selectionAliases"])
+
+    def test_agent_limit_prefers_api_hermes_over_cli_only_alias(self):
+        agents = [
+            {"key": "main", "providerKind": "openclaw", "available": True},
+            {
+                "key": "hermes-default", "providerKind": "hermes", "available": True,
+                "apiAvailable": False, "connectionModes": ["cli"],
+                "capabilities": {"streaming": False, "tools": False},
+            },
+            {
+                "key": "hermes-aster", "providerKind": "hermes", "available": True,
+                "apiAvailable": True, "connectionModes": ["api"],
+                "capabilities": {"streaming": True, "tools": True},
+            },
+            {"key": "codex-main", "providerKind": "codex", "available": True},
+        ]
+        with mock.patch.object(server, "get_agent_limit", return_value=3):
+            selected = server._apply_agent_limit_balanced(agents)
+        self.assertEqual(["main", "hermes-aster", "codex-main"], [row["key"] for row in selected])
+
     def test_settings_validation_rejects_bad_url_and_unknown_select(self):
         with self.assertRaises(ValueError):
             server._validate_provider_setting({"type": "url"}, "file:///etc/passwd", None, "url")

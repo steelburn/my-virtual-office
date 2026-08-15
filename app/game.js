@@ -7387,6 +7387,20 @@ function handleCanvasClick(clientX, clientY) {
     const world = screenToWorld(clientX, clientY);
     const cx = world.x;
     const cy = world.y;
+    // The physical desk monitor is the persistent toggle for that agent's
+    // live Preview Bubble. This runs before chat hit-testing because chat
+    // bubbles are deliberately laid out away from preview bubbles.
+    var previewAgent = _getAgentPreviewScreenHit(cx, cy);
+    if (previewAgent) {
+        var previewHub = window.VirtualOfficePreviews;
+        var previewTarget = previewHub && previewHub.getTargets().find(function(target) { return _agentPreviewMatches(previewAgent, target.agentId); });
+        if (!previewHub || !previewTarget) {
+            if (typeof _acpShowToast === 'function') _acpShowToast('ℹ️ No live previews for ' + (previewAgent.name || 'this agent') + ' yet.');
+            return;
+        }
+        previewHub.toggleBubble(previewTarget.agentId);
+        return;
+    }
     // Check chat bubble scroll arrows
     for (var si = 0; si < renderedChatBubbles.length; si++) {
         var sb = renderedChatBubbles[si];
@@ -7546,6 +7560,69 @@ function _worldToScreen(wx, wy) {
         y: dy * (rect.height / displayH) + rect.top
     };
 }
+
+function _agentPreviewAgentKey(agent) {
+    return String((agent && (agent.id || agent.statusKey || agent.providerAgentId || agent.name)) || '');
+}
+
+function _agentPreviewMatches(agent, agentId) {
+    if (!agent) return false;
+    var needle = String(agentId || '').toLowerCase();
+    return [agent.statusKey, agent.providerAgentId, agent.id, agent.name]
+        .some(function(value) { return value != null && String(value).toLowerCase() === needle; });
+}
+
+function _findAssignedDeskForPreview(agent) {
+    var furniture = (officeConfig && officeConfig.furniture) || [];
+    for (var i = 0; i < furniture.length; i++) {
+        var item = furniture[i];
+        if (!_isDeskItem(item)) continue;
+        if (_getDeskAgent(item) === agent) return item;
+    }
+    if (agent && agent.desk) return { type: agent.deskType === 'boss' ? 'bossDesk' : 'desk', x: agent.desk.x, y: agent.desk.y };
+    return null;
+}
+
+function _getAgentPreviewScreenHit(worldX, worldY) {
+    var furniture = (officeConfig && officeConfig.furniture) || [];
+    for (var i = furniture.length - 1; i >= 0; i--) {
+        var item = furniture[i];
+        if (!_isDeskItem(item)) continue;
+        var isBoss = item.type === 'bossDesk';
+        var left = item.x + (isBoss ? -43 : -23);
+        var right = item.x + (isBoss ? 43 : 23);
+        var top = item.y + (isBoss ? -40 : -52);
+        var bottom = item.y + (isBoss ? -9 : -20);
+        if (worldX >= left && worldX <= right && worldY >= top && worldY <= bottom) {
+            return _getDeskAgent(item);
+        }
+    }
+    return null;
+}
+
+window.__voResolveAgentPreviewAnchor = function(agentId) {
+    var agent = null;
+    for (var i = 0; i < agents.length; i++) {
+        if (_agentPreviewMatches(agents[i], agentId)) { agent = agents[i]; break; }
+    }
+    if (!agent) return null;
+    var desk = _findAssignedDeskForPreview(agent);
+    if (!desk) return null;
+    var isBoss = desk.type === 'bossDesk';
+    var anchor = _worldToScreen(desk.x, desk.y + (isBoss ? -38 : -50));
+    var control = _worldToScreen(desk.x, desk.y + (isBoss ? -23 : -35));
+    var canvasRect = canvas.getBoundingClientRect();
+    return {
+        x: anchor.x,
+        y: anchor.y,
+        controlX: control.x,
+        controlY: control.y,
+        visible: anchor.x >= canvasRect.left && anchor.x <= canvasRect.right && anchor.y >= canvasRect.top && anchor.y <= canvasRect.bottom,
+        cameraDistance: 40 / Math.max(0.1, Number(camera.zoom) || 1),
+        color: agent.color || '#ffd600',
+        name: agent.name || String(agentId || '')
+    };
+};
 
 function _isDeskItem(item) {
     return !!(item && (item.type === 'desk' || item.type === 'bossDesk'));
@@ -8680,6 +8757,14 @@ function getAgentChatCachedImage(url) {
 var lastChatPoll = 0;
 var chatLastMsg = {}; // agentKey -> last seen message text
 var chatTypewriterState = {};
+
+function renderAgentChatPlainText(value) {
+    var renderer = globalThis.VirtualOfficeChatMarkdown;
+    if (renderer && typeof renderer.renderPlainText === 'function') {
+        return renderer.renderPlainText(value || '');
+    }
+    return String(value || '');
+}
 var chatMinimized = {}; // agentKey -> bool
 var _chatInitialLoad = true; // first poll: minimize all by default
 var renderedChatBubbles = []; // for click detection
@@ -8819,7 +8904,7 @@ function pollAgentChat() {
             var lastMsg = msgs[msgs.length - 1];
             var sessionMeta = getAgentChatSessionMeta(msgs);
             var sessionSig = sessionMeta ? (sessionMeta.title + ':' + sessionMeta.sessionId + ':' + (sessionMeta.liveMode ? 'live' : '')) : '';
-            var lastText = lastMsg ? ((lastMsg.text || '') + (getAgentChatActivitySignature(lastMsg) ? ' [activity]' : '') + (getAgentChatFirstImage(lastMsg) ? ' [image]' : '') + (sessionSig ? ' [session:' + sessionSig + ']' : '')) : '';
+            var lastText = lastMsg ? (renderAgentChatPlainText(lastMsg.text || '') + (getAgentChatActivitySignature(lastMsg) ? ' [activity]' : '') + (getAgentChatFirstImage(lastMsg) ? ' [image]' : '') + (sessionSig ? ' [session:' + sessionSig + ']' : '')) : '';
             if (lastText !== chatLastMsg[key]) {
                 chatTypewriterState[key] = { charIdx: 0, targetText: lastText, done: false, msgIdx: msgs.length - 1 };
                 // On first load, keep minimized. After that, auto-expand on new messages.
@@ -8853,7 +8938,7 @@ function pollAgentChat() {
                 var prefix = timeTag + (isUser ? (senderLabel ? senderLabel + ': ' : 'IN: ') : '');
                 if (mi < msgs.length - 1) {
                     // Non-last messages: pre-wrap now (they never change)
-                    var displayText = msg.text || '';
+                    var displayText = renderAgentChatPlainText(msg.text || '');
                     var activityLines = getAgentChatActivityLines(msg);
                     if (displayText.length > 350) displayText = displayText.substring(0, 347) + '...';
                     var lines = wrapChatText(prefix + displayText, 155);
@@ -8943,6 +9028,53 @@ function handleChatBubbleClick(canvasX, canvasY) {
     return false;
 }
 
+function _agentPreviewWorldObstacles() {
+    var previewHub = window.VirtualOfficePreviews;
+    if (!previewHub || typeof previewHub.getVisibleBubbleRects !== 'function') return [];
+    return previewHub.getVisibleBubbleRects().map(function(rect) {
+        var topLeft = screenToWorld(rect.left, rect.top);
+        var bottomRight = screenToWorld(rect.right, rect.bottom);
+        return {
+            x: Math.min(topLeft.x, bottomRight.x),
+            y: Math.min(topLeft.y, bottomRight.y),
+            w: Math.abs(bottomRight.x - topLeft.x),
+            h: Math.abs(bottomRight.y - topLeft.y)
+        };
+    });
+}
+
+function _chatRectOverlaps(a, b, gap) {
+    gap = Number(gap) || 0;
+    return a.x < b.x + b.w + gap && a.x + a.w + gap > b.x && a.y < b.y + b.h + gap && a.y + a.h + gap > b.y;
+}
+
+function _resolveChatPreviewObstacleCollisions(chatBubbles, obstacles, bounds) {
+    if (!obstacles.length) return chatBubbles;
+    chatBubbles.forEach(function(bubble, bubbleIndex) {
+        obstacles.forEach(function(obstacle) {
+            if (!_chatRectOverlaps(bubble, obstacle, 8)) return;
+            var candidates = [
+                { x: bubble.x, y: obstacle.y - bubble.h - 8 },
+                { x: bubble.x, y: obstacle.y + obstacle.h + 8 },
+                { x: obstacle.x - bubble.w - 8, y: bubble.y },
+                { x: obstacle.x + obstacle.w + 8, y: bubble.y }
+            ];
+            candidates.forEach(function(candidate) {
+                candidate.x = Math.max(bounds.minX, Math.min(bounds.maxX - bubble.w, candidate.x));
+                candidate.y = Math.max(bounds.minY, Math.min(bounds.maxY - bubble.h, candidate.y));
+                var probe = { x: candidate.x, y: candidate.y, w: bubble.w, h: bubble.h };
+                var overlaps = obstacles.filter(function(item) { return _chatRectOverlaps(probe, item, 8); }).length;
+                overlaps += chatBubbles.slice(0, bubbleIndex).filter(function(item) { return _chatRectOverlaps(probe, item, 3); }).length;
+                candidate.score = overlaps * 100000 + Math.abs(candidate.x - bubble.x) + Math.abs(candidate.y - bubble.y);
+            });
+            candidates.sort(function(a, b) { return a.score - b.score; });
+            bubble.x = candidates[0].x;
+            bubble.y = candidates[0].y;
+        });
+    });
+    return chatBubbles;
+}
+
 function drawChatBubbles() {
     var chatBubbles = [];
     renderedChatBubbles = [];
@@ -8985,7 +9117,7 @@ function drawChatBubbles() {
             if (entry._lastMsg) {
                 // Last message — handle typewriter per-frame (only this one wraps)
                 var tw = chatTypewriterState[agent.statusKey];
-                var displayText = entry.msg.text || '';
+                var displayText = renderAgentChatPlainText(entry.msg.text || '');
                 if (tw && !tw.done && tw.msgIdx === msgs.length - 1) {
                     tw.charIdx = Math.min(tw.charIdx + 2, tw.targetText.length);
                     displayText = tw.targetText.substring(0, tw.charIdx);
@@ -9063,6 +9195,13 @@ function drawChatBubbles() {
             chatBubbles[ri].y = Math.max(_cbMinY, Math.min(_cbMaxY - chatBubbles[ri].h, chatBubbles[ri].y));
         }
     }
+
+    _resolveChatPreviewObstacleCollisions(chatBubbles, _agentPreviewWorldObstacles(), {
+        minX: _cbMinX,
+        minY: _cbMinY,
+        maxX: _cbMaxX,
+        maxY: _cbMaxY
+    });
 
     // Draw
     for (var bi = 0; bi < chatBubbles.length; bi++) {
@@ -11788,6 +11927,9 @@ function loop() {
     ctx.fillRect(0, 0, displayW, displayH);
 
     // Draw world objects with camera
+    if (window.VirtualOfficePreviews && typeof window.VirtualOfficePreviews.updatePositions === 'function') {
+        window.VirtualOfficePreviews.updatePositions();
+    }
     ctx.save();
     applyCameraTransform();
     // Clip to world bounds so nothing draws outside
@@ -13416,6 +13558,17 @@ function _mmLoadCurrentSettings() {
         if (brCdpEl) brCdpEl.value = brCdp;
         if (brViewerEl) brViewerEl.value = brViewer;
         if (brFields) brFields.style.display = brEnabled ? "block" : "none";
+        // Live Preview Bubbles
+        var previewCfg = ((cfg.office || {}).previewBubbles) || {};
+        var previewDisplay = document.getElementById('mm-preview-display');
+        var previewSize = document.getElementById('mm-preview-size');
+        var previewZoom = document.getElementById('mm-preview-zoom');
+        var previewZoomValue = document.getElementById('mm-preview-zoom-value');
+        if (previewDisplay) previewDisplay.value = previewCfg.displayMode === 'world' ? 'world' : 'consistent';
+        if (previewSize) previewSize.value = ['small', 'medium', 'large'].indexOf(previewCfg.size) >= 0 ? previewCfg.size : 'large';
+        var normalizedZoom = Math.max(50, Math.min(200, Math.round((Number(previewCfg.contentZoom) || 100) / 10) * 10));
+        if (previewZoom) previewZoom.value = normalizedZoom;
+        if (previewZoomValue) previewZoomValue.value = normalizedZoom + '%';
     }).catch(function(){});
     // Load display prefs from localStorage
     var prefs = {};
@@ -13445,6 +13598,13 @@ function _mmLoadCurrentSettings() {
         var f = document.getElementById('mm-browser-fields');
         if (f) f.style.display = this.checked ? 'block' : 'none';
     });
+})();
+
+// Preview zoom label updates immediately while dragging the settings slider.
+(function() {
+    var input = document.getElementById('mm-preview-zoom');
+    var output = document.getElementById('mm-preview-zoom-value');
+    if (input && output) input.addEventListener('input', function() { output.value = input.value + '%'; });
 })();
 
 // Hermes toggle in settings
@@ -13713,7 +13873,15 @@ function mmSaveSettings() {
     if (_hCb) {
         config.hermes = _mmHermesPayload().hermes;
     }
-    config.office = { name: officeName || 'Virtual Office' };
+    var previewDisplay = (document.getElementById('mm-preview-display') || {}).value;
+    var previewSize = (document.getElementById('mm-preview-size') || {}).value;
+    var previewZoom = Number((document.getElementById('mm-preview-zoom') || {}).value) || 100;
+    var previewSettings = {
+        displayMode: previewDisplay === 'world' ? 'world' : 'consistent',
+        size: ['small', 'medium', 'large'].indexOf(previewSize) >= 0 ? previewSize : 'large',
+        contentZoom: Math.max(50, Math.min(200, Math.round(previewZoom / 10) * 10))
+    };
+    config.office = { name: officeName || 'Virtual Office', previewBubbles: previewSettings };
     config.weather = { location: weather || null };
     // PC Metrics
     var _pcmCb = document.getElementById("mm-pcmetrics-enable");
@@ -13742,21 +13910,30 @@ function mmSaveSettings() {
         };
     }
 
+    var previousPreviewSettings = window.VirtualOfficePreviews && window.VirtualOfficePreviews.getSettings
+        ? window.VirtualOfficePreviews.getSettings() : null;
+    window.dispatchEvent(new CustomEvent('vo:settings-saved', { detail: { config: { office: { previewBubbles: previewSettings } } } }));
+
     fetch('/setup/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config)
     }).then(function(r){ return r.json(); }).then(function(d) {
         if (d.ok) {
-            _acpShowToast('💾 Settings saved! Hard refresh (Ctrl+Shift+R) to apply all changes.');
+            fetch('/vo-config').then(function(r) { return r.json(); }).then(function(savedConfig) {
+                window.dispatchEvent(new CustomEvent('vo:settings-saved', { detail: { config: savedConfig } }));
+            }).catch(function(){});
+            _acpShowToast('💾 Settings saved. Preview bubbles applied now; connection changes may need a refresh.');
             // Update brand title live
             var brandEl = document.getElementById('brand-title');
             if (brandEl && officeName) brandEl.textContent = officeName.toUpperCase();
             if (officeName) document.title = officeName;
         } else {
+            if (previousPreviewSettings) window.dispatchEvent(new CustomEvent('vo:settings-saved', { detail: { config: { office: { previewBubbles: previousPreviewSettings } } } }));
             _acpShowToast('❌ Save failed');
         }
     }).catch(function(e) {
+        if (previousPreviewSettings) window.dispatchEvent(new CustomEvent('vo:settings-saved', { detail: { config: { office: { previewBubbles: previousPreviewSettings } } } }));
         _acpShowToast('❌ Save failed: ' + e.message);
     });
 }

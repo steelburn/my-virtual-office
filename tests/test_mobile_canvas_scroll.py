@@ -27,5 +27,5 @@ def test_mobile_canvas_chat_bubble_touch_scroll_remains_available():
 
 
 def test_mobile_ui_scroll_assets_are_cache_busted_together():
-    assert 'ui-modern.css?v=20260808-mobile-ui-scroll-3' in INDEX_HTML
-    assert 'game.js?v=20260808-mobile-ui-scroll-3' in INDEX_HTML
+    assert 'ui-modern.css?v=20260814-agent-preview-r2' in INDEX_HTML
+    assert 'game.js?v=20260814-agent-preview-r1' in INDEX_HTML
