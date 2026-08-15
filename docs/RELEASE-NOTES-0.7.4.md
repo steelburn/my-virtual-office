@@ -35,7 +35,9 @@ Browser previews require the browser integration to be enabled and configured fo
 
 ## Upgrade
 
-Use tag `v0.7.4` or pull `ghcr.io/eliautobot/my-virtual-office:0.7.4`, then recreate only the Virtual Office service. Preserve the existing `vo-data` and provider data volumes.
+Use source tag `v0.7.4`, rebuild the Virtual Office service, and preserve the existing `vo-data` and provider data volumes.
+
+The automated multi-architecture container image is not currently available for this tag. The `v0.7.3` image remains the latest published registry image until automated package publishing resumes.
 
 ## Rollback
 
